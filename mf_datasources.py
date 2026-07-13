@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -82,6 +83,22 @@ def _get_text(url: str, timeout: int = 60) -> Optional[str]:
         resp = r.get(url, timeout=timeout, headers={"User-Agent": "mf-pipeline/2.0"})
         resp.raise_for_status()
         return resp.text
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("GET %s failed: %s", url, exc)
+        return None
+
+
+def _get_bytes(url: str, referer: str, timeout: int = 60) -> Optional[bytes]:
+    r = _requests()
+    if r is None:
+        return None
+    try:
+        resp = r.get(url, timeout=timeout, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Referer": referer})
+        resp.raise_for_status()
+        return resp.content
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("GET %s failed: %s", url, exc)
         return None
@@ -340,8 +357,104 @@ class CapBandAdapter:
     """
 
     LOCAL = CACHE / "amfi_cap_classification.csv"
+    XLSX_BASE = "https://www.amfiindia.com/Themes/Theme1/downloads/"
+    XLSX_BASE_ALT = "https://portal.amfiindia.com/spages/"
+    LINK_RE = re.compile(r'href="([^"]*AverageMarketCapitalization(\d{1,2}[A-Za-z]{3}\d{4})\.xlsx)"', re.I)
+    ALLOWED_HOSTS = frozenset({"amfiindia.com", "www.amfiindia.com", "portal.amfiindia.com"})
+
+    @classmethod
+    def _allowed(cls, url: str) -> bool:
+        """A scraped href host is untrusted input — only fetch/parse AMFI over https."""
+        p = urlparse(url)
+        return p.scheme == "https" and p.netloc.lower() in cls.ALLOWED_HOSTS
+
+    def _discover_url(self) -> Optional[str]:
+        """Scrape AMFI_CAPLIST_PAGE for the most recently dated xlsx link (full href, so a
+        host change on AMFI's side — seen in practice — doesn't break discovery)."""
+        html = _get_text(AMFI_CAPLIST_PAGE, timeout=30)
+        if not html:
+            return None
+        dated = []
+        for href, datestr in self.LINK_RE.findall(html):
+            try:
+                dated.append((datetime.strptime(datestr, "%d%b%Y").date(),
+                              urljoin(AMFI_CAPLIST_PAGE, href)))
+            except ValueError:
+                continue
+        if not dated:
+            return None
+        dated.sort(key=lambda x: x[0], reverse=True)
+        return dated[0][1]
+
+    def _fallback_urls(self) -> List[str]:
+        """Construct candidate URLs from the most recent completed half-year end
+        (30-Jun/31-Dec), skipping a period too recent to plausibly be published yet
+        (AMFI publish lag), tried against both known download hosts."""
+        today = date.today()
+        candidates = sorted({c for c in (date(today.year, 12, 31), date(today.year, 6, 30),
+                                         date(today.year - 1, 12, 31), date(today.year - 1, 6, 30))
+                             if c <= today}, reverse=True)
+        period = next((c for c in candidates if (today - c).days >= 45), candidates[-1])
+        fname = f"AverageMarketCapitalization{period.day}{period.strftime('%b')}{period.year}.xlsx"
+        return [self.XLSX_BASE + fname, self.XLSX_BASE_ALT + fname]
+
+    def fetch(self) -> bool:
+        """Download the latest AMFI cap-list xlsx and write a clean symbol,company,cap_band
+        CSV to self.LOCAL (raw columns are NOT dumped — the loader's "cap" substring sniff
+        would match the Market-Cap NUMBER columns first and break)."""
+        discovered = self._discover_url()
+        urls = ([discovered] if discovered else []) + self._fallback_urls()
+        url, raw = None, None
+        for candidate in urls:
+            if not candidate or not self._allowed(candidate):
+                if candidate:
+                    LOGGER.warning("Skipping non-AMFI cap-list URL: %s", candidate)
+                continue
+            raw = _get_bytes(candidate, referer=AMFI_CAPLIST_PAGE)
+            if raw is not None:
+                url = candidate
+                break
+        if raw is None:
+            return False
+        try:
+            (CACHE / Path(url).name).write_bytes(raw)
+            df = pd.read_excel(CACHE / Path(url).name, header=1, engine="openpyxl")
+            cat_col = next(c for c in df.columns if "categor" in c.lower())
+
+            def clean_sym(col: str) -> pd.Series:
+                s = df[col].astype(str).str.strip()
+                return s.mask(s.str.lower().isin(["", "-", "nan", "none"]))
+
+            sym = clean_sym("NSE Symbol").fillna(clean_sym("BSE Symbol"))
+            band = (df[cat_col].astype(str).str.extract(r"(?i)(large|mid|small)", expand=False)
+                    .str.lower().str.capitalize() + " Cap")
+            company = df["Company name"].astype(str).str.strip()
+            out = pd.DataFrame({"symbol": sym, "company": company, "cap_band": band})
+            # Keep rows lacking an exchange symbol when the company name is usable —
+            # band_lookup() keys on company too, so dropping them loses ~180 small-caps.
+            good_company = ~company.str.lower().isin(["", "nan", "none"])
+            out = out[good_company & out["cap_band"].isin(["Large Cap", "Mid Cap", "Small Cap"])]
+            out.to_csv(self.LOCAL, index=False)
+            LOGGER.info("Cap-band list fetched: %d symbols from %s", len(out), url)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Cap-band xlsx fetch/parse failed (%s): %s", url, exc)
+            return False
+
+    def ensure(self) -> None:
+        """Self-healing: fetch-and-build if the local CSV is absent. Never raises — a
+        failure here must still let the pipeline run offline / accept a manual drop-in."""
+        if self.LOCAL.exists():
+            return
+        try:
+            if not self.fetch():
+                LOGGER.warning("Cap-band auto-fetch failed; manual drop-in required "
+                               "(see bootstrap.py [5/5]).")
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Cap-band auto-fetch raised %s; degrading gracefully", exc)
 
     def load(self) -> Optional[pd.DataFrame]:
+        self.ensure()
         if self.LOCAL.exists():
             df = pd.read_csv(self.LOCAL)
             cols = {c.lower().strip(): c for c in df.columns}

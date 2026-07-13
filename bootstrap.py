@@ -79,6 +79,7 @@ def main() -> int:
 
     LOG.info("[5/5] AMFI cap-band classification ...")
     cap = CapBandAdapter()
+    cap.ensure()
     if cap.health():
         LOG.info("      OK — %d symbols classified", len(cap.band_lookup()))
     else:
