@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Downloaded / cached market data (regenerable via bootstrap.py + auto-fetch)
+mf_cache/
+
+# Local tooling
+.claude/
