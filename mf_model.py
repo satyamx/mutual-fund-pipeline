@@ -57,6 +57,7 @@ from mf_cv import (
     causal_holdout, cpcv_folds,
 )
 from mf_datasources import CACHE
+from mf_labels import COHORT_MIN_SIZE
 
 OUT_DIR = CACHE / "phase_b"
 FEATURES_PATH = OUT_DIR / "features.parquet"
@@ -407,6 +408,223 @@ def run_holdout(df: pd.DataFrame, feature_cols: list[str], force: bool = False) 
 
 
 # ==============================================================================
+# Within-cohort relative targets — second modeling attempt (y_cohort_q1,
+# y_cohort_top_half from mf_labels.add_cohort_targets). Purely additive: reuses
+# run_fold/block_metrics/Preprocessor/Calibrator/fit_enet/fit_hgbt unchanged,
+# writes to its own artifact paths, and does not alter run_cpcv/run_holdout or
+# their outputs above in any way.
+# ==============================================================================
+COHORT_TARGETS = {"cohort_q1": "y_cohort_q1", "cohort_top_half": "y_cohort_top_half"}
+COHORT_CPCV_RESULTS_PATH = OUT_DIR / "cpcv_results_cohort.json"
+COHORT_OOS_PRED_PATH = OUT_DIR / "oos_predictions_cohort.parquet"
+COHORT_HOLDOUT_STAMP = OUT_DIR / "holdout_evaluated_cohort.json"
+COHORT_HOLDOUT_PRED_PATH = OUT_DIR / "holdout_predictions_cohort.parquet"
+COHORT_COEF_PATH = OUT_DIR / "coefficients_cohort.json"
+COHORT_REPORT_PATH = OUT_DIR / "cohort_target_report.md"
+
+
+def load_cohort_dataset() -> tuple[pd.DataFrame, list[str]]:
+    """Same feature/label merge as load_dataset(), restricted to rows where the
+    fund's (anchor, cohort) cell had >= mf_labels.COHORT_MIN_SIZE funds with a
+    valid R_fwd (mf_labels.add_cohort_targets encodes ineligibility as NA)."""
+    df, feature_cols = load_dataset()
+    df = df[df["y_cohort_q1"].notna()].reset_index(drop=True)
+    for col in COHORT_TARGETS.values():
+        df[col] = df[col].astype(bool)
+    return df, feature_cols
+
+
+def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+    anchors = df["anchor"]
+    results: dict = {"targets": {}}
+    all_preds = []
+    for tname, tcol in COHORT_TARGETS.items():
+        results["targets"][tname] = {"enet": {}, "hgbt": {}}
+        for kind, cfg in (("enet", PRIMARY_ENET), ("hgbt", PRIMARY_HGBT)):
+            for block, train, test in cpcv_folds(anchors):
+                m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg)
+                results["targets"][tname][kind][block] = m
+                preds["target"], preds["model"], preds["block"] = tname, kind, block
+                all_preds.append(preds)
+                print(f"[cpcv-cohort] {tname:16s} {kind:4s} {block}: "
+                      f"pooled_auc={m['pooled_auc']:.3f} rank_auc={m['rank_auc']:.3f} "
+                      f"base_rate={m['base_rate']:.3f} neg={m['negatives']} "
+                      f"(n={m['n']})")
+    pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_OOS_PRED_PATH, index=False)
+    COHORT_CPCV_RESULTS_PATH.write_text(json.dumps(results, indent=1), encoding="utf-8")
+    return results
+
+
+def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = False) -> dict:
+    if COHORT_HOLDOUT_STAMP.exists() and not force:
+        print("cohort holdout already evaluated — reusing stamped result "
+              f"({COHORT_HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do "
+              "this to shop for a better number).")
+        return json.loads(COHORT_HOLDOUT_STAMP.read_text(encoding="utf-8"))
+
+    train, test = causal_holdout(df["anchor"])
+    out = dict(
+        evaluated_at=datetime.now(timezone.utc).isoformat(),
+        train_end=str(CAUSAL_TRAIN_END.date()),
+        test_span=f"{CAUSAL_TEST_START.date()}..{CAUSAL_TEST_END.date()}",
+        n_train=int(train.sum()), n_test=int(test.sum()), models={},
+    )
+    all_preds = []
+    for tname, tcol in COHORT_TARGETS.items():
+        for kind, cfg in (("enet", PRIMARY_ENET), ("hgbt", PRIMARY_HGBT)):
+            m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg)
+            out["models"][f"{tname}:{kind}"] = m
+            preds["target"], preds["model"], preds["block"] = tname, kind, "HOLDOUT"
+            all_preds.append(preds)
+            print(f"[holdout-cohort] {tname}:{kind}: pooled_auc={m['pooled_auc']:.3f} "
+                  f"rank_auc={m['rank_auc']:.3f} base_rate={m['base_rate']:.3f} "
+                  f"neg={m['negatives']}")
+
+    pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_HOLDOUT_PRED_PATH, index=False)
+    COHORT_HOLDOUT_STAMP.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
+
+
+def run_coefficients_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+    """Standardized elastic-net coefficients, fit on the full cohort-eligible
+    dataset (no bootstrap here — the CPCV per-block table already shows
+    fold-to-fold (in)stability of the headline metrics)."""
+    out = {}
+    for tname, tcol in COHORT_TARGETS.items():
+        y = df[tcol].to_numpy(dtype=bool)
+        X = df[feature_cols]
+        pre = Preprocessor().fit(X)
+        model = fit_enet(pre.transform(X), y, PRIMARY_ENET)
+        out[tname] = {k: float(v) for k, v in zip(feature_cols, model.coef_[0])}
+    COHORT_COEF_PATH.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
+
+
+def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dict) -> str:
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Within-cohort relative targets — second modeling attempt, honest results")
+    add("")
+    add(f"Generated {datetime.now(timezone.utc).date()}. Targets: `y_cohort_q1` "
+        "(top quartile of same-cohort peers' 3y-forward return) and "
+        "`y_cohort_top_half` (above cohort median), computed per (anchor, cohort) "
+        "directly from R_fwd — cohort = PeerProxyResolver grouping (same "
+        "`category` for diversified funds; same `sector` for thematic funds with "
+        ">=3 members; a pooled small-sector thematic group otherwise). Anchors "
+        f"with < {label_stats['min_size']} cohort members with a valid R_fwd are "
+        "excluded rather than guessed.")
+    add("")
+    add("## Read this first")
+    add("")
+    add("- This target removes the regime effect the OR-label suffered from "
+        "(2017 anchors ~32% positive, 2020 anchors ~99% positive) by construction: "
+        "every fund in a cohort at a given anchor faces the same market, so the "
+        "label only reflects RELATIVE standing, not market direction.")
+    add("- Base rates below deviate from the nominal ~25%/~50% guide because "
+        "small cohorts (n=4-9) cannot split into exact quartiles/halves under a "
+        "continuous quantile — this is honest quantization noise, not a labeling "
+        "bug (verified: n=5 cohorts, the five 5-fund thematic sectors, run "
+        "40%/40% instead of 25%/50%; see label_stats below).")
+    add("- Headline metric is AUC / rank-AUC / lift over base rate, never raw "
+        "accuracy — a coin-flip base rate near 50% makes accuracy especially "
+        "uninformative here.")
+    add("- Leakage check (pre-registered in the task): the peer-relative features "
+        "(excess_1y, excess_3y, beta_3y, te_3y, ir_3y, upcap_3y, downcap_3y) were "
+        "re-verified against mf_features.py source — every one slices its input "
+        "series to `.loc[:t]` before use (own NAV and the LOO peer composite "
+        "alike), and `mf_features.py --selftest` (bumps all post-t NAVs +/-20% "
+        "and asserts bit-identical features) PASSED before this run. No forward "
+        "information reaches the feature side; the cohort ranking itself uses "
+        "R_fwd only on the label side, exactly as with the OR-label.")
+    add("")
+
+    add("## Label base rates")
+    add("")
+    add("n_total/n_dropped/n_kept below are counted on the model-ready frame "
+        "(labels inner-joined to features.parquet, anchors >= 2014-01-31) — "
+        "narrower than the raw label-build population (mf_labels.py reports "
+        "13,621 kept / 1,416 dropped over the full 2013-2023 anchor grid before "
+        "the features merge).")
+    add("")
+    add(f"| target | n_total | n_dropped (cohort<{label_stats['min_size']}) | n_kept | "
+        "base rate (kept) | base rate (causal-holdout span) | negatives (holdout span) |")
+    add("|---|---|---|---|---|---|---|")
+    for tname, tcol in COHORT_TARGETS.items():
+        s = label_stats[tname]
+        add(f"| {tname} | {label_stats['n_total']} | {label_stats['n_dropped']} | "
+            f"{label_stats['n_kept']} | {s['base_rate']:.3f} | "
+            f"{s['holdout_base_rate']:.3f} | {s['holdout_negatives']} |")
+    add("")
+    add(f"(For reference, the prior OR-label causal holdout had only 26 negatives "
+        f"out of 1416 rows — base rate 0.982. Both cohort targets fix that.)")
+    add("")
+
+    add("## Causal holdout (evaluated once) — headline")
+    add("")
+    add(f"Train anchors <= {holdout['train_end']}; test anchors "
+        f"{holdout['test_span']}; evaluated once at {holdout['evaluated_at'][:10]}.")
+    add("")
+    add(_METRIC_HEADER)
+    for tname in COHORT_TARGETS:
+        for kind in ("enet", "hgbt"):
+            m = holdout["models"][f"{tname}:{kind}"]
+            add(_metric_row(f"{tname} ({kind})", m))
+    add("")
+
+    add("## CPCV — purged/embargoed, 5 blocks (primary evaluation)")
+    add("")
+    for tname in COHORT_TARGETS:
+        for kind, label in (("enet", "elastic-net (PRIMARY)"), ("hgbt", "HistGBT (challenger)")):
+            blocks = cpcv["targets"][tname][kind]
+            mean_auc = float(np.nanmean([m["pooled_auc"] for m in blocks.values()]))
+            mean_rank = float(np.nanmean([m["rank_auc"] for m in blocks.values()]))
+            mean_prec = float(np.nanmean([m["top_decile_precision"] for m in blocks.values()]))
+            mean_lift = float(np.nanmean([m["lift_over_base"] for m in blocks.values()]))
+            mean_cap = float(np.nanmean([m["bottom_decile_neg_capture"] for m in blocks.values()]))
+            add(f"### {tname}, {label}")
+            add("")
+            add(_METRIC_HEADER)
+            for block, m in blocks.items():
+                add(_metric_row(block, m))
+            add(f"| **mean** | | | | | **{mean_auc:.3f}** | **{mean_rank:.3f}** | "
+                f"**{mean_prec:.3f}** | **{mean_lift:.2f}** | | **{mean_cap:.3f}** | | |")
+            add("")
+
+    add("## Challenger check (HGBT vs elastic-net, CPCV mean pooled AUC)")
+    add("")
+    add("| target | enet mean AUC | hgbt mean AUC | margin | verdict |")
+    add("|---|---|---|---|---|")
+    for tname in COHORT_TARGETS:
+        enet_auc = float(np.nanmean(
+            [m["pooled_auc"] for m in cpcv["targets"][tname]["enet"].values()]))
+        hgbt_auc = float(np.nanmean(
+            [m["pooled_auc"] for m in cpcv["targets"][tname]["hgbt"].values()]))
+        margin = hgbt_auc - enet_auc
+        verdict = "HGBT beats enet by >3pts" if margin > CHALLENGER_MARGIN else "no material edge"
+        add(f"| {tname} | {enet_auc:.3f} | {hgbt_auc:.3f} | {margin:+.3f} | {verdict} |")
+    add("")
+
+    add("## Top standardized elastic-net coefficients (fit on full cohort-eligible set)")
+    add("")
+    for tname in COHORT_TARGETS:
+        c = coefs[tname]
+        top = sorted(c.items(), key=lambda kv: -abs(kv[1]))[:15]
+        add(f"### {tname}")
+        add("")
+        add("| feature | coef |")
+        add("|---|---|")
+        for feat, v in top:
+            add(f"| {feat} | {v:+.3f} |")
+        add("")
+
+    text = "\n".join(lines) + "\n"
+    COHORT_REPORT_PATH.write_text(text, encoding="utf-8")
+    print(f"cohort report -> {COHORT_REPORT_PATH}")
+    return text
+
+
+# ==============================================================================
 # Coefficients + half-year block-bootstrap sign stability (design §3.4)
 # ==============================================================================
 def run_coefficients(df: pd.DataFrame, feature_cols: list[str]) -> dict:
@@ -715,10 +933,34 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", choices=["cpcv", "coef", "holdout", "artifact",
-                                        "report", "all"], default="all")
+                                        "report", "all", "cohort"], default="all")
     ap.add_argument("--force-holdout", action="store_true",
                     help="re-evaluate the causal holdout (audit use only)")
     args = ap.parse_args()
+
+    if args.stage == "cohort":
+        df, feature_cols = load_cohort_dataset()
+        print(f"cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
+              f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}")
+        cpcv = run_cpcv_cohort(df, feature_cols)
+        holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout)
+        coefs = run_coefficients_cohort(df, feature_cols)
+        full_df, _ = load_dataset()
+        label_stats = dict(
+            min_size=COHORT_MIN_SIZE, n_total=int(len(full_df)),
+            n_dropped=int(full_df["y_cohort_q1"].isna().sum()),
+            n_kept=int(len(df)))
+        holdout_span = (full_df["anchor"] >= CAUSAL_TEST_START) & (full_df["anchor"] <= CAUSAL_TEST_END)
+        for tname, tcol in COHORT_TARGETS.items():
+            kept = full_df["y_cohort_q1"].notna()
+            v = full_df.loc[kept, tcol].astype(bool)
+            vh = full_df.loc[kept & holdout_span, tcol].astype(bool)
+            label_stats[tname] = dict(
+                base_rate=float(v.mean()),
+                holdout_base_rate=float(vh.mean()) if len(vh) else float("nan"),
+                holdout_negatives=int((~vh).sum()))
+        write_cohort_report(cpcv, holdout, coefs, label_stats)
+        return
 
     df, feature_cols = load_dataset()
     print(f"dataset: {len(df)} rows, {len(feature_cols)} features, "

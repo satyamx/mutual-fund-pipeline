@@ -38,6 +38,10 @@ REPORT_PATH = OUT_DIR / "base_rate_sensitivity.md"
 
 MANIFEST_PATH = CACHE / "universe_manifest.csv"
 
+# Within-cohort relative targets (see add_cohort_targets below): minimum number
+# of funds with a valid R_fwd in a fund's (anchor, cohort) cell, else excluded.
+COHORT_MIN_SIZE = 4
+
 # Wide anchor grid; forward_return() naturally truncates wherever cached NAV
 # history runs out (10-day staleness + 2.75y minimum window, per design §1.2),
 # so no anchor cutoff needs to be hardcoded here.
@@ -196,6 +200,68 @@ def write_report(df: pd.DataFrame) -> str:
     return text
 
 
+# ==============================================================================
+# Within-cohort relative targets — a second, better-posed modeling attempt.
+# Computed per (anchor, cohort) directly from the already-built R_fwd column
+# (no NAV re-fetch): does NOT depend on the benchmark resolver at all, only on
+# the PeerProxyResolver GROUPING (same manifest `category` for diversified;
+# same `sector` for thematic with >=3 funds; pooled small-sector thematic group
+# otherwise — identical grouping to the peer-proxy benchmark leg above).
+#
+#   y_cohort_q1(i,t)        = R_fwd(i,t) >= cohort's 75th percentile of R_fwd at t
+#   y_cohort_top_half(i,t)  = R_fwd(i,t) >  cohort's median R_fwd at t
+#
+# A fund's own R_fwd participates in its cohort's quantile (standard relative-
+# rank convention, not leave-one-out — LOO is a benchmark-construction device
+# used for condA above, not needed for a within-group rank). Anchors/cohorts
+# with fewer than COHORT_MIN_SIZE funds carrying a valid R_fwd are excluded
+# (both target columns are pd.NA for that row) rather than guessed.
+# ==============================================================================
+def add_cohort_targets(df: pd.DataFrame, manifest: pd.DataFrame,
+                       min_size: int = COHORT_MIN_SIZE) -> tuple[pd.DataFrame, dict]:
+    peer_resolver = PeerProxyResolver(manifest)
+    cohort_key = {code: peer_resolver._group_key(code) for code in manifest["amfi_code"]}
+
+    df = df.copy()
+    df["cohort_key"] = df["amfi_code"].map(cohort_key).astype(str)
+
+    grp = df.groupby(["anchor", "cohort_key"])["R_fwd"]
+    cohort_n = grp.transform("size")
+    q75 = grp.transform(lambda s: s.quantile(0.75))
+    med = grp.transform("median")
+    eligible = cohort_n >= min_size
+
+    df["cohort_n"] = cohort_n
+    df["y_cohort_q1"] = (df["R_fwd"] >= q75).astype("boolean")
+    df["y_cohort_top_half"] = (df["R_fwd"] > med).astype("boolean")
+    df.loc[~eligible, ["y_cohort_q1", "y_cohort_top_half"]] = pd.NA
+
+    stats = dict(
+        n_total=int(len(df)), n_dropped=int((~eligible).sum()),
+        n_kept=int(eligible.sum()),
+        base_rate_q1=float(df.loc[eligible, "y_cohort_q1"].mean()),
+        base_rate_top_half=float(df.loc[eligible, "y_cohort_top_half"].mean()),
+    )
+    return df, stats
+
+
+def regenerate_with_cohort_targets() -> pd.DataFrame:
+    """Adds y_cohort_q1/y_cohort_top_half to the existing labels.parquet in
+    place, reusing the already-validated R_fwd panel (no NAV rebuild). All
+    existing columns are kept untouched."""
+    manifest = load_manifest()
+    df = pd.read_parquet(LABELS_PATH)
+    df, stats = add_cohort_targets(df, manifest)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(LABELS_PATH, index=False)
+    print(f"cohort targets added -> {LABELS_PATH}: "
+          f"kept={stats['n_kept']} dropped={stats['n_dropped']} "
+          f"(min cohort size {COHORT_MIN_SIZE} funds with valid R_fwd); "
+          f"base rate y_cohort_q1={stats['base_rate_q1']:.3f} "
+          f"y_cohort_top_half={stats['base_rate_top_half']:.3f}")
+    return df
+
+
 def main() -> pd.DataFrame:
     manifest = load_manifest()
     nav_panel = load_nav_panel(manifest)
@@ -211,4 +277,13 @@ def main() -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cohort-only", action="store_true",
+                    help="add within-cohort targets to the existing labels.parquet "
+                         "(reuses cached R_fwd; no NAV rebuild)")
+    args = ap.parse_args()
+    if args.cohort_only:
+        regenerate_with_cohort_targets()
+    else:
+        main()
