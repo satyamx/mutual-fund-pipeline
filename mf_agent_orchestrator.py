@@ -840,7 +840,8 @@ class ProfileRiskScorerAgent:
 
         # --- raw factor levels -> 0..1 sub-scores (bounded, monotone) ----------
         sd = ValidationOrchestrator.safe_divide
-        growth = float(np.clip((self.quant.cagr(nav) - 0.06) / 0.14, 0, 1))
+        cagr_full = self.quant.cagr(nav)
+        growth = float(np.clip((cagr_full - 0.06) / 0.14, 0, 1))
         sortino = self.quant.sortino(rets)
         downside = float(np.clip((sortino + 0.5) / 2.5, 0, 1))
         consistency = float(np.clip(1.0 - (rr3.lt(0).mean() if len(rr3) else 0.5), 0, 1))
@@ -863,6 +864,19 @@ class ProfileRiskScorerAgent:
             flags.append(f"CATEGORY DRIFT SIGNATURE: beta {beta:.2f} far from category norm")
         drift_thematic = float(np.clip(1.0 - drift_pen, 0, 1))
 
+        # --- raw fact LEVELS for honest surfacing (not the bounded sub-scores) --
+        # These are what the app/report shows as ground truth (CAGR 14%, maxDD -24%);
+        # the 0..1 sub-scores above are only the screening transform of them.
+        vol_1y = float(rets.tail(252).std() * np.sqrt(252)) if len(rets) >= 30 else float("nan")
+        nav3 = nav.tail(756)
+        max_dd_3y = float((nav3 / nav3.cummax() - 1.0).min()) if len(nav3) else float("nan")
+        common = (nav.index.intersection(benchmark.index)
+                  if benchmark is not None and len(benchmark) else nav.index[:0])
+        excess_cagr_3y = (float(cagr_full - self.quant.cagr(benchmark.loc[common]))
+                          if len(common) > 252 else float("nan"))
+        facts = dict(cagr=float(cagr_full), vol_1y=vol_1y, max_dd_3y=max_dd_3y,
+                     sortino_3y=float(sortino), excess_cagr_3y=excess_cagr_3y)
+
         weights = self.utility_weights(profile)
         subs = dict(growth=growth, downside=downside, consistency=consistency,
                     cost=cost, liquidity=liquidity, drift_thematic=drift_thematic)
@@ -870,7 +884,7 @@ class ProfileRiskScorerAgent:
         self.v._record("agentC", "utility_scored", True,
                        f"{dossier.scheme_name} U={utility} weights={ {k: round(v,2) for k,v in weights.items()} }")
         return dict(utility_score=utility, sub_scores={k: round(v, 3) for k, v in subs.items()},
-                    weight_matrix={k: round(v, 3) for k, v in weights.items()},
+                    weight_matrix={k: round(v, 3) for k, v in weights.items()}, facts=facts,
                     risk_flags=flags, beta=None if not np.isfinite(beta) else round(beta, 2))
 
 
@@ -924,74 +938,68 @@ class RecommendationEngine:
     def run(self, dossier: FundDossier, compliance: List[ComplianceFinding],
             backtest: Dict[str, Any], profile_score: Dict[str, Any],
             sentiment: Dict[str, Any], profile: InvestorProfile) -> Dict[str, Any]:
+        # HONEST FRAMING (2026-07 reframe): on NAV-only data this is a QUANT +
+        # COMPLIANCE SCREEN, not a skill-verified buy engine. We deliberately do
+        # NOT fuse a composite or emit BUY/SELL/HOLD. A weighted blend of a
+        # below-chance utility (measured AUC 0.463), an unverifiable manager score
+        # and absent-check compliance would launder MISSING EVIDENCE into a verdict
+        # — exactly the honesty failure this reframe removes. Instead surface: the
+        # raw fact levels, the profile-weighted sub-scores (a screening AID, not a
+        # recommendation), explicit data-coverage gaps, and let compliance /
+        # manager / sentiment concerns travel as their own findings, un-blended.
         critical = [f for f in compliance if not f.passed and f.severity == "critical"]
         warnings = [f for f in compliance if not f.passed and f.severity == "warning"]
-        compliance_score = max(0.0, 100.0 - 35.0 * len(critical) - 10.0 * len(warnings))
         utility = profile_score["utility_score"]
-        senti_score = 50.0 + 50.0 * sentiment["net_sentiment"]
+        facts = profile_score["facts"]
         is_passive = dossier.bucket == SEBIBucket.OTHER_PASSIVE
-        macs = backtest.get("manager_alpha_consistency_score", 50.0)
-        # MACS can be absent for two categorically different reasons that must NOT
-        # be conflated: a PASSIVE mandate makes the stock-picking audit genuinely
-        # not-applicable (redistribute the weight, a BUY is still legitimate); an
-        # ACTIVE fund with missing holdings makes it applicable but UNEVALUABLE
-        # (we still redistribute to produce a provisional score, but absence of
-        # evidence must not be allowed to manufacture a BUY — gated below).
-        evidence_incomplete = (not is_passive) and macs is None
-        if is_passive or macs is None:
-            composite = round(0.50 * utility + 0.30 * compliance_score
-                              + 0.20 * senti_score, 1)
-            macs = None
-        else:
-            composite = round(0.35 * utility + 0.30 * macs
-                              + 0.20 * compliance_score + 0.15 * senti_score, 1)
+        macs = backtest.get("manager_alpha_consistency_score", None)
 
-        discontinued = any(f.rule_id == "solution_oriented_discontinued" for f in critical)
-        hard_negative = discontinued or (len(critical) >= 2 and sentiment["net_sentiment"] < 0)
-        if hard_negative or composite < 45:
-            action = "SELL / AVOID"
-        elif evidence_incomplete and composite >= 68 and not critical and not sentiment["red_flags"]:
-            # Would clear the BUY bar, but the manager-skill audit could not be run
-            # (no holdings) and the composite is inflated by unpenalised absent checks.
-            # Absence of disqualifying evidence is not evidence of quality — cap the action.
-            action = "HOLD / WATCH — DATA INSUFFICIENT (no holdings; manager skill unverified)"
-        elif composite >= 68 and not critical and not sentiment["red_flags"]:
-            action = "BUY"
-        else:
-            action = "HOLD / WATCH"
-
-        pros, cons = [], []
-        if macs is not None and macs >= 60:
-            pros.append(f"Manager Alpha Consistency Score {macs}/100 — historical top-10 "
-                        f"picks beat passive sector clones in both audit windows")
-        elif macs is not None and macs < 40:
-            cons.append(f"Manager Alpha Consistency Score {macs}/100 — revealed picks "
-                        f"underperformed their own sectors; passive alternative superior")
+        # Data-coverage gaps: absence of evidence is stated as a gap, never scored
+        # as a pass (this is where the old ~90 "compliance" inflation is removed —
+        # unevaluable SEBI checks are a coverage gap, not a near-full score).
+        coverage_flags: List[str] = []
+        if not is_passive and macs is None:
+            coverage_flags.append(
+                "HOLDINGS NOT AVAILABLE — manager-skill audit and SEBI cap-fidelity / "
+                "overlap checks NOT EVALUATED (absence of evidence, not a pass)")
         if not np.isfinite(dossier.expense_ratio):
-            cons.append("TER NOT AVAILABLE (no free real-data source for expense ratio) — "
-                        "cost sub-score held neutral, not fabricated")
-        elif profile_score["sub_scores"]["cost"] >= 0.7:
-            pros.append(f"Low cost structure (TER {dossier.expense_ratio:.2%}) compounds "
-                        f"strongly over the {profile.horizon_years:.0f}y horizon")
-        else:
-            cons.append(f"Elevated TER {dossier.expense_ratio:.2%} drags long-horizon compounding")
+            coverage_flags.append(
+                "EXPENSE_RATIO_UNAVAILABLE — no free real-data source; cost sub-score held neutral")
+        if not np.isfinite(facts.get("excess_cagr_3y", float("nan"))):
+            coverage_flags.append(
+                "BENCHMARK_EXCESS_UNAVAILABLE — no aligned benchmark series for excess-return")
+
+        observations, flags = [], []
+        if macs is not None and macs >= 60:
+            observations.append(f"Manager Alpha Consistency Score {macs}/100 — historical top-10 "
+                                f"picks beat passive sector clones in both audit windows")
+        elif macs is not None and macs < 40:
+            flags.append(f"Manager Alpha Consistency Score {macs}/100 — revealed picks "
+                         f"underperformed their own sectors; passive alternative superior")
+        if np.isfinite(dossier.expense_ratio) and profile_score["sub_scores"]["cost"] >= 0.7:
+            observations.append(f"Low cost structure (TER {dossier.expense_ratio:.2%}) compounds "
+                                f"over the {profile.horizon_years:.0f}y horizon")
+        elif np.isfinite(dossier.expense_ratio):
+            flags.append(f"Elevated TER {dossier.expense_ratio:.2%} drags long-horizon compounding")
         if profile_score["sub_scores"]["growth"] >= 0.6:
-            pros.append("Realised growth comfortably inflation-beating for the profile's "
-                        "wealth-maximisation objective")
+            observations.append("Realised growth comfortably inflation-beating for the profile's "
+                                "wealth-maximisation objective")
         for fl in profile_score["risk_flags"]:
-            cons.append(fl)
+            flags.append(fl)
         for f in critical:
-            cons.append(f"SEBI Feb-2026 breach [{f.rule_id}]: {f.detail}")
+            flags.append(f"SEBI Feb-2026 breach [{f.rule_id}]: {f.detail}")
+        for f in warnings:
+            flags.append(f"SEBI Feb-2026 warning [{f.rule_id}]: {f.detail}")
         if sentiment["net_sentiment"] > 0.3:
-            pros.append(f"Positive news tone ({sentiment['net_sentiment']:+.2f}) across "
-                        f"{sentiment['n_items']} recent items")
+            observations.append(f"Positive news tone ({sentiment['net_sentiment']:+.2f}) across "
+                                f"{sentiment['n_items']} recent items")
         elif sentiment["net_sentiment"] < -0.3:
-            cons.append(f"Negative news tone ({sentiment['net_sentiment']:+.2f}); "
-                        f"headlines: {[i['headline'][:60] for i in sentiment['items'][:2]]}")
+            flags.append(f"Negative news tone ({sentiment['net_sentiment']:+.2f}); "
+                         f"headlines: {[i['headline'][:60] for i in sentiment['items'][:2]]}")
         for rf in sentiment["red_flags"]:
-            cons.append(f"REGULATORY RED FLAG: {rf}")
-        if not pros:
-            pros.append("No standout strengths versus category peers at current data quality")
+            flags.append(f"REGULATORY RED FLAG: {rf}")
+        if not observations:
+            observations.append("No standout strengths versus category peers at current data quality")
 
         # Confidence must reflect the DATA ACTUALLY ON DISK, not an adapter's
         # self-declared intent. A mocked run must never report high confidence.
@@ -1008,21 +1016,28 @@ class RecommendationEngine:
         confidence = round(float(np.clip(0.15 + 0.85 * live_share, 0, 1)), 2)
         if not holdings_ready:
             confidence = min(confidence, 0.45)
-        self.v._record("recommendation", "issued", True,
-                       f"{dossier.scheme_name}: {action} composite={composite}")
-        return dict(action=action, composite_score=composite, confidence=confidence,
-                    confidence_note=(
-                        "LOW CONFIDENCE: no live data on disk — run bootstrap.py"
-                        if live_share == 0 else
-                        "CAPPED at 0.45: historical disclosures missing, so the Manager "
-                        "Alpha Consistency Score is NOT based on real holdings"
-                        if not holdings_ready else ""),
-                    pros=pros, cons=cons,
-                    components=dict(utility=utility,
-                                    manager_alpha=(macs if macs is not None else
-                                                  ("N/A (passive)" if is_passive else
-                                                   "NOT AVAILABLE (holdings missing)")),
-                                    compliance=compliance_score, sentiment=round(senti_score, 1)))
+        self.v._record("recommendation", "screened", True,
+                       f"{dossier.scheme_name}: profile_fit={utility} flags={len(flags)} "
+                       f"coverage_gaps={len(coverage_flags)}")
+        return dict(
+            kind="SCREEN — quant + compliance on NAV-only data (NOT a buy/sell signal)",
+            profile_fit_score=utility,
+            sub_scores=profile_score["sub_scores"],
+            weight_matrix=profile_score["weight_matrix"],
+            facts=facts,
+            coverage_flags=coverage_flags,
+            manager_alpha=(macs if macs is not None else
+                           ("N/A (passive mandate)" if is_passive else
+                            "NOT AVAILABLE (holdings missing)")),
+            sentiment_net=round(sentiment["net_sentiment"], 2),
+            observations=observations, flags=flags,
+            confidence=confidence,
+            confidence_note=(
+                "LOW CONFIDENCE: no live data on disk — run bootstrap.py"
+                if live_share == 0 else
+                "CAPPED at 0.45: historical disclosures missing, so the Manager "
+                "Alpha Consistency Score is NOT based on real holdings"
+                if not holdings_ready else ""))
 
 
 class MasterOrchestrator:
@@ -1107,11 +1122,24 @@ class MasterOrchestrator:
         print("=" * 86)
         print(f"  Investor profile: {p['horizon_years']}y horizon | liquidity="
               f"{p['liquidity_need']} | risk={p['risk_appetite']}")
-        print(f"\n  >>> RECOMMENDATION: {r['action']}   "
-              f"(composite {r['composite_score']}/100, confidence {r['confidence']})")
+        def _pct(x, nd=2, signed=False):
+            if not (isinstance(x, (int, float)) and np.isfinite(x)):
+                return "n/a"
+            return f"{x:+.{nd}%}" if signed else f"{x:.{nd}%}"
+        print(f"\n  >>> {r['kind']}")
+        print(f"      Profile-fit score: {r['profile_fit_score']}/100  "
+              f"(profile-weighted screening aid — NOT a recommendation; confidence {r['confidence']})")
         if r["confidence_note"]:
             print(f"      {r['confidence_note']}")
-        print(f"      components: {r['components']}")
+        f = r["facts"]
+        print(f"      Facts:  CAGR {_pct(f['cagr'])} | vol(1y) {_pct(f['vol_1y'])} | "
+              f"maxDD(3y) {_pct(f['max_dd_3y'], 1)} | Sortino {f['sortino_3y']:.2f} | "
+              f"excess vs bench(3y) {_pct(f['excess_cagr_3y'], signed=True)}")
+        print("      Sub-scores (0–1): "
+              + ", ".join(f"{k}={v:.2f}" for k, v in r["sub_scores"].items()))
+        print(f"      Manager Alpha: {r['manager_alpha']}")
+        for cf in r["coverage_flags"]:
+            print(f"      [DATA GAP] {cf}")
         if d.bucket == SEBIBucket.OTHER_PASSIVE:
             print("\n  Manager Alpha Consistency Score: N/A — passive mandate; "
                   "evaluated on tracking fidelity, cost and compliance instead")
@@ -1124,11 +1152,11 @@ class MasterOrchestrator:
             print(f"    [{label} @ {w['as_of']}] hit-rate {w['hit_rate']:.0%} | "
                   f"wtd excess CAGR {w['weighted_excess_cagr']:+.2%} | "
                   f"wtd stock max-DD {w['avg_stock_max_dd']:.1%}")
-        print("\n  PROS:")
-        for x in r["pros"]:
+        print("\n  OBSERVATIONS:")
+        for x in r["observations"]:
             print(f"    + {x}")
-        print("  CONS / FLAGS:")
-        for x in r["cons"]:
+        print("  FLAGS / RISKS:")
+        for x in r["flags"]:
             print(f"    - {x}")
         fails = [f for f in result["compliance"] if not f.passed]
         print(f"\n  SEBI Feb-2026 true-to-label: {len(result['compliance'])} checks, "
