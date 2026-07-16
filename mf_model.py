@@ -421,6 +421,7 @@ COHORT_HOLDOUT_STAMP = OUT_DIR / "holdout_evaluated_cohort.json"
 COHORT_HOLDOUT_PRED_PATH = OUT_DIR / "holdout_predictions_cohort.parquet"
 COHORT_COEF_PATH = OUT_DIR / "coefficients_cohort.json"
 COHORT_REPORT_PATH = OUT_DIR / "cohort_target_report.md"
+COHORT_ARTIFACT_PATH = OUT_DIR / "model_artifact_cohort.json"
 
 
 def load_cohort_dataset() -> tuple[pd.DataFrame, list[str]]:
@@ -498,6 +499,67 @@ def run_coefficients_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         out[tname] = {k: float(v) for k, v in zip(feature_cols, model.coef_[0])}
     COHORT_COEF_PATH.write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
+
+
+def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+    """Full inference payload for the within-cohort targets (mirror of
+    build_artifact, which only covers the OR/excess targets). coefficients_cohort
+    ships weights only; live single-fund scoring also needs the intercept,
+    imputation medians, standardization stats and calibration map. Human-readable
+    JSON (design §6.2 — never pickle) so it can be applied with numpy alone
+    (see mf_infer.py) without importing sklearn into the orchestrator.
+
+    signal_context carries the honest measured edge (holdout AUC + base rate) so
+    the consuming app can surface the probability with its true accuracy, never
+    as an oracle."""
+    holdout_auc: dict = {}
+    if COHORT_HOLDOUT_STAMP.exists():
+        stamp = json.loads(COHORT_HOLDOUT_STAMP.read_text(encoding="utf-8"))
+        for tname in COHORT_TARGETS:
+            m = stamp.get("models", {}).get(f"{tname}:enet")
+            if m is not None:
+                holdout_auc[tname] = float(m["pooled_auc"])
+
+    anchors = df["anchor"].to_numpy()
+    artifact = dict(
+        version=MODEL_VERSION + "_cohort",
+        created=datetime.now(timezone.utc).isoformat(),
+        training_anchor_span=f"{df['anchor'].min().date()}..{df['anchor'].max().date()}",
+        features=feature_cols,
+        hyperparameters=PRIMARY_ENET,
+        note=("Within-cohort relative targets (top-quartile / top-half vs same "
+              "(anchor, cohort) peers). The ONLY validated edge in this pipeline "
+              "(cohort_q1 holdout AUC ~0.578, lift ~1.76x) — weak, a signal INPUT "
+              "not a standalone verdict. Elastic-net only (HGBT showed no edge on "
+              "these targets). Fitted on all cohort-eligible anchors except the "
+              "last-25% calibration slice."),
+        models={},
+    )
+    all_mask = np.ones(len(df), dtype=bool)
+    for tname, tcol in COHORT_TARGETS.items():
+        y = df[tcol].to_numpy(dtype=bool)
+        fit_mask, calib_mask = calib_split(anchors, all_mask)
+        X = df[feature_cols]
+        pre = Preprocessor().fit(X[fit_mask])
+        model = fit_enet(pre.transform(X[fit_mask]), y[fit_mask], PRIMARY_ENET)
+        cal = Calibrator().fit(
+            model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
+        artifact["models"][tname] = dict(
+            target=tcol,
+            base_rate=float(y.mean()),
+            signal_context=dict(holdout_auc=holdout_auc.get(tname),
+                                base_rate=float(y.mean())),
+            imputation_medians={c: float(v) for c, v in pre.median.items()},
+            standardize_mean={c: float(v) for c, v in pre.mean.items()},
+            standardize_std={c: float(v) for c, v in pre.std.items()},
+            coefficients={c: float(v) for c, v in
+                          zip(feature_cols, model.coef_[0])},
+            intercept=float(model.intercept_[0]),
+            calibration=cal.to_json(),
+        )
+    COHORT_ARTIFACT_PATH.write_text(json.dumps(artifact, indent=1), encoding="utf-8")
+    print(f"cohort artifact -> {COHORT_ARTIFACT_PATH}")
+    return artifact
 
 
 def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dict) -> str:
@@ -945,6 +1007,7 @@ def main() -> None:
         cpcv = run_cpcv_cohort(df, feature_cols)
         holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout)
         coefs = run_coefficients_cohort(df, feature_cols)
+        build_cohort_artifact(df, feature_cols)
         full_df, _ = load_dataset()
         label_stats = dict(
             min_size=COHORT_MIN_SIZE, n_total=int(len(full_df)),
