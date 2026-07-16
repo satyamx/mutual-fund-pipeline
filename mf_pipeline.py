@@ -905,16 +905,32 @@ class ScoringEngine:
 
     FACTOR_MAP: Dict[SEBICategory, Dict[str, Tuple[float, int]]] = {
         SEBICategory.EQUITY: {
-            "rr3y_mean":            (0.15, +1),
-            "rr5y_mean":            (0.10, +1),
-            "sortino":              (0.15, +1),
-            "info_ratio":           (0.15, +1),
-            "alpha":                (0.10, +1),
-            "upside_capture":       (0.075, +1),
-            "downside_capture":     (0.075, -1),
-            "max_drawdown":         (0.05, +1),   # less-negative drawdown is better
-            "days_to_liquidate_wavg": (0.10, -1),
-            "expense_ratio":        (0.05, -1),
+            # Step-2 reweight (2026-07): the nine testable metrics carry the
+            # pre-registered "minimal surgery" variant that cleared the purged-
+            # CPCV no-regression guardrail (mf_factor_backtest.py) — legacy
+            # proportions kept exactly, scaled x0.90 so the map sums to 1.0
+            # after the config-argued untestable changes below. Honest caveat:
+            # no pre-registered variant (this one included) measurably BEAT the
+            # old weights' within-cohort rank AUC; all sit at ~0.46, i.e. the
+            # fixed composite has no demonstrated within-cohort selection skill.
+            "rr3y_mean":            (0.135, +1),
+            "rr5y_mean":            (0.09,  +1),
+            "sortino":              (0.135, +1),
+            "info_ratio":           (0.135, +1),
+            "alpha":                (0.09,  +1),
+            "upside_capture":       (0.0675, +1),
+            "downside_capture":     (0.0675, -1),
+            "max_drawdown":         (0.045, +1),  # less-negative drawdown is better
+            # Robust Phase-B model finding (coefficients.json cohort runs):
+            # beta_3y -0.902/-0.960, sign+magnitude stable across both cohort
+            # targets — lower systematic risk ranks better within cohort.
+            "beta":                 (0.135, -1),
+            # days_to_liquidate_wavg dropped (was 0.10): investor liquidity is
+            # LOCKED for the 7.5y horizon — exit friction is not a selection
+            # criterion. expense_ratio raised 0.05 -> 0.10: the one a-priori
+            # causal forward-looking factor (cost drag is arithmetic and does
+            # not mean-revert); a 1% TER gap compounds to ~7.5% over 7.5y.
+            "expense_ratio":        (0.10, -1),
         },
         SEBICategory.INDEX_ETF: {
             "tracking_error":          (0.35, -1),

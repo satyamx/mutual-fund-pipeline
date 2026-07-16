@@ -801,6 +801,9 @@ class ProfileRiskScorerAgent:
         self.log = logging.getLogger("MFOrchestrator.AgentC")
 
     def utility_weights(self, p: InvestorProfile) -> Dict[str, float]:
+        # Base surface is calibrated to the HIGH risk appetite (conservative/
+        # moderate subtract growth below); drift_thematic stays at 0.10 in every
+        # branch because the profile mandates flagging category drift regardless.
         w = dict(growth=0.40, downside=0.15, consistency=0.20, cost=0.10,
                  liquidity=0.05, drift_thematic=0.10)
         if p.risk_appetite == RiskAppetite.CONSERVATIVE:
@@ -809,13 +812,20 @@ class ProfileRiskScorerAgent:
             w["growth"] -= 0.07; w["downside"] += 0.07
         if p.horizon_years < 4:
             w["downside"] += 0.08; w["liquidity"] += 0.04; w["growth"] -= 0.12
-        elif p.horizon_years >= 8:
+        elif p.horizon_years >= 7:
+            # was >= 8, which excluded the baseline profile's own 7.5y default
+            # despite its declared 7-8y target band — long-horizon growth tilt
+            # must cover the band it was written for
             w["growth"] += 0.05; w["downside"] -= 0.05
         if p.liquidity_need == LiquidityNeed.HIGH:
             # exit-sensitive: liquidity AND concentrated-thematic exposure both matter more
             w["liquidity"] += 0.12; w["drift_thematic"] += 0.04; w["growth"] -= 0.16
         elif p.liquidity_need == LiquidityNeed.PARTIAL:
             w["liquidity"] += 0.05; w["growth"] -= 0.05
+        elif p.liquidity_need == LiquidityNeed.NONE:
+            # locked-in capital: exit friction is not a selection criterion until
+            # horizon end — keep a token residual for the terminal liquidation
+            w["liquidity"] -= 0.04; w["growth"] += 0.04
         total = sum(w.values())
         return {k: v / total for k, v in w.items()}
 
@@ -921,11 +931,14 @@ class RecommendationEngine:
         senti_score = 50.0 + 50.0 * sentiment["net_sentiment"]
         is_passive = dossier.bucket == SEBIBucket.OTHER_PASSIVE
         macs = backtest.get("manager_alpha_consistency_score", 50.0)
+        # MACS can be absent for two categorically different reasons that must NOT
+        # be conflated: a PASSIVE mandate makes the stock-picking audit genuinely
+        # not-applicable (redistribute the weight, a BUY is still legitimate); an
+        # ACTIVE fund with missing holdings makes it applicable but UNEVALUABLE
+        # (we still redistribute to produce a provisional score, but absence of
+        # evidence must not be allowed to manufacture a BUY — gated below).
+        evidence_incomplete = (not is_passive) and macs is None
         if is_passive or macs is None:
-            # Stock-picking audit is not meaningful for index/ETF mandates, AND
-            # (real-data mode) macs is None when holdings disclosures are missing
-            # — in both cases redistribute its weight onto utility & compliance
-            # rather than let a None/fabricated value enter the composite.
             composite = round(0.50 * utility + 0.30 * compliance_score
                               + 0.20 * senti_score, 1)
             macs = None
@@ -937,6 +950,11 @@ class RecommendationEngine:
         hard_negative = discontinued or (len(critical) >= 2 and sentiment["net_sentiment"] < 0)
         if hard_negative or composite < 45:
             action = "SELL / AVOID"
+        elif evidence_incomplete and composite >= 68 and not critical and not sentiment["red_flags"]:
+            # Would clear the BUY bar, but the manager-skill audit could not be run
+            # (no holdings) and the composite is inflated by unpenalised absent checks.
+            # Absence of disqualifying evidence is not evidence of quality — cap the action.
+            action = "HOLD / WATCH — DATA INSUFFICIENT (no holdings; manager skill unverified)"
         elif composite >= 68 and not critical and not sentiment["red_flags"]:
             action = "BUY"
         else:

@@ -10,9 +10,9 @@ plugged into `evaluate()` and compared against the baseline this module reports.
 
 WHAT IT DOES
   1. Maps FACTOR_MAP[EQUITY] metric names onto mf_cache/phase_b/features.parquet
-     columns (`FEATURE_MAP` below). Two of the ten metrics have no feature
-     counterpart in this dataset (`days_to_liquidate_wavg`, `expense_ratio` —
-     15% of the nominal weight) and are marked untestable rather than proxied.
+     columns (`FEATURE_MAP` below). One of the ten metrics has no feature
+     counterpart in this dataset (`expense_ratio` — 10% of the nominal weight)
+     and is marked untestable rather than proxied.
   2. `score(weights, df)` reproduces ScoringEngine.score_category's math
      (mf_pipeline.py:959-983) exactly — percentile-rank each mapped metric,
      direction-adjust, weight, sum, min-max stretch to 1..100 — generalized
@@ -78,7 +78,10 @@ FEATURE_MAP: Dict[str, Optional[str]] = {
     "max_drawdown":           "max_dd_3y",     # stored negative; direction +1 already
                                                 # means "less negative wins" (matches
                                                 # mf_pipeline.py:915 comment)
-    "days_to_liquidate_wavg": None,             # UNTESTABLE — no liquidity/AUM feature
+    "beta":                   "beta_3y",        # pipeline beta is vs the declared
+                                                # benchmark (full history); the feature
+                                                # is vs the LOO peer composite (3y) —
+                                                # closest available counterpart
     "expense_ratio":          None,             # UNTESTABLE — no expense-ratio feature
 }
 
@@ -242,15 +245,14 @@ def write_report(results: dict) -> str:
             f"| {feat or '—'} | {status} |")
     add("")
     add(f"Testable weight: **{TESTABLE_WEIGHT:.2f}** of 1.00. Untestable weight: "
-        f"**{UNTESTABLE_WEIGHT:.2f}** (`days_to_liquidate_wavg` 0.10 + "
-        "`expense_ratio` 0.05) — mf_cache/phase_b/features.parquet carries no "
-        "liquidity/impact-cost or expense-ratio column, so these are dropped "
-        "rather than proxied, and the testable metrics' weights are "
-        f"renormalized to sum to 1.00 (each divided by {TESTABLE_WEIGHT:.2f}), "
+        f"**{UNTESTABLE_WEIGHT:.2f}** (`expense_ratio`) — "
+        "mf_cache/phase_b/features.parquet carries no expense-ratio column, so "
+        "it is dropped rather than proxied, and the testable metrics' weights "
+        f"are renormalized to sum to 1.00 (each divided by {TESTABLE_WEIGHT:.2f}), "
         "exactly as ScoringEngine.score_category renormalizes over `available` "
         "factors when a column is absent (mf_pipeline.py:969-977). This means "
-        "the backtest below is necessarily a test of 85% of the current "
-        "weight scheme, not 100% of it.")
+        f"the backtest below is necessarily a test of {TESTABLE_WEIGHT:.0%} of "
+        "the current weight scheme, not 100% of it.")
     add("")
 
     add("## Method")
