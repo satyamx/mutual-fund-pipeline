@@ -44,6 +44,7 @@ import json
 import os
 import logging
 import math
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -917,7 +918,10 @@ class NewsSentimentResearcherAgent:
         for it in items:
             decay = 0.5 ** (it["days_ago"] / 14.0)
             weights.append(decay); tones.append(it["tone"])
-            if any(term in it["headline"].lower() for term in self.REGULATORY_TERMS):
+            # word-boundary match: naive substring made "ban" fire on "bank margins",
+            # a false regulatory flag that now (post-reframe) would force a SELL.
+            hl = it["headline"].lower()
+            if any(re.search(rf"\b{re.escape(term)}\b", hl) for term in self.REGULATORY_TERMS):
                 red_flags.append(it["headline"])
         net = float(np.dot(weights, tones) / np.sum(weights))
         self.v._record("agentD", "sentiment_researched", True,
@@ -1001,6 +1005,54 @@ class RecommendationEngine:
         if not observations:
             observations.append("No standout strengths versus category peers at current data quality")
 
+        # ---- metric-level GREEN / RED coloring + an EXPLAINABLE tri-colour verdict.
+        # This is NOT the old below-chance weighted composite as the verdict: each
+        # metric is coloured by its own honest direction, and the overall signal is
+        # a transparent RULE over those visible colours + hard compliance gates. The
+        # weighted screen score rides along as a SUPPORTING datapoint (one banded
+        # input), never the sole determinant. HOLD is the honest default under thin
+        # evidence, so missing data lands on blue, not a fabricated green.
+        def _band(x, good, bad, higher_better=True):
+            if not (isinstance(x, (int, float)) and np.isfinite(x)):
+                return "grey"
+            if higher_better:
+                return "green" if x >= good else ("red" if x <= bad else "amber")
+            return "green" if x <= good else ("red" if x >= bad else "amber")
+
+        metric_colors = {
+            "cagr": _band(facts["cagr"], 0.10, 0.06),
+            "excess_cagr_3y": _band(facts["excess_cagr_3y"], 0.01, -0.01),
+            "sortino_3y": _band(facts["sortino_3y"], 0.75, 0.0),
+            "max_dd_3y": _band(facts["max_dd_3y"], -0.20, -0.35),   # negative; shallower is better
+            "consistency": _band(profile_score["sub_scores"]["consistency"], 0.60, 0.40),
+            "expense": ("grey" if not np.isfinite(dossier.expense_ratio)
+                        else _band(dossier.expense_ratio, 0.010, 0.020, higher_better=False)),
+        }
+        metric_colors["compliance"] = ("red" if critical else
+                                       "amber" if (warnings or (not is_passive and macs is None))
+                                       else "green")
+        # supporting weighted screen score (profile-weighted sub-scores) → a banded
+        # datapoint, honestly labelled a screening aid (measured below chance alone).
+        score_band = "green" if utility >= 65 else ("red" if utility < 45 else "blue")
+        metric_colors["screen_score"] = score_band
+
+        core = ["cagr", "excess_cagr_3y", "sortino_3y", "max_dd_3y", "consistency"]
+        greens = sum(metric_colors[k] == "green" for k in core)
+        reds = sum(metric_colors[k] == "red" for k in core)
+        critical_breach = bool(critical) or bool(sentiment["red_flags"])
+        if critical_breach or reds >= 3 or (reds > greens and score_band == "red"):
+            verdict, verdict_color = "SELL / AVOID", "red"
+        elif greens >= 3 and reds == 0 and score_band != "red":
+            verdict, verdict_color = "BUY", "green"
+        else:
+            verdict, verdict_color = "HOLD / WATCH", "blue"
+        # BUY on the quant screen alone (holdings never on free data) carries its
+        # caveat visibly — the user chose "BUY allowed, caveat shown".
+        verdict_caveat = ""
+        if verdict == "BUY" and not is_passive and macs is None:
+            verdict_caveat = ("screen-favourable on NAV facts only — manager skill & "
+                              "holdings NOT verified; not a prediction of outperformance")
+
         # Confidence must reflect the DATA ACTUALLY ON DISK, not an adapter's
         # self-declared intent. A mocked run must never report high confidence.
         try:
@@ -1016,11 +1068,14 @@ class RecommendationEngine:
         confidence = round(float(np.clip(0.15 + 0.85 * live_share, 0, 1)), 2)
         if not holdings_ready:
             confidence = min(confidence, 0.45)
-        self.v._record("recommendation", "screened", True,
-                       f"{dossier.scheme_name}: profile_fit={utility} flags={len(flags)} "
-                       f"coverage_gaps={len(coverage_flags)}")
+        self.v._record("recommendation", "issued", True,
+                       f"{dossier.scheme_name}: {verdict} ({verdict_color}) "
+                       f"screen={utility} greens={greens} reds={reds}")
         return dict(
-            kind="SCREEN — quant + compliance on NAV-only data (NOT a buy/sell signal)",
+            verdict=verdict, verdict_color=verdict_color, verdict_caveat=verdict_caveat,
+            metric_colors=metric_colors,
+            kind="screen-based recommendation (transparent rule over the metrics below; "
+                 "NAV-only data, manager skill unverified)",
             profile_fit_score=utility,
             sub_scores=profile_score["sub_scores"],
             weight_matrix=profile_score["weight_matrix"],
@@ -1126,17 +1181,26 @@ class MasterOrchestrator:
             if not (isinstance(x, (int, float)) and np.isfinite(x)):
                 return "n/a"
             return f"{x:+.{nd}%}" if signed else f"{x:.{nd}%}"
-        print(f"\n  >>> {r['kind']}")
-        print(f"      Profile-fit score: {r['profile_fit_score']}/100  "
-              f"(profile-weighted screening aid — NOT a recommendation; confidence {r['confidence']})")
+        dot = {"green": "🟢", "red": "🔴", "blue": "🔵", "amber": "🟡", "grey": "⚪"}
+        mc = r["metric_colors"]
+        print(f"\n  >>> RECOMMENDATION: {dot[r['verdict_color']]} {r['verdict']}"
+              f"   (confidence {r['confidence']})")
+        if r["verdict_caveat"]:
+            print(f"      ⚠ {r['verdict_caveat']}")
+        print(f"      basis: {r['kind']}")
         if r["confidence_note"]:
             print(f"      {r['confidence_note']}")
         f = r["facts"]
-        print(f"      Facts:  CAGR {_pct(f['cagr'])} | vol(1y) {_pct(f['vol_1y'])} | "
-              f"maxDD(3y) {_pct(f['max_dd_3y'], 1)} | Sortino {f['sortino_3y']:.2f} | "
-              f"excess vs bench(3y) {_pct(f['excess_cagr_3y'], signed=True)}")
-        print("      Sub-scores (0–1): "
-              + ", ".join(f"{k}={v:.2f}" for k, v in r["sub_scores"].items()))
+        print(f"      CAGR {dot[mc['cagr']]} {_pct(f['cagr'])} | "
+              f"excess/bench(3y) {dot[mc['excess_cagr_3y']]} {_pct(f['excess_cagr_3y'], signed=True)} | "
+              f"Sortino {dot[mc['sortino_3y']]} {f['sortino_3y']:.2f} | "
+              f"maxDD(3y) {dot[mc['max_dd_3y']]} {_pct(f['max_dd_3y'], 1)} | "
+              f"consistency {dot[mc['consistency']]} {r['sub_scores']['consistency']:.2f}")
+        exp_str = _pct(d.expense_ratio) if np.isfinite(d.expense_ratio) else "n/a"
+        print(f"      expense {dot[mc['expense']]} {exp_str} | "
+              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])}")
+        print(f"      Supporting screen score: {dot[mc['screen_score']]} "
+              f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)")
         print(f"      Manager Alpha: {r['manager_alpha']}")
         for cf in r["coverage_flags"]:
             print(f"      [DATA GAP] {cf}")
