@@ -64,6 +64,7 @@ from mf_pipeline import (  # noqa: E402
     QuantEngine,
     ValidationOrchestrator,
 )
+from mf_sentinel import SentinelEngine  # noqa: E402 — System B: typed alerts, never a fund number
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
@@ -1120,6 +1121,7 @@ class MasterOrchestrator:
         self.agent_d = NewsSentimentResearcherAgent(self.store, self.validator)
         self.verifier = TrueToLabelVerifier(self.validator)
         self.recommender = RecommendationEngine(self.validator)
+        self.sentinel = SentinelEngine(self.validator)
         self.log = logging.getLogger("MFOrchestrator.Master")
 
     def _sibling_weights(self, dossier: FundDossier) -> Dict[str, Dict[str, pd.Series]]:
@@ -1150,10 +1152,11 @@ class MasterOrchestrator:
 
             rec = self.recommender.run(dossier, compliance, backtest,
                                        profile_score, sentiment, profile)
+            sentinel_report = self.sentinel.run(dossier, compliance, backtest, sentiment, bench)
             self.validator.register_iteration(context=f"evaluate:{dossier.scheme_name}")
             return dict(profile=profile.model_dump(mode="json"), dossier=dossier, compliance=compliance,
                         backtest=backtest, profile_score=profile_score,
-                        sentiment=sentiment, recommendation=rec)
+                        sentiment=sentiment, recommendation=rec, sentinel=sentinel_report)
         except Exception as exc:  # noqa: BLE001 — institutional runs must degrade cleanly
             self.log.error("Evaluation failed for %r: %s\n%s", query, exc,
                            traceback_format(exc))
@@ -1230,6 +1233,14 @@ class MasterOrchestrator:
         s = result["sentiment"]
         print(f"\n  News sentiment: net {s['net_sentiment']:+.2f} over {s['n_items']} items "
               f"(entities: {', '.join(s['entities_queried'])})")
+        sr = result["sentinel"]
+        dot_sev = {"HIGH": "🔴", "WATCH": "🟡", "INFO": "⚪"}
+        print(f"\n  SENTINEL ({sr.checks_run} checks run, {len(sr.checks_dormant)} dormant, "
+              f"{len(sr.alerts)} alerts):")
+        for a in sr.alerts:
+            print(f"    {dot_sev[a.severity]} [{a.severity}] {a.code} ({a.basis}): {a.detail}")
+        if sr.nfo_dossier:
+            print(sr.nfo_dossier["rendered"])
 
 
 def traceback_format(exc: BaseException) -> str:
