@@ -1166,6 +1166,13 @@ class MasterOrchestrator:
         return (self._cohort_manifest, self._cohort_nav_panel,
                 self._cohort_inferencer, self._cohort_engine)
 
+    @property
+    def cohort_model_id(self) -> Optional[str]:
+        """Public accessor for external callers (e.g. mf_artifact.py) that need
+        to stamp which model artifact scored this run — None until at least one
+        evaluate() call has resolved the cohort resources (or if unavailable)."""
+        return self._cohort_inferencer.artifact["version"] if self._cohort_inferencer else None
+
     def _sibling_weights(self, dossier: FundDossier) -> Dict[str, Dict[str, pd.Series]]:
         """Same-AMC equity schemes in overlap scope (large-cap peers exempt per SEBI)."""
         rule = SEBI_2026_RULES.get(dossier.category)

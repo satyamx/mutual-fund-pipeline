@@ -90,6 +90,10 @@ class SentinelReport:
     nfo_dossier: Optional[Dict[str, Any]] = None
     checks_run: int = 0
     checks_dormant: List[str] = field(default_factory=list)
+    # mf_nfo_gate.Eligibility value ("PRE_LAUNCH"|"NEWBORN"|"YOUNG"|"EVALUABLE") —
+    # the batch artifact's per-fund `eligibility` field reads this directly
+    # rather than re-deriving it from the alert codes.
+    eligibility: str = "EVALUABLE"
 
 
 # ==============================================================================
@@ -598,7 +602,8 @@ class SentinelEngine:
         self.v._record("sentinel", "alerts_emitted", True,
                        f"{dossier.scheme_name}: {len(alerts)} alerts, {len(dormant)} dormant")
         return SentinelReport(alerts=alerts, nfo_dossier=nfo_dossier,
-                              checks_run=checks_run, checks_dormant=dormant)
+                              checks_run=checks_run, checks_dormant=dormant,
+                              eligibility=status)
 
 
 # ==============================================================================
