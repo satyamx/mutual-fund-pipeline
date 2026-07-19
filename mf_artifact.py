@@ -25,8 +25,8 @@ and only a default one is baked in here.
 CONTRACT (see mf-architecture-decisions memory for the original 2026-07-16
 design; extended here with the restored verdict + its default-profile stamp):
   top-level: artifact_version, generated_at, pipeline_sha, model_id,
-             default_profile{}, coverage{}, monitoring{interim_ic, psi_max,
-             ledger_rows, note}, funds[]
+             default_profile{}, coverage{}, monitoring{ledger, realized_ic,
+             psi, rank_stability, note}, funds[]
   per-fund:  amfi_code, isin, scheme_name, category, sector, eligibility,
              facts{cagr, vol, max_dd, sortino, benchmark, expense},
              signal_a{sub_scores, verdict, verdict_color, verdict_caveat,
@@ -34,10 +34,18 @@ design; extended here with the restored verdict + its default-profile stamp):
                       cohort_percentile, cohort_n, signal_context},
              alerts_b[], nfo_dossier, data_flags[], lock{type, exit_load_days}
 
-monitoring{} is honestly all-null/zero until the prediction ledger (to-do #6)
-exists — this artifact does not backfill or fabricate one. lock{} is always
-null — no free data source publishes exit-load/lock-in terms (the same
-honesty gap as expense_ratio/aum_cr/manager name elsewhere in this pipeline).
+monitoring{} (to-do #6, mf_ledger.py): every OK cohort_signal this run is
+appended to the git-tracked prediction ledger (ledger/predictions.jsonl —
+NOT mf_cache/, which is gitignored/regenerable; predictions are the opposite).
+`realized_ic` stays honestly null (PENDING_MATURITY/INSUFFICIENT_MATURED)
+until ~3 real years of matured outcomes exist — no untested-horizon proxy is
+ever published under that name. `psi` (population stability index) is
+computed FRESH every run from the live scoring population against an
+empirical training-time reference — no ledger/waiting needed. `rank_stability`
+is a separate, honestly-named run-to-run consistency QA proxy, never a skill
+metric. lock{} is always null — no free data source publishes exit-load/
+lock-in terms (the same honesty gap as expense_ratio/aum_cr/manager name
+elsewhere in this pipeline).
 ====================================================================================
 """
 
@@ -55,7 +63,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from mf_agent_orchestrator import InvestorProfile, MasterOrchestrator
+import mf_ledger
+from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator
 from mf_datasources import CACHE
 from mf_labels import load_manifest
 
@@ -158,18 +167,25 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
 
 
 def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] = None,
-                   profile: Optional[InvestorProfile] = None) -> Dict[str, Any]:
+                   profile: Optional[InvestorProfile] = None,
+                   ledger_path: Path = mf_ledger.PREDICTIONS_PATH) -> Dict[str, Any]:
     """Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
     RealNAVStore fund cache and cohort-scoring resources build once) against
     `profile` (defaults to InvestorProfile()'s own baseline), and assembles the
-    full versioned artifact."""
+    full versioned artifact. Every OK cohort_signal is appended to the
+    (git-tracked) prediction ledger — see mf_ledger.py for why this must happen
+    now even though nothing can be realized for ~3 years."""
     orch = orch if orch is not None else MasterOrchestrator(live=True)
     profile = profile if profile is not None else InvestorProfile()
     is_default_profile = profile.model_dump(mode="json") == InvestorProfile().model_dump(mode="json")
     profile_config = profile.model_dump(mode="json")
 
+    run_id = datetime.now(timezone.utc).isoformat()
+    pipeline_sha = _git_sha()
+
     records: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
+    ledger_rows: List[Dict[str, Any]] = []
     for name in scheme_names:
         result = orch.evaluate(name, profile_config=profile_config, argv=[])
         rec = build_fund_record(result, profile, is_default_profile)
@@ -177,6 +193,22 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
             errors.append(dict(query=name, error=result.get("error", "unknown")))
             continue
         records.append(rec)
+        row = mf_ledger.build_row(rec["amfi_code"], result.get("cohort_signal"),
+                                  run_id=run_id, pipeline_sha=pipeline_sha,
+                                  model_id=orch.cohort_model_id)
+        if row is not None:
+            ledger_rows.append(row)
+    n_appended = mf_ledger.append_predictions(ledger_rows, path=ledger_path)
+
+    live_res = orch.cohort_live_resources()
+    psi = (mf_ledger.compute_psi_live(live_res[0], live_res[1], live_res[3], TODAY,
+                                      orch.cohort_model_id)
+          if live_res is not None else
+          dict(status="UNAVAILABLE", psi_max=None, psi_mean=None, worst=[],
+              n_features=0, skipped_features=[]))
+    monitoring = mf_ledger.monitoring_block(run_id=run_id, rows_appended=n_appended,
+                                            current_rows=ledger_rows, psi=psi,
+                                            predictions_path=ledger_path)
 
     coverage = dict(
         n_total=len(scheme_names), n_ok=len(records), n_errors=len(errors),
@@ -193,15 +225,12 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
     )
     return dict(
         artifact_version=ARTIFACT_VERSION,
-        generated_at=datetime.now(timezone.utc).isoformat(),
-        pipeline_sha=_git_sha(),
+        generated_at=run_id,
+        pipeline_sha=pipeline_sha,
         model_id=orch.cohort_model_id,
         default_profile=profile_config,
         coverage=coverage,
-        # Prediction ledger (to-do #6) doesn't exist yet — honestly null/zero,
-        # never a placeholder number standing in for real monitoring.
-        monitoring=dict(interim_ic=None, psi_max=None, ledger_rows=0,
-                        note="prediction ledger not yet built (to-do #6)"),
+        monitoring=monitoring,
         funds=records,
     )
 
@@ -231,57 +260,82 @@ def _selftest() -> None:
     import shutil
     import tempfile
 
-    names = _load_scheme_names(limit=3)
-    orch = MasterOrchestrator(live=True)
-    profile = InvestorProfile()
-    artifact = build_artifact(names, orch=orch, profile=profile)
-
-    assert artifact["coverage"]["n_total"] == 3
-    assert artifact["coverage"]["n_ok"] + artifact["coverage"]["n_errors"] == 3
-    assert artifact["model_id"], "FAIL: model_id missing (cohort artifact not loaded)"
-    assert artifact["pipeline_sha"] != "unknown", "FAIL: git sha resolution failed"
-    print(f"[selftest] top-level shape + coverage counters consistent "
-          f"(n_ok={artifact['coverage']['n_ok']}, model_id={artifact['model_id']}) — PASS")
-
-    # Honesty: monitoring is honestly null/zero pre-ledger, never a placeholder number.
-    m = artifact["monitoring"]
-    assert m["ledger_rows"] == 0 and m["interim_ic"] is None and m["psi_max"] is None
-    print("[selftest] monitoring{} honestly null/zero pre-ledger (to-do #6 not built) — PASS")
-
-    required_top = {"amfi_code", "isin", "scheme_name", "category", "sector", "eligibility",
-                    "facts", "signal_a", "alerts_b", "nfo_dossier", "coverage_flags",
-                    "data_flags", "lock"}
-    for rec in artifact["funds"]:
-        assert required_top <= rec.keys(), f"FAIL: missing keys in {rec['scheme_name']}"
-        assert isinstance(rec["coverage_flags"], list)
-        # lock has no free data source anywhere in this pipeline — must always be null.
-        assert rec["lock"] == dict(type=None, exit_load_days=None)
-        # Every verdict in the batch artifact is against the default profile, stamped as such.
-        vb = rec["signal_a"]["verdict_basis"]
-        assert vb["is_default_profile"] is True
-        assert vb["profile"]["horizon_years"] == profile.horizon_years
-        assert vb["profile"]["liquidity_need"] == profile.liquidity_need.value
-        assert vb["profile"]["risk_appetite"] == profile.risk_appetite.value
-        # expense missing (no free TER source) must show as null + a data_flag, never guessed.
-        if rec["facts"]["expense"] is None:
-            assert DATA_FLAG_EXPENSE_UNAVAILABLE in rec["data_flags"]
-        for v in rec["signal_a"]["sub_scores"].values():
-            assert v is None or (isinstance(v, float) and np.isfinite(v))
-    print(f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
-          f"lock always null, verdict_basis stamped default-profile, "
-          f"expense gap flagged not guessed, sub_scores NaN-safe — PASS")
-
-    # A NON-default profile must NOT be mislabeled as the default.
-    custom = InvestorProfile(horizon_years=3.0, liquidity_need="high", risk_appetite="conservative")
-    custom_artifact = build_artifact(names, orch=orch, profile=custom)
-    for rec in custom_artifact["funds"]:
-        assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, \
-            "FAIL: a custom profile was mislabeled as the default"
-    print("[selftest] custom (non-default) profile correctly NOT stamped is_default_profile — PASS")
-
-    # gzip round-trip
     tmpdir = Path(tempfile.mkdtemp())
     try:
+        ledger_path = tmpdir / "predictions.jsonl"   # never touch the real ledger/ from a selftest
+
+        names = _load_scheme_names(limit=3)
+        orch = MasterOrchestrator(live=True)
+        profile = InvestorProfile()
+        artifact = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path)
+
+        assert artifact["coverage"]["n_total"] == 3
+        assert artifact["coverage"]["n_ok"] + artifact["coverage"]["n_errors"] == 3
+        assert artifact["model_id"], "FAIL: model_id missing (cohort artifact not loaded)"
+        assert artifact["pipeline_sha"] != "unknown", "FAIL: git sha resolution failed"
+        print(f"[selftest] top-level shape + coverage counters consistent "
+              f"(n_ok={artifact['coverage']['n_ok']}, model_id={artifact['model_id']}) — PASS")
+
+        # Honesty: realized_ic stays null pre-maturity (no untested-horizon proxy published);
+        # PSI/rank_stability degrade to a known status rather than fabricating a number.
+        m = artifact["monitoring"]
+        assert m["realized_ic"]["status"] in ("PENDING_MATURITY", "INSUFFICIENT_MATURED")
+        assert m["realized_ic"]["value"] is None
+        assert m["psi"]["status"] in ("OK", "MODERATE_SHIFT", "SIGNIFICANT_SHIFT",
+                                      "INSUFFICIENT_DATA", "REFERENCE_MISSING", "REFERENCE_STALE")
+        assert m["rank_stability"]["status"] == "FIRST_RUN"   # fresh tmp ledger, no prior run
+        assert m["ledger"]["rows_appended_this_run"] == artifact["coverage"]["n_ok"]
+        print(f"[selftest] monitoring{{}}: realized_ic honestly null "
+              f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
+              f"ledger rows_appended={m['ledger']['rows_appended_this_run']} — PASS")
+
+        # Re-running the same batch against the same ledger must be idempotent (dedupe).
+        artifact2 = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path)
+        assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, \
+            "FAIL: re-running the same anchors should append zero new ledger rows"
+        # Only 3 funds in this test batch (< mf_ledger.MIN_COMMON_FOR_STABILITY=20), so
+        # the honest outcome is INSUFFICIENT_OVERLAP, not a fabricated correlation —
+        # it must still find last run's rows (prev_run_id set), just not enough of them.
+        rs = artifact2["monitoring"]["rank_stability"]
+        assert rs["status"] == "INSUFFICIENT_OVERLAP" and rs["n_common"] == 3 and rs["prev_run_id"], \
+            f"FAIL: expected INSUFFICIENT_OVERLAP with n_common=3, got {rs}"
+        print("[selftest] ledger idempotency across repeated batch runs — PASS")
+
+        required_top = {"amfi_code", "isin", "scheme_name", "category", "sector", "eligibility",
+                        "facts", "signal_a", "alerts_b", "nfo_dossier", "coverage_flags",
+                        "data_flags", "lock"}
+        for rec in artifact["funds"]:
+            assert required_top <= rec.keys(), f"FAIL: missing keys in {rec['scheme_name']}"
+            assert isinstance(rec["coverage_flags"], list)
+            # lock has no free data source anywhere in this pipeline — must always be null.
+            assert rec["lock"] == dict(type=None, exit_load_days=None)
+            # Every verdict in the batch artifact is against the default profile, stamped as such.
+            vb = rec["signal_a"]["verdict_basis"]
+            assert vb["is_default_profile"] is True
+            assert vb["profile"]["horizon_years"] == profile.horizon_years
+            assert vb["profile"]["liquidity_need"] == profile.liquidity_need.value
+            assert vb["profile"]["risk_appetite"] == profile.risk_appetite.value
+            # expense missing (no free TER source) must show as null + a data_flag, never guessed.
+            if rec["facts"]["expense"] is None:
+                assert DATA_FLAG_EXPENSE_UNAVAILABLE in rec["data_flags"]
+            for v in rec["signal_a"]["sub_scores"].values():
+                assert v is None or (isinstance(v, float) and np.isfinite(v))
+        print(f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
+              f"lock always null, verdict_basis stamped default-profile, "
+              f"expense gap flagged not guessed, sub_scores NaN-safe — PASS")
+
+        # A NON-default profile must NOT be mislabeled as the default. Separate tmp
+        # ledger path — a custom profile's predictions are still real cohort_q1
+        # scores and shouldn't dedupe-collide with the default-profile run above.
+        custom = InvestorProfile(horizon_years=3.0, liquidity_need="high", risk_appetite="conservative")
+        custom_artifact = build_artifact(names, orch=orch, profile=custom,
+                                         ledger_path=tmpdir / "predictions_custom.jsonl")
+        for rec in custom_artifact["funds"]:
+            assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, \
+                "FAIL: a custom profile was mislabeled as the default"
+        print("[selftest] custom (non-default) profile correctly NOT stamped is_default_profile — PASS")
+
+        # gzip round-trip
         path = write_artifact(artifact, tmpdir)
         with gzip.open(path) as fh:
             reloaded = json.load(fh)
@@ -291,7 +345,8 @@ def _selftest() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     print("[selftest] PASS — artifact emitter produces an honest, schema-complete, "
-          "round-trippable batch artifact from real cached data")
+          "round-trippable batch artifact from real cached data, ledger append is "
+          "idempotent, and monitoring degrades honestly")
 
 
 if __name__ == "__main__":

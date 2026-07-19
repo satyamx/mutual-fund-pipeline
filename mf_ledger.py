@@ -1,0 +1,637 @@
+"""
+====================================================================================
+mf_ledger.py — append-only prediction ledger + monitoring (to-do #6)
+====================================================================================
+Design: Fable subagent pass (2026-07-19, flagged per G1 for subtle correctness:
+avoiding leakage in "how do you monitor a model whose label needs 3 years to
+realize", and picking a defensible drift-reference methodology). Implementation
++ verification here.
+
+WHY A LEDGER AT ALL: `cohort_q1`'s label needs ~3y of forward NAV data to
+realize (mf_labels.forward_return, min_yrs=2.75). You cannot know today whether
+today's prediction was right — that can only be checked once ~3 years pass, and
+only if you logged EXACTLY what was predicted, for EXACTLY which fund, against
+EXACTLY which cohort peers, using EXACTLY which model. None of that can be
+reconstructed after the fact (NAV data keeps arriving, cohorts reshuffle,
+models retrain) — hence "monitoring is unbackfillable" and the ledger must
+exist BEFORE deploy, logging from day one even though nothing can be realized
+for years.
+
+WHY GIT-TRACKED, NOT mf_cache/: mf_cache/ is gitignored and documented as
+"generated, never committed — regenerate as needed" (CLAUDE.md). A prediction
+log is the opposite of regenerable — it IS the historical record. It lives in
+a plain `ledger/` directory at the repo root, tracked in git, so it survives a
+fresh clone / a fresh CI runner with an empty mf_cache/.
+
+WHY JSONL, NOT PARQUET: parquet has no safe cross-process append — "appending"
+means read-whole-file, concat, rewrite, and a crash mid-rewrite corrupts every
+previously-logged prediction (exactly what "unbackfillable" forbids). JSONL
+appends are O(1): open "a", write one line, flush + fsync. A crash can at
+worst leave one torn trailing line, which is trivially detected (fails
+json.loads) and skipped by the reader; the next append seals any torn tail
+with a newline first.
+
+WHAT'S HONEST HERE, EXPLICITLY:
+  realized_ic  — stays null (status PENDING_MATURITY / INSUFFICIENT_MATURED)
+                until enough REAL 3y-matured outcomes exist (~2029 earliest,
+                and only once >= MIN_MATURED_FOR_IC of them). No "interim"
+                proxy computed against an untested horizon is ever published
+                under this name — the model was trained/calibrated/holdout-
+                validated against a 3y label ONLY; presenting a 1y/6mo
+                correlation as a monitoring signal would implicitly claim
+                validated skill at a horizon never measured. That is exactly
+                "manufacturing a metric by loosening its definition."
+  rank_stability — a SEPARATE, honestly-named QA proxy: does this fund's
+                predicted probability stay reasonably consistent run-to-run?
+                This claims only "the pipeline behaves sanely," never "the
+                model is right" — it does not touch outcomes at all.
+  psi          — drift of the LIVE scoring population's raw features against
+                the TRAINING population's empirical (not assumed-normal)
+                decile distribution. Computed fresh every run from the
+                already-available live panel — no ledger dependency, no
+                waiting required.
+====================================================================================
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+import pandas as pd
+
+from mf_benchmarks import forward_return
+from mf_datasources import CACHE
+from mf_infer import COHORT_ARTIFACT_PATH
+from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
+from mf_live_score import build_live_panel
+
+LOGGER = logging.getLogger("MFLedger")
+
+SCHEMA_VERSION = 1
+LEDGER_DIR = Path(__file__).parent / "ledger"
+PREDICTIONS_PATH = LEDGER_DIR / "predictions.jsonl"
+REALIZATIONS_PATH = LEDGER_DIR / "realizations.jsonl"
+PSI_REFERENCE_PATH = CACHE / "phase_b" / "psi_reference.json"
+
+# Raw, non-derived features only. Excluded (with reasons): z_* (9, within-anchor
+# z-scores — mean~0/std~1 at every anchor by construction, mf_features.py
+# assemble_panel; PSI would mostly measure small-pool noise); rank_3y (uniform
+# by construction); has_* (5) + is_thematic (binary — decile PSI ill-posed;
+# missingness is monitored directly via missing_rate below instead); age_years
+# (verified empirically, 2026-07-19: the single biggest PSI driver on the very
+# first live run, psi~3.2 — because training pools anchors 2013-2023 while any
+# live anchor is simply years further on, every fund is mechanically older than
+# the pooled historical distribution. This drift is guaranteed by the passage
+# of time, not informative about the LIVE population being unusual, and would
+# have permanently dominated psi_max/worst[] with a non-actionable signal).
+PSI_FEATURES = [
+    "cagr_1y", "cagr_3y", "cagr_5y", "vol_1y", "vol_3y", "sharpe_3y", "sortino_3y",
+    "max_dd_3y", "current_dd", "mom_6m", "mom_12m_ex1m", "rr3y_neg_share",
+    "excess_1y", "excess_3y", "beta_3y", "te_3y", "ir_3y", "upcap_3y", "downcap_3y",
+    "excess_persist", "sector_mom_12m", "sector_vol_1y", "sector_rel_strength",
+]
+PSI_BINS = 10
+PSI_MIN_UNIVERSE = 50          # below this, a decile histogram is noise, not a drift signal
+PSI_MIN_FINITE = 30            # per-feature: skip rather than compute on a thin sample
+PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25   # standard PSI rule-of-thumb thresholds
+
+MATURITY = pd.DateOffset(years=3)     # matches forward_return's own `years=3` default
+MIN_MATURED_FOR_IC = 50
+MIN_COMMON_FOR_STABILITY = 20
+
+DEDUPE_KEY = ("amfi_code", "target", "anchor")
+
+
+# ==============================================================================
+# JSONL append / read — crash-safe, torn-tail tolerant
+# ==============================================================================
+def read_jsonl(path: Path) -> List[dict]:
+    """Tolerates (and warns on) any unparseable line — a torn trailing line from
+    a crash mid-write is the expected case, but a line is skipped regardless of
+    its position, since a sealed torn line is no longer literally the last line
+    once later appends continue past it."""
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").split("\n")
+    rows: List[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            # A torn write mid-append leaves a permanently-unparseable line in
+            # place even after later appends seal the file and continue past
+            # it (it's never the literal last line again) — skip unconditionally
+            # rather than trying to distinguish "torn tail" from "corruption" by
+            # position, which breaks the moment more valid data follows it.
+            LOGGER.warning("Unparseable line in %s (%d chars) — skipping.", path, len(line))
+    return rows
+
+
+def _dedupe_key_of(row: dict, dedupe_key: tuple) -> Optional[tuple]:
+    try:
+        return tuple(row[k] for k in dedupe_key)
+    except KeyError:
+        # A row that parsed as valid JSON but is missing an expected field (e.g.
+        # a future/older schema_version) must not crash the whole append — skip
+        # it for dedupe purposes rather than letting one odd historical row take
+        # down every subsequent batch run.
+        LOGGER.warning("Ledger row missing dedupe key %s — treating as unmatchable: %r",
+                       dedupe_key, row)
+        return None
+
+
+def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH,
+                       dedupe_key: tuple = DEDUPE_KEY) -> int:
+    """Append-only, idempotent on `dedupe_key`, crash-safe (seals a torn tail
+    before writing, fsyncs after). Returns the number of NEW rows written."""
+    if not rows:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {k for k in (_dedupe_key_of(r, dedupe_key) for r in read_jsonl(path)) if k is not None}
+    to_write = [r for r in rows if _dedupe_key_of(r, dedupe_key) not in existing]
+    if not to_write:
+        return 0
+    if path.exists() and path.stat().st_size > 0:
+        with open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                with open(path, "a", encoding="utf-8") as fh2:
+                    fh2.write("\n")
+    with open(path, "a", encoding="utf-8") as fh:
+        for r in to_write:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    return len(to_write)
+
+
+def ledger_stats(path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
+    rows = read_jsonl(path)
+    if not rows:
+        return dict(rows_total=0, first_anchor=None, last_anchor=None, n_runs=0)
+    anchors = sorted(r["anchor"] for r in rows)
+    return dict(rows_total=len(rows), first_anchor=anchors[0], last_anchor=anchors[-1],
+               n_runs=len({r["run_id"] for r in rows}))
+
+
+# ==============================================================================
+# Building a prediction row from a score_live() OK result
+# ==============================================================================
+def build_row(amfi_code: str, cohort_signal: Optional[dict], *, run_id: str,
+             pipeline_sha: str, model_id: Optional[str]) -> Optional[dict]:
+    """None for any non-OK cohort_signal — a THIN_COHORT/STALE_NAV/NOT_IN_UNIVERSE
+    result is not a prediction and can never be realized; those gaps already
+    live honestly in the artifact's own coverage{}, not duplicated here."""
+    if cohort_signal is None or cohort_signal.get("status") != "OK":
+        return None
+    row = dict(
+        schema_version=SCHEMA_VERSION, run_id=run_id,
+        logged_at=datetime.now(timezone.utc).isoformat(), pipeline_sha=pipeline_sha,
+        model_id=model_id, target=cohort_signal["target"], amfi_code=amfi_code,
+        anchor=cohort_signal["anchor"], probability=cohort_signal["probability"],
+        cohort_percentile=cohort_signal["cohort_percentile"],
+        cohort_key=cohort_signal["cohort_key"], cohort_n=cohort_signal["cohort_n"],
+        universe_n=cohort_signal["universe_n"], cohort_codes=cohort_signal["cohort_codes"],
+        signal_context=cohort_signal["signal_context"],
+        imputed_features=cohort_signal["imputed_features"], features=cohort_signal["features"],
+    )
+    canonical = json.dumps(dict(amfi_code=amfi_code, target=row["target"], anchor=row["anchor"],
+                               model_id=model_id, probability=row["probability"],
+                               features=row["features"]), sort_keys=True)
+    row["row_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return row
+
+
+# ==============================================================================
+# rank_stability — a model-behavior QA proxy, NOT a skill/outcome metric
+# ==============================================================================
+def _previous_run_rows(all_rows: List[dict], current_run_id: str) -> List[dict]:
+    other_runs = sorted({r["run_id"] for r in all_rows if r["run_id"] != current_run_id})
+    if not other_runs:
+        return []
+    prev_run_id = other_runs[-1]
+    return [r for r in all_rows if r["run_id"] == prev_run_id]
+
+
+def rank_stability(current_rows: List[dict], previous_rows: List[dict]) -> Dict[str, Any]:
+    note = "model-stability QA (run-to-run consistency) — not a skill metric"
+    if not previous_rows:
+        return dict(status="FIRST_RUN", spearman=None, n_common=0, prev_run_id=None, note=note)
+    prev_by_key = {(r["amfi_code"], r["target"]): r["probability"] for r in previous_rows}
+    cur, prev = [], []
+    for r in current_rows:
+        key = (r["amfi_code"], r["target"])
+        if key in prev_by_key:
+            cur.append(r["probability"])
+            prev.append(prev_by_key[key])
+    if len(cur) < MIN_COMMON_FOR_STABILITY:
+        return dict(status="INSUFFICIENT_OVERLAP", spearman=None, n_common=len(cur),
+                   prev_run_id=previous_rows[0]["run_id"], note=note)
+    spearman = float(pd.Series(cur).rank().corr(pd.Series(prev).rank()))
+    return dict(status="OK", spearman=round(spearman, 4), n_common=len(cur),
+               prev_run_id=previous_rows[0]["run_id"], note=note)
+
+
+# ==============================================================================
+# PSI (population stability index) — empirical training deciles as reference
+# ==============================================================================
+def _decile_edges(values: np.ndarray, bins: int = PSI_BINS) -> np.ndarray:
+    finite = values[np.isfinite(values)]
+    if finite.size < PSI_MIN_FINITE:
+        return np.array([])
+    edges = np.unique(np.nanquantile(finite, np.linspace(0, 1, bins + 1)))
+    if edges.size < 2:
+        return np.array([])
+    edges[0], edges[-1] = -np.inf, np.inf
+    return edges
+
+
+def _bin_proportions(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0 or edges.size < 2:
+        return np.array([])
+    idx = np.clip(np.searchsorted(edges, finite, side="right") - 1, 0, len(edges) - 2)
+    counts = np.bincount(idx, minlength=len(edges) - 1).astype(float)
+    return counts / counts.sum()
+
+
+def build_psi_reference(out: Path = PSI_REFERENCE_PATH) -> dict:
+    """Training-time only: empirical decile edges + reference bin proportions
+    per monitored feature, over the cohort model's ACTUAL training rows (same
+    filter mf_model.load_cohort_dataset applies). Rebuild whenever the cohort
+    model retrains — stamped with that artifact's version so monitoring-time
+    code can detect a stale reference rather than silently comparing against
+    the wrong model's training population."""
+    import mf_model as M  # sklearn-adjacent imports stay out of the monitoring/scoring path
+
+    df, _ = M.load_cohort_dataset()
+    artifact = json.loads(COHORT_ARTIFACT_PATH.read_text(encoding="utf-8"))
+    ref: Dict[str, Any] = dict(model_id=artifact["version"],
+                               created=datetime.now(timezone.utc).isoformat(), features={})
+    for col in PSI_FEATURES:
+        vals = df[col].to_numpy(dtype=float)
+        edges = _decile_edges(vals)
+        if edges.size < 2:
+            continue
+        ref["features"][col] = dict(
+            edges=[float(e) for e in edges],
+            bin_props=[float(p) for p in _bin_proportions(vals, edges)],
+            missing_rate=float(np.mean(~np.isfinite(vals))))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(ref, indent=1), encoding="utf-8")
+    return ref
+
+
+def compute_psi(live_features: Dict[str, np.ndarray], reference: dict) -> Dict[str, Any]:
+    """Pure function — unit-testable without any live orchestrator/NAV state."""
+    per_feature: Dict[str, float] = {}
+    skipped: List[str] = []
+    for col, ref_f in reference.get("features", {}).items():
+        vals = live_features.get(col)
+        if vals is None:
+            skipped.append(col)
+            continue
+        vals = np.asarray(vals, dtype=float)
+        if np.isfinite(vals).sum() < PSI_MIN_FINITE:
+            skipped.append(col)
+            continue
+        edges = np.array(ref_f["edges"])
+        cur = np.clip(_bin_proportions(vals, edges), 1e-4, None)
+        ref_p = np.clip(np.array(ref_f["bin_props"]), 1e-4, None)
+        per_feature[col] = float(np.sum((cur - ref_p) * np.log(cur / ref_p)))
+    if not per_feature:
+        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
+                   worst=[], n_features=0, skipped_features=skipped)
+    psi_max = max(per_feature.values())
+    status = ("SIGNIFICANT_SHIFT" if psi_max > PSI_SIGNIFICANT else
+             "MODERATE_SHIFT" if psi_max > PSI_MODERATE else "OK")
+    worst = sorted(per_feature.items(), key=lambda kv: -kv[1])[:3]
+    return dict(status=status, psi_max=round(psi_max, 4),
+               psi_mean=round(float(np.mean(list(per_feature.values()))), 4),
+               worst=[dict(feature=f, psi=round(v, 4)) for f, v in worst],
+               n_features=len(per_feature), skipped_features=skipped)
+
+
+def compute_psi_live(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series], engine,
+                     today: pd.Timestamp, model_id: Optional[str],
+                     reference_path: Path = PSI_REFERENCE_PATH) -> Dict[str, Any]:
+    """Builds ONE fresh live panel at the universe's latest common anchor and
+    compares it to the shipped training reference — no ledger needed; this is
+    computable from day one, unlike realized_ic."""
+    if not reference_path.exists():
+        return dict(status="REFERENCE_MISSING", psi_max=None, psi_mean=None,
+                   worst=[], n_features=0, skipped_features=[])
+    reference = json.loads(reference_path.read_text(encoding="utf-8"))
+    if model_id is not None and reference.get("model_id") != model_id:
+        return dict(status="REFERENCE_STALE", psi_max=None, psi_mean=None,
+                   worst=[], n_features=0, skipped_features=[],
+                   reference_model_id=reference.get("model_id"))
+
+    last_dates = [s.dropna().index.max() for s in nav_panel.values() if len(s.dropna())]
+    if not last_dates:
+        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
+                   worst=[], n_features=0, skipped_features=[], universe_n=0)
+    t = min(max(last_dates), pd.Timestamp(today).normalize())
+    _, panel = build_live_panel(manifest, nav_panel, t, engine=engine)
+    if len(panel) < PSI_MIN_UNIVERSE:
+        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
+                   worst=[], n_features=0, skipped_features=[], universe_n=len(panel))
+
+    live_features = {c: panel[c].to_numpy(dtype=float) for c in PSI_FEATURES if c in panel.columns}
+    result = compute_psi(live_features, reference)
+    result["universe_n"] = len(panel)
+    result["reference_model_id"] = reference.get("model_id")
+    return result
+
+
+# ==============================================================================
+# Realization — an OFFLINE job, never part of the live batch. Joins matured
+# ledger rows against fresh NAV using the EXACT mf_labels.add_cohort_targets
+# math, over the FROZEN cohort_codes logged at prediction time.
+# ==============================================================================
+def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
+    anchor = pd.Timestamp(row["anchor"])
+    own_series = nav_panel.get(row["amfi_code"])
+    own_fwd = forward_return(own_series, anchor) if own_series is not None else None
+
+    peer_fwds: List[float] = []
+    for peer in row["cohort_codes"]:
+        s = nav_panel.get(peer)
+        fr = forward_return(s, anchor) if s is not None else None
+        if fr is not None:
+            peer_fwds.append(fr.value)
+
+    if own_fwd is None:
+        status, y_realized = "DEAD_OR_GAP", None
+    elif len(peer_fwds) < COHORT_MIN_SIZE:
+        status, y_realized = "THIN_AT_REALIZATION", None
+    else:
+        q75 = float(np.quantile(peer_fwds, 0.75))
+        status, y_realized = "REALIZED", bool(own_fwd.value >= q75)
+
+    return dict(
+        schema_version=SCHEMA_VERSION, amfi_code=row["amfi_code"], target=row["target"],
+        anchor=row["anchor"], realized_at=datetime.now(timezone.utc).isoformat(),
+        status=status, y_realized=y_realized,
+        own_r_fwd=own_fwd.value if own_fwd is not None else None,
+        n_peer_r_fwd=len(peer_fwds), probability=row["probability"],
+        cohort_percentile=row["cohort_percentile"],
+    )
+
+
+def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
+                                predictions_path: Path = PREDICTIONS_PATH,
+                                realizations_path: Path = REALIZATIONS_PATH,
+                                manifest: Optional[pd.DataFrame] = None,
+                                nav_panel: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Any]:
+    """Offline job — run periodically (e.g. monthly cron), NOT from the live
+    batch path. Idempotent: already-realized (amfi_code, target, anchor) rows
+    are skipped."""
+    today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
+    manifest = manifest if manifest is not None else load_manifest()
+    nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
+
+    predictions = read_jsonl(predictions_path)
+    already = {(r["amfi_code"], r["target"], r["anchor"]) for r in read_jsonl(realizations_path)}
+
+    new_rows: List[dict] = []
+    n_pending = 0
+    for row in predictions:
+        key = (row["amfi_code"], row["target"], row["anchor"])
+        if key in already:
+            continue
+        if today < pd.Timestamp(row["anchor"]) + MATURITY:
+            n_pending += 1
+            continue
+        new_rows.append(_realize_one(row, nav_panel))
+
+    n_appended = append_predictions(new_rows, path=realizations_path,
+                                    dedupe_key=("amfi_code", "target", "anchor"))
+    return dict(n_predictions=len(predictions), n_pending=n_pending,
+               n_matured_this_run=len(new_rows), n_newly_realized=n_appended)
+
+
+def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
+                     predictions_path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
+    preds = read_jsonl(predictions_path)
+    rows = read_jsonl(realizations_path)
+    realized = [r for r in rows if r["status"] == "REALIZED"]
+    dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
+    thin = sum(1 for r in rows if r["status"] == "THIN_AT_REALIZATION")
+
+    earliest_maturity = None
+    if preds:
+        first_anchor = min(pd.Timestamp(r["anchor"]) for r in preds)
+        earliest_maturity = str((first_anchor + MATURITY).date())
+
+    if not rows:
+        status, value = "PENDING_MATURITY", None
+    elif len(realized) < MIN_MATURED_FOR_IC:
+        status, value = "INSUFFICIENT_MATURED", None
+    else:
+        probs = pd.Series([r["probability"] for r in realized])
+        ys = pd.Series([float(r["y_realized"]) for r in realized])
+        status, value = "OK", round(float(probs.rank().corr(ys.rank())), 4)
+
+    return dict(status=status, value=value, n_matured=len(rows), n_realized=len(realized),
+               n_dead_or_gap=dead, n_thin_at_realization=thin,
+               effective_n=round(len(realized) / 30) if realized else 0,
+               earliest_maturity=earliest_maturity)
+
+
+# ==============================================================================
+# monitoring{} assembly — the single entry point mf_artifact.py calls
+# ==============================================================================
+def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict], psi: dict,
+                     predictions_path: Path = PREDICTIONS_PATH,
+                     realizations_path: Path = REALIZATIONS_PATH) -> Dict[str, Any]:
+    """`current_rows`: the rows THIS run scored (in memory, before dedup) — NOT
+    re-derived by looking up run_id in the ledger file. Rows unchanged from a
+    prior run are deliberately NOT re-appended (append-only + dedupe), so they
+    never carry the new run_id in the file; looking them up by run_id there
+    would find nothing on an ordinary no-op rerun and starve rank_stability."""
+    all_rows = read_jsonl(predictions_path)
+    stats = ledger_stats(predictions_path)
+    previous = _previous_run_rows(all_rows, run_id)
+    return dict(
+        ledger=dict(rows_total=stats["rows_total"], rows_appended_this_run=rows_appended,
+                   first_anchor=stats["first_anchor"], path=str(predictions_path)),
+        realized_ic=realized_summary(realizations_path, predictions_path),
+        psi=psi,
+        rank_stability=rank_stability(current_rows, previous),
+        note="realized_ic is structurally unmeasurable before the first logged anchor + "
+             "~3y; no interim proxy is published (untested horizon).",
+    )
+
+
+# ==============================================================================
+# SELFTEST
+# ==============================================================================
+def _selftest() -> None:
+    import shutil
+    import tempfile
+
+    tmpdir = Path(tempfile.mkdtemp())
+    try:
+        pred_path = tmpdir / "predictions.jsonl"
+        real_path = tmpdir / "realizations.jsonl"
+
+        # ---- append/read round-trip + idempotency --------------------------
+        cs_ok = dict(status="OK", target="cohort_q1", probability=0.4, cohort_percentile=0.6,
+                    cohort_key="('category', 'Flexi Cap')", cohort_n=10, universe_n=130,
+                    anchor="2020-01-31", cohort_codes=["A", "B", "C", "D"],
+                    signal_context={"holdout_auc": 0.578, "base_rate": 0.323},
+                    imputed_features=[], features={"cagr_1y": 0.1, "vol_1y": None})
+        row = build_row("A", cs_ok, run_id="run1", pipeline_sha="deadbeef", model_id="test_v1")
+        assert row is not None and row["amfi_code"] == "A" and "row_hash" in row
+        assert build_row("A", dict(status="THIN_COHORT"), run_id="run1",
+                        pipeline_sha="x", model_id="m") is None
+        n = append_predictions([row], path=pred_path)
+        assert n == 1
+        n2 = append_predictions([row], path=pred_path)
+        assert n2 == 0, "FAIL: re-appending the same row should be a no-op (dedupe)"
+        assert len(read_jsonl(pred_path)) == 1
+        print("[selftest] append/read round-trip + idempotency — PASS")
+
+        # ---- torn-tail recovery ---------------------------------------------
+        with open(pred_path, "a", encoding="utf-8") as fh:
+            fh.write('{"amfi_code": "B", "target": "cohort_q1"')   # deliberately truncated
+        recovered = read_jsonl(pred_path)
+        assert len(recovered) == 1, "FAIL: torn trailing line should be skipped, not crash"
+        row2 = build_row("B", cs_ok, run_id="run1", pipeline_sha="deadbeef", model_id="test_v1")
+        n3 = append_predictions([row2], path=pred_path)
+        assert n3 == 1
+        rows_after = read_jsonl(pred_path)
+        assert len(rows_after) == 2 and {r["amfi_code"] for r in rows_after} == {"A", "B"}
+        print("[selftest] torn-tail recovery: seals + appends correctly — PASS")
+
+        # ---- malformed-but-valid-JSON row must not crash dedupe -------------
+        malformed_path = tmpdir / "malformed.jsonl"
+        with open(malformed_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"amfi_code": "X", "no_target_or_anchor_here": True}) + "\n")
+        n4 = append_predictions([row], path=malformed_path)   # 'row' has a real dedupe key
+        assert n4 == 1, "FAIL: a malformed pre-existing row must not block appending a valid new one"
+        print("[selftest] malformed row (missing dedupe key) doesn't crash append — PASS")
+
+        # ---- maturity gate + honest degradation (THIN_AT_REALIZATION, DEAD) -
+        far_future_row = dict(row2, amfi_code="C", anchor="2026-01-01")
+        append_predictions([far_future_row], path=pred_path)
+        summary = realize_matured_predictions(today=pd.Timestamp("2026-06-01"),
+                                              predictions_path=pred_path,
+                                              realizations_path=real_path,
+                                              manifest=load_manifest(),
+                                              nav_panel={})   # empty nav_panel -> all matured rows degrade honestly
+        assert summary["n_pending"] == 1, "FAIL: 2026-01-01 anchor should still be PENDING in mid-2026"
+        realized_rows = read_jsonl(real_path)
+        assert all(r["status"] == "DEAD_OR_GAP" for r in realized_rows), \
+            "FAIL: with no NAV data at all, every matured row must degrade to DEAD_OR_GAP, never guessed"
+        print(f"[selftest] maturity gate (n_pending={summary['n_pending']}) + "
+              f"honest DEAD_OR_GAP degradation on empty NAV data — PASS")
+
+        # ---- IC gate: insufficient matured -> null, never fabricated --------
+        s = realized_summary(real_path, pred_path)
+        assert s["status"] in ("PENDING_MATURITY", "INSUFFICIENT_MATURED") and s["value"] is None
+        print(f"[selftest] realized_ic honestly null pre-threshold (status={s['status']}) — PASS")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ---- Test D: realization replay against REAL stored labels.parquet -----
+    # No waiting 3 years needed: pick a real anchor already matured relative to
+    # the codebase's own frozen TODAY, replay it through _realize_one using the
+    # SAME cohort membership mf_labels.add_cohort_targets used, and assert
+    # bit-agreement with the stored ground truth.
+    from mf_benchmarks import PeerProxyResolver
+    manifest = load_manifest()
+    nav_panel = load_nav_panel(manifest)
+    labels = pd.read_parquet("mf_cache/phase_b/labels.parquet")
+    anchor = pd.Timestamp("2016-03-31")
+    sub = labels[(labels["anchor"] == anchor) & labels["y_cohort_q1"].notna()]
+    assert not sub.empty, "FAIL: no cohort-eligible rows at the chosen historical anchor"
+    stored = sub.iloc[0]
+    code = stored["amfi_code"]
+
+    resolver = PeerProxyResolver(manifest)
+    gkey = resolver._group_key(code)
+    assert str(gkey) == stored["cohort_key"], "FAIL: cohort_key convention drifted from labels.parquet"
+    fake_row = dict(amfi_code=code, target="cohort_q1", anchor=str(anchor.date()),
+                    cohort_codes=resolver.groups[gkey], probability=0.5, cohort_percentile=0.5)
+    realized = _realize_one(fake_row, nav_panel)
+    assert realized["status"] == "REALIZED"
+    assert realized["n_peer_r_fwd"] == int(stored["cohort_n"]), \
+        f"FAIL: peer R_fwd count {realized['n_peer_r_fwd']} != stored cohort_n {stored['cohort_n']}"
+    assert abs(realized["own_r_fwd"] - float(stored["R_fwd"])) < 1e-9
+    assert realized["y_realized"] == bool(stored["y_cohort_q1"]), \
+        "FAIL: realized y disagrees with the stored training label for the same (fund, anchor)"
+    print(f"[selftest] Test D (realization replay @ {anchor.date()}, fund {code}): "
+          f"matches stored labels.parquet exactly — PASS")
+
+    # ---- PSI: null case (live == reference itself) and shock case ----------
+    import mf_model as M
+    df, _ = M.load_cohort_dataset()
+    reference = build_psi_reference(out=Path(tempfile.mktemp(suffix=".json")))
+    same_features = {c: df[c].to_numpy(dtype=float) for c in PSI_FEATURES if c in df.columns}
+    psi_same = compute_psi(same_features, reference)
+    assert psi_same["status"] == "OK" and psi_same["psi_max"] < 0.02, \
+        f"FAIL: identical distribution should score near-zero PSI, got {psi_same}"
+    print(f"[selftest] PSI null case (live==reference): psi_max={psi_same['psi_max']} — PASS")
+
+    shocked = dict(same_features)
+    shocked["vol_1y"] = shocked["vol_1y"] * 1.8 + 0.05
+    shocked["cagr_3y"] = shocked["cagr_3y"] + 0.15
+    psi_shock = compute_psi(shocked, reference)
+    assert psi_shock["status"] == "SIGNIFICANT_SHIFT", f"FAIL: shocked features should trip SIGNIFICANT_SHIFT: {psi_shock}"
+    shocked_names = {w["feature"] for w in psi_shock["worst"]}
+    assert "vol_1y" in shocked_names or "cagr_3y" in shocked_names
+    print(f"[selftest] PSI shock case: psi_max={psi_shock['psi_max']} status={psi_shock['status']} — PASS")
+
+    psi_thin = compute_psi({"cagr_1y": np.array([0.1, 0.2])}, reference)
+    assert psi_thin["status"] == "INSUFFICIENT_DATA" and psi_thin["psi_max"] is None
+    print("[selftest] PSI insufficient-data case honestly null — PASS")
+
+    # ---- rank_stability: first run / identical run / permuted run ----------
+    r1 = [dict(amfi_code=f"F{i}", target="cohort_q1", probability=0.5 + 0.01 * i, run_id="run1")
+         for i in range(25)]
+    assert rank_stability(r1, [])["status"] == "FIRST_RUN"
+    r2_same = [dict(r, run_id="run2") for r in r1]
+    stab_same = rank_stability(r2_same, r1)
+    assert stab_same["status"] == "OK" and stab_same["spearman"] > 0.99
+    r2_shuffled = [dict(r2_same[i], probability=r2_same[(i * 7 + 3) % len(r2_same)]["probability"])
+                  for i in range(len(r2_same))]
+    stab_shuf = rank_stability(r2_shuffled, r1)
+    assert stab_shuf["status"] == "OK" and stab_shuf["spearman"] < 0.9
+    print(f"[selftest] rank_stability: first_run=FIRST_RUN, identical={stab_same['spearman']}, "
+          f"shuffled={stab_shuf['spearman']} — PASS")
+
+    print("[selftest] PASS — ledger append/read is crash-safe and idempotent, realization "
+          "replays real stored training labels exactly, PSI/rank_stability degrade honestly")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--build-reference", action="store_true",
+                    help="(re)build psi_reference.json from the cohort model's training rows")
+    ap.add_argument("--realize", action="store_true",
+                    help="join matured ledger predictions against fresh NAV data (offline job)")
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    if args.selftest:
+        _selftest()
+    elif args.build_reference:
+        ref = build_psi_reference()
+        LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), PSI_REFERENCE_PATH)
+    elif args.realize:
+        LOGGER.info("realize: %s", realize_matured_predictions())
+    else:
+        ap.print_help()

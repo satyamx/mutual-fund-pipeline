@@ -76,7 +76,8 @@ def _gap_result(status: str, target: str, **extra: Any) -> Dict[str, Any]:
     assert status in _STATUSES
     out = dict(status=status, target=target, probability=None, cohort_percentile=None,
               cohort_key=None, cohort_n=0, universe_n=0, anchor=None, staleness_days=None,
-              signal_context=None, imputed_features=[], note=None)
+              signal_context=None, imputed_features=[], cohort_codes=[], features=None,
+              note=None)
     out.update(extra)
     return out
 
@@ -165,6 +166,17 @@ def score_live(code: str, *,
                anchor=str(t.date()), staleness_days=staleness_days,
                signal_context=inferencer.signal_context(target),
                imputed_features=imputed,
+               # Frozen for the prediction ledger (mf_ledger.py): cohorts reshuffle
+               # over time (manifest edits, closures), so realizing this prediction
+               # years from now must rank against THIS exact peer set, not whichever
+               # peers happen to still be in the cohort at realization time — else
+               # the realized outcome would silently be a different, redefined label.
+               cohort_codes=sorted(cohort_present),
+               # Frozen exact feature vector — the only snapshot of this live anchor
+               # that will ever exist (unlike training anchors, never written to
+               # features.parquet); NaN -> None to stay JSON-safe for the ledger.
+               features={c: (float(v) if isinstance(v, (int, float)) and np.isfinite(v) else None)
+                        for c, v in target_features.items()},
                note="weak validated signal (AUC ~0.578, lift ~1.76x) — "
                     "supporting datapoint, never a verdict")
 
@@ -250,6 +262,8 @@ def _selftest() -> None:
                     today=T)
     assert res["status"] == "OK" and 0.0 <= res["probability"] <= 1.0
     assert 0.0 <= res["cohort_percentile"] <= 1.0
+    assert target_code in res["cohort_codes"] and len(res["cohort_codes"]) == res["cohort_n"]
+    assert res["features"] and set(res["features"]) == set(inf.features)
     print(f"[selftest] end-to-end score_live({target_code}): status=OK "
           f"p={res['probability']:.3f} percentile={res['cohort_percentile']:.2f} "
           f"cohort_n={res['cohort_n']} universe_n={res['universe_n']} — PASS")

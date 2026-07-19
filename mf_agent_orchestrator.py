@@ -1173,6 +1173,14 @@ class MasterOrchestrator:
         evaluate() call has resolved the cohort resources (or if unavailable)."""
         return self._cohort_inferencer.artifact["version"] if self._cohort_inferencer else None
 
+    def cohort_live_resources(self):
+        """Public wrapper around _cohort_resources() for external batch/
+        monitoring code (e.g. mf_ledger.py's PSI computation via mf_artifact.py)
+        that needs the same cached (manifest, nav_panel, inferencer, engine)
+        evaluate() uses, without reaching into a private method. Returns None
+        if the cohort resources are unavailable (same degrade as evaluate())."""
+        return self._cohort_resources()
+
     def _sibling_weights(self, dossier: FundDossier) -> Dict[str, Dict[str, pd.Series]]:
         """Same-AMC equity schemes in overlap scope (large-cap peers exempt per SEBI)."""
         rule = SEBI_2026_RULES.get(dossier.category)
