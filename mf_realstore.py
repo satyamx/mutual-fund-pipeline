@@ -189,6 +189,7 @@ class RealNAVStore:
         isin = info.get("isin") or (meta or {}).get("isin_growth") or ""
         rec = dict(
             isin=isin,
+            amfi_code=code,
             category=category,
             amc=info.get("amc") or (meta or {}).get("fund_house") or "Unknown",
             manager="NOT AVAILABLE (no free data source publishes fund-manager names)",

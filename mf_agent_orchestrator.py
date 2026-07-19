@@ -600,6 +600,11 @@ class FundDossier:
     # Alpha score, SEBI cap-fidelity) so they report NOT AVAILABLE instead of
     # computing off an empty/zero portfolio. Always True for MockMarketDataStore.
     holdings_available: bool = True
+    # AMFI scheme code — empty for MockMarketDataStore (which has no trained
+    # cohort membership anyway); populated by RealNAVStore.fund(). This is the
+    # only key the cohort_q1 live-scoring path (mf_live_score.py) needs to look
+    # up a fund's trained-universe membership.
+    amfi_code: str = ""
 
 
 class DataIngestionCategorizerAgent:
@@ -670,7 +675,8 @@ class DataIngestionCategorizerAgent:
             aum_cr=rec["aum_cr"], nav=rec["nav"], snapshots=snaps,
             current_holdings=current,
             daily_equity_weights=self.store.daily_weights_last_quarter(name),
-            missing_params=missing, holdings_available=holdings_available)
+            missing_params=missing, holdings_available=holdings_available,
+            amfi_code=rec.get("amfi_code", ""))
         self.v._record("agentA", "dossier_built", True,
                        f"{name} -> {category} ({bucket.value}); missing={missing}")
         self.log.info("Resolved %r -> %s | category=%s | missing params=%s",
@@ -1122,7 +1128,43 @@ class MasterOrchestrator:
         self.verifier = TrueToLabelVerifier(self.validator)
         self.recommender = RecommendationEngine(self.validator)
         self.sentinel = SentinelEngine(self.validator)
+        # Cohort-signal (cohort_q1) resources are loaded lazily on first use, not
+        # here: they need mf_cache/phase_b/model_artifact_cohort.json + the
+        # universe manifest + a full NAV panel, none of which the MOCK demo
+        # ships with. A missing artifact must degrade evaluate() to "signal
+        # unavailable", never crash __init__ for a plain mock run.
+        self._cohort_manifest = None
+        self._cohort_nav_panel = None
+        self._cohort_inferencer = None
+        self._cohort_engine = None
+        self._cohort_unavailable: Optional[str] = None
         self.log = logging.getLogger("MFOrchestrator.Master")
+
+    def _cohort_resources(self):
+        """Lazy-load + instance-cache the cohort_q1 live-scoring resources
+        (mf_live_score.py). Builds the FeatureEngine once (holds a strong
+        reference for this orchestrator's lifetime — no separate id()-keyed
+        global cache needed). Returns None (logged once) if the Phase-B
+        artifact hasn't been built yet or any other resource fails to load —
+        never raises out of evaluate()."""
+        if self._cohort_unavailable is not None:
+            return None
+        if self._cohort_inferencer is None:
+            try:
+                from mf_features import FeatureEngine
+                from mf_infer import CohortInferencer
+                from mf_labels import load_manifest, load_nav_panel
+                self._cohort_manifest = load_manifest()
+                self._cohort_nav_panel = load_nav_panel(self._cohort_manifest)
+                self._cohort_inferencer = CohortInferencer()
+                self._cohort_engine = FeatureEngine(self._cohort_manifest, self._cohort_nav_panel)
+            except Exception as exc:  # noqa: BLE001 — a weak supporting signal must
+                # never take down the whole screen; degrade to "unavailable".
+                self._cohort_unavailable = str(exc)
+                self.log.warning("Cohort signal unavailable this run: %s", exc)
+                return None
+        return (self._cohort_manifest, self._cohort_nav_panel,
+                self._cohort_inferencer, self._cohort_engine)
 
     def _sibling_weights(self, dossier: FundDossier) -> Dict[str, Dict[str, pd.Series]]:
         """Same-AMC equity schemes in overlap scope (large-cap peers exempt per SEBI)."""
@@ -1153,10 +1195,42 @@ class MasterOrchestrator:
             rec = self.recommender.run(dossier, compliance, backtest,
                                        profile_score, sentiment, profile)
             sentinel_report = self.sentinel.run(dossier, compliance, backtest, sentiment, bench)
+
+            # cohort_q1 — the one out-of-sample-validated signal (holdout AUC
+            # ~0.578, lift ~1.76x — weak). A supporting datapoint alongside the
+            # screen, never folded into the verdict rule (that's a separate,
+            # deliberate decision — see mf-architecture-decisions memory).
+            # Isolated in its own try/except: a bug or transient failure in this
+            # weak, optional signal must never discard an otherwise-complete
+            # evaluation (dossier/compliance/backtest/recommendation/sentinel
+            # are already computed above by the time this runs).
+            cohort_signal = None
+            try:
+                if dossier.amfi_code:
+                    res = self._cohort_resources()
+                    if res is None:
+                        rec["coverage_flags"].append(
+                            "COHORT SIGNAL NOT EVALUATED — MODEL_ARTIFACT_UNAVAILABLE"
+                            + (f": {self._cohort_unavailable}" if self._cohort_unavailable else ""))
+                    else:
+                        from mf_live_score import score_live
+                        manifest, nav_panel, inferencer, engine = res
+                        cohort_signal = score_live(dossier.amfi_code, manifest=manifest,
+                                                   nav_panel=nav_panel, inferencer=inferencer,
+                                                   engine=engine, today=TODAY)
+                        if cohort_signal["status"] != "OK":
+                            rec["coverage_flags"].append(
+                                f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"
+                                + (f": {cohort_signal['note']}" if cohort_signal["note"] else ""))
+            except Exception as exc:  # noqa: BLE001 — see comment above
+                self.log.warning("Cohort signal errored for %r: %s", dossier.scheme_name, exc)
+                rec["coverage_flags"].append("COHORT SIGNAL NOT EVALUATED — unexpected error")
+
             self.validator.register_iteration(context=f"evaluate:{dossier.scheme_name}")
             return dict(profile=profile.model_dump(mode="json"), dossier=dossier, compliance=compliance,
                         backtest=backtest, profile_score=profile_score,
-                        sentiment=sentiment, recommendation=rec, sentinel=sentinel_report)
+                        sentiment=sentiment, recommendation=rec, sentinel=sentinel_report,
+                        cohort_signal=cohort_signal)
         except Exception as exc:  # noqa: BLE001 — institutional runs must degrade cleanly
             self.log.error("Evaluation failed for %r: %s\n%s", query, exc,
                            traceback_format(exc))
@@ -1205,6 +1279,11 @@ class MasterOrchestrator:
         print(f"      Supporting screen score: {dot[mc['screen_score']]} "
               f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)")
         print(f"      Manager Alpha: {r['manager_alpha']}")
+        cs = result.get("cohort_signal")
+        if cs is not None and cs["status"] == "OK":
+            print(f"      Cohort signal ({cs['target']}): p={cs['probability']:.2f}, "
+                  f"percentile={cs['cohort_percentile']:.0%} within {cs['cohort_n']}-fund cohort "
+                  f"'{cs['cohort_key']}' @ {cs['anchor']} — {cs['note']}")
         for cf in r["coverage_flags"]:
             print(f"      [DATA GAP] {cf}")
         if d.bucket == SEBIBucket.OTHER_PASSIVE:
