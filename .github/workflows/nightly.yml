@@ -1,0 +1,106 @@
+name: nightly-refresh
+
+# Roadmap #7: scheduler + throttle + incremental NAV refresh, at $0 on GitHub-hosted
+# runners. Refreshes NAV for the tracked universe, re-emits the app artifact, and
+# appends + commits the (git-tracked, unbackfillable) prediction ledger.
+#
+# THROTTLE: there is no sleep loop. mf_cache/ is persisted between runs via
+# actions/cache, and the data adapters are cache-first with a 20h TTL — so a warm
+# cache means bootstrap only refetches NAV that is actually stale. That IS the
+# politeness mechanism for the free, no-key APIs (AMFI / mfapi.in / yfinance).
+#
+# COLD-CACHE NOTE: the universe manifest (mf_cache/universe_manifest.csv) and the
+# cohort model artifact are GENERATED, not committed (mf_cache/ is gitignored). Seed
+# the cache once locally (bootstrap + `python mf_model.py --stage cohort`) and let the
+# first run populate the actions/cache; steps that need those inputs degrade honestly
+# until then rather than fabricating.
+
+on:
+  schedule:
+    # 20:30 UTC ≈ 02:00 IST — after AMFI's evening NAV publish. Adjust if needed.
+    - cron: "30 20 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write        # commit the appended prediction ledger back to the repo
+
+concurrency:
+  group: nightly-refresh
+  cancel-in-progress: false     # never interrupt a run mid-ledger-append
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONIOENCODING: utf-8          # ₹/emoji output crashes under cp1252 otherwise
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Evolving-cache pattern: the run_id key never hits, so restore-keys pulls the
+      # most recent cache and a fresh one is always saved post-job (persisting NAV,
+      # models, manifest, and the emitted artifact for the next night).
+      - name: Restore generated data cache
+        uses: actions/cache@v4
+        with:
+          path: mf_cache
+          key: mf-cache-${{ github.run_id }}
+          restore-keys: |
+            mf-cache-
+
+      - name: Sanity gate — pure selftests (no data needed)
+        run: |
+          python mf_holdings.py --selftest
+          python mf_eval.py --selftest
+
+      - name: Refresh AMFI master + NAV for the tracked universe
+        run: python bootstrap.py --from-manifest
+
+      - name: Model-layer selftests (only when the cohort model is present)
+        run: |
+          if [ -f mf_cache/phase_b/model_artifact_cohort.json ]; then
+            python mf_features.py --selftest
+            python mf_infer.py --selftest
+            python mf_ledger.py --selftest
+          else
+            echo "cohort model artifact absent (cold cache) — skipping model selftests"
+          fi
+
+      - name: Emit batch artifact (+ append prediction ledger)
+        run: python mf_artifact.py
+
+      - name: Commit the prediction ledger (git-tracked, unbackfillable)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -z "$(git status --porcelain ledger/)" ]; then
+            echo "no new ledger rows to commit"; exit 0
+          fi
+          git add ledger/
+          git commit -m "nightly: append prediction ledger $(date -u +%F) [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+              && git push origin "HEAD:${GITHUB_REF_NAME}" && break
+            echo "push attempt $i failed; retrying"; sleep $((i * 5))
+          done
+
+      # mf_cache/ is gitignored, so the app-facing artifact ships as a build artifact.
+      # (For a stable app-fetchable URL, publish it to a GitHub Release instead — see
+      # docs/ci.md.)
+      - name: Upload the app artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mf-artifact-${{ github.run_id }}
+          path: mf_cache/artifacts/*.json.gz
+          if-no-files-found: warn
+          retention-days: 30

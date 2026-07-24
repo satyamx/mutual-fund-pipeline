@@ -35,7 +35,24 @@ def main() -> int:
     ap.add_argument("--funds", nargs="*", default=[], help="Fund names or ISINs (your shortlist)")
     ap.add_argument("--stocks", nargs="*", default=[], help="NSE tickers, e.g. RELIANCE HDFCBANK")
     ap.add_argument("--start", default="2019-01-01")
+    ap.add_argument("--from-manifest", action="store_true",
+                    help="refresh the whole tracked universe by loading fund names from "
+                         "mf_cache/universe_manifest.csv (for the scheduled nightly job). "
+                         "Cache-first + 20h TTL means only stale NAV is refetched — the "
+                         "throttle is the cache, not a sleep. Requires a warm cache "
+                         "(the manifest is generated, not committed).")
     args = ap.parse_args()
+
+    if args.from_manifest:
+        from mf_labels import MANIFEST_PATH, load_manifest  # lazy: only when scheduled
+        if not MANIFEST_PATH.exists():
+            LOG.error("--from-manifest: %s not found. The universe manifest is generated "
+                      "(gitignored); seed the cache once locally before the nightly job can "
+                      "refresh it on a cold runner.", MANIFEST_PATH)
+            return 2
+        names = list(load_manifest()["scheme_name"])
+        LOG.info("--from-manifest: refreshing %d funds from %s", len(names), MANIFEST_PATH.name)
+        args.funds = list(args.funds) + names
 
     print("=" * 78 + "\n  MF PIPELINE BOOTSTRAP\n" + "=" * 78)
 
