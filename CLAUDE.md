@@ -36,7 +36,7 @@ This is the load-bearing constraint of the whole project:
 - `mf_cache/` is **gitignored** — all fetched data and model artifacts are generated, never committed. Regenerate as needed.
 
 ## Conventions
-- **Commit per logical step** to `master` (repo has no remote — do not try to push unless asked). Run `/code-review` + `/security-review` before each commit (the security-review skill auto-targets `origin/HEAD`, which fails here — do that pass manually). Co-Author trailer required.
+- **Commit per logical step** to `master`. The repo now HAS a remote (`origin` → `github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path — but pushing stays an explicit, separate step: don't push unless asked. Run `/code-review` + `/security-review` before each commit (`origin/HEAD` now resolves, so the security-review skill's auto-target works — the old "do it manually" workaround is obsolete). Co-Author trailer required.
 - Surgical edits; match existing dense, comment-rich style. New modules follow the "pure, testable, injected-dependency, ships a `--selftest`" pattern the codebase already uses.
 - Flag Fable-level tasks and confirm before deep-reasoning passes.
 

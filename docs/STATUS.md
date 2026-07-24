@@ -2,7 +2,7 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-07-17: MF repo HEAD = `4c11ce6` (clean). Hisaab Kitaab repo HEAD = `9885565` (clean). Neither repo has a git remote — these commits are local-only until pushed.**
+**As of 2026-07-25: MF repo HEAD = `dea20c0`, pushed to `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo now HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only).**
 
 ## Product shape (current)
 - **System A (live, `mf_agent_orchestrator.py` → `RecommendationEngine`)** = the honest SCREEN: raw NAV facts (CAGR/vol/maxDD/Sortino/excess-vs-benchmark) + profile-weighted sub-scores + a **tri-colour 🟢BUY / 🔵HOLD / 🔴SELL verdict**. The verdict is a **transparent RULE over colour-coded metrics + hard compliance gates**, NOT the old below-chance weighted composite (which is deleted). The weighted "screen score" (0–100) is shown only as a banded *supporting datapoint*. Now ALSO carries a `cohort_signal` (see below) as a second, separate supporting datapoint — never folded into the verdict rule.
@@ -35,7 +35,7 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 - **Wired into the app artifact** (`mf_artifact.py`): new top-level **`evaluation{}`** block (status/headline/metrics[]/outcome/disclaimer), computed every batch run via `mf_eval.build_report_from_ledger`. `build_artifact` gained a `realizations_path` param (threaded through, selftest kept hermetic with a tmp path). Artifact CONTRACT docstring + selftest updated (asserts outcome_skill PENDING and that a pending outcome never reddens the panel). **App-side contract documented** in `docs/app_evaluation_contract.md` — schema, the four metrics + thresholds, the mandatory "health ≠ accuracy" disclaimer the UI must show, and suggested rendering. Mirror the UI decisions into Hisaab Kitaab `DECISIONS.md` when integration starts.
 - Hisaab Kitaab `DECISIONS.md`: `f99fa96` (integration contract) + `9885565` (verdict amendment).
 
-## To-do (ordered; resume at #7)
+## To-do (ordered; resume at #8 — #7 is built but its CI has NEVER run; schedules are paused pending one manual `workflow_dispatch` verification from the Actions tab, then uncomment the crons in both workflows)
 1. ✅ Serialize cohort inference payload (`b44a029`) + wire `cohort_q1` percentile into System A's output (`mf_live_score.py`, this session) — DONE, no longer blocked.
 2. ✅ Kill composite → honest SCREEN + tri-colour verdict (`31d42a2`, `29a633a`).
 3. ✅ **Sentinel alert engine built + wired** (`mf_sentinel.py` new, wired into `MasterOrchestrator`). Typed alert registry (compliance breach=HIGH; factor thresholds e.g. downside_capture>1.15, drawdown-vs-COVID, expense outlier; manager MACS/tenure red flags — each citing evidence values), `NFOAssessor` dossier wired as B's output including manager cross-fund proxy lookup from `mf_cache/managers.csv`. Alert severity thresholds shipped as sensible defaults (documented as tunable constants at the top of `mf_sentinel.py`) — proceeded per user's earlier call, still open to revisit. `FACTOR_MAP` in `mf_pipeline.ScoringEngine` kept (research-only backtest infra), not deleted — see product-shape note above.
@@ -51,5 +51,5 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 ## Env / workflow
 - Python: venv only — `./.venv/Scripts/python.exe`. Bare `python`/`pip` are broken stubs.
 - `PYTHONIOENCODING=utf-8` for anything printing ₹ / emoji.
-- Commit per step to `master` after `/code-review` + `/security-review` (security-review auto-targets `origin/HEAD` → fails, no remote; do it manually). Co-Author trailer required.
+- Commit per step to `master` after `/code-review` + `/security-review` (`origin/HEAD` now resolves → the skill's auto-target works; the old manual-pass workaround is obsolete). Pushing remains an explicit, separate step. Co-Author trailer required.
 - `mf_cache/` is gitignored (data + model artifacts are generated; regenerate via `python mf_model.py --stage cohort`).
