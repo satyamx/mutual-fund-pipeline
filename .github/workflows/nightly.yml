@@ -16,9 +16,11 @@ name: nightly-refresh
 # until then rather than fabricating.
 
 on:
-  schedule:
-    # 20:30 UTC ≈ 02:00 IST — after AMFI's evening NAV publish. Adjust if needed.
-    - cron: "30 20 * * *"
+  # SCHEDULE DISABLED for initial manual testing (2026-07-24). Run it on demand from
+  # the Actions tab (Run workflow) until it's verified, then UNCOMMENT the two lines
+  # below to enable the nightly auto-run.
+  # schedule:
+  #   - cron: "30 20 * * *"   # 20:30 UTC ≈ 02:00 IST, after AMFI's evening NAV publish
   workflow_dispatch: {}
 
 permissions:
