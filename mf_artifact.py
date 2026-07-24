@@ -99,6 +99,43 @@ def _finite_or_none(x: Any) -> Optional[float]:
     return float(x) if isinstance(x, (int, float)) and np.isfinite(x) else None
 
 
+def _json_safe(obj: Any) -> Any:
+    """Recursively map non-finite floats to None inside a nested structure.
+
+    The flat numeric leaves below are guarded field-by-field with
+    `_finite_or_none`, but three payloads are nested dicts this module does NOT
+    enumerate — alert `evidence`, the NFO dossier, and the cohort `signal_context`.
+    A single NaN anywhere in one of them would raise inside write_artifact()'s
+    `json.dumps(..., allow_nan=False)` and discard the WHOLE batch, including every
+    other fund's already-computed record. The established behaviour for one bad
+    fund is to drop just that record, never to nuke the batch.
+
+    Today nothing trips this (every alert author routes floats through
+    `mf_sentinel._fmt()`), but nothing enforces that convention either — this makes
+    the guarantee structural instead of conventional.
+
+    bools pass through untouched: `isinstance(True, int)` is True in Python, so a
+    naive numeric branch would silently rewrite True as 1.0.
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (int, float)):
+        return obj if np.isfinite(obj) else None
+    # numpy scalars: np.float64 subclasses float and is caught above, but np.float32
+    # / np.int32 do not — and json.dumps rejects those outright ("not JSON
+    # serializable"), which is the same batch-wide failure by a different exception.
+    # Unwrap to a Python scalar so the guarantee doesn't depend on which numpy width
+    # an alert author happened to produce.
+    if isinstance(obj, np.generic):
+        v = obj.item()
+        return v if not isinstance(v, float) or np.isfinite(v) else None
+    return obj
+
+
 def _data_flags(dossier, cohort_signal: Optional[Dict[str, Any]], eligibility: str) -> List[str]:
     flags: List[str] = []
     if dossier.category in ("Sectoral", "Thematic") and not dossier.declared_sector:
@@ -159,9 +196,11 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             cohort_q1_prob=_finite_or_none(cs["probability"]) if cs else None,
             cohort_percentile=_finite_or_none(cs["cohort_percentile"]) if cs else None,
             cohort_n=cs["cohort_n"] if cs else None,
-            signal_context=cs["signal_context"] if cs else None),
-        alerts_b=[dataclasses.asdict(a) for a in sr.alerts],
-        nfo_dossier=sr.nfo_dossier,
+            signal_context=_json_safe(cs["signal_context"]) if cs else None),
+        # Nested payloads this module doesn't enumerate leaf-by-leaf — guarded
+        # wholesale so one NaN can't take out the entire batch write. See _json_safe.
+        alerts_b=_json_safe([dataclasses.asdict(a) for a in sr.alerts]),
+        nfo_dossier=_json_safe(sr.nfo_dossier),
         # Human-readable DATA GAP strings (same ones print_report shows) —
         # data_flags[] below is only the coarse machine-enum subset.
         coverage_flags=rec["coverage_flags"],
@@ -369,6 +408,34 @@ def _selftest() -> None:
             assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, \
                 "FAIL: a custom profile was mislabeled as the default"
         print("[selftest] custom (non-default) profile correctly NOT stamped is_default_profile — PASS")
+
+        # A NaN anywhere in an alert's `evidence` must NOT be able to discard the whole
+        # batch. Nothing shipped trips this today (alert authors route floats through
+        # mf_sentinel._fmt()), but the convention isn't enforced — so prove the guard
+        # holds structurally by feeding a hostile alert through the real record builder.
+        import mf_sentinel
+        ok_result = next(r for r in (orch.evaluate(n, profile_config=profile.model_dump(mode="json"))
+                                     for n in names) if "error" not in r)
+        ok_result["sentinel"].alerts.append(mf_sentinel.Alert(
+            "TEST_HOSTILE_EVIDENCE", mf_sentinel.AlertSeverity.INFO.value, "factor",
+            mf_sentinel.AlertBasis.DESCRIPTIVE_RISK.value,
+            {"raw_nan": float("nan"), "raw_inf": float("inf"),
+             "np32_nan": np.float32("nan"), "np32_ok": np.float32(1.5), "np_int": np.int32(7),
+             "nested": {"deep_nan": float("nan"), "flag": True, "name": "ok"}},
+            "hostile evidence fixture"))
+        hostile_rec = build_fund_record(ok_result, profile, is_default_profile=True)
+        ev = next(a["evidence"] for a in hostile_rec["alerts_b"] if a["code"] == "TEST_HOSTILE_EVIDENCE")
+        assert ev["raw_nan"] is None and ev["raw_inf"] is None, ev
+        assert ev["nested"]["deep_nan"] is None, ev
+        # numpy scalars: json.dumps rejects np.float32/np.int32 outright, so an
+        # unwrapped one is the same batch-wide failure by a different exception.
+        assert ev["np32_nan"] is None and abs(ev["np32_ok"] - 1.5) < 1e-6 and ev["np_int"] == 7, ev
+        # bools must survive as bools — isinstance(True, int) is True, so a naive
+        # numeric guard would silently rewrite this as 1.0 and corrupt the contract.
+        assert ev["nested"]["flag"] is True and ev["nested"]["name"] == "ok", ev
+        json.dumps(dict(funds=[hostile_rec]), allow_nan=False)   # must not raise
+        print("[selftest] hostile NaN/Inf in alert evidence is neutralised, bools preserved, "
+              "batch write survives — PASS")
 
         # gzip round-trip
         path = write_artifact(artifact, tmpdir)
