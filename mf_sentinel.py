@@ -42,6 +42,7 @@ import pandas as pd
 
 from mf_pipeline import QuantEngine, ValidationOrchestrator
 from mf_nfo_gate import EligibilityGate, NFOAssessor
+import mf_holdings
 
 if TYPE_CHECKING:  # type-only: avoids a module-load cycle with mf_agent_orchestrator
     from mf_agent_orchestrator import FundDossier, ComplianceFinding
@@ -74,7 +75,7 @@ _NEVER_HIGH = {AlertBasis.GUARDRAIL_ONLY, AlertBasis.DESCRIPTIVE_RISK,
 class Alert:
     code: str
     severity: str           # AlertSeverity value
-    source: str             # "compliance" | "factor" | "manager" | "nfo" | "news"
+    source: str             # "compliance" | "factor" | "holdings" | "manager" | "nfo" | "news"
     basis: str              # AlertBasis value
     evidence: Dict[str, Any]
     detail: str
@@ -165,6 +166,8 @@ def _compliance_code(rule_id: str) -> str:
         return "NAME_CATEGORY_MISMATCH"
     if rule_id == "no_return_focused_words_in_name":
         return "RETURN_FOCUSED_NAME"
+    if rule_id.startswith("single_issuer"):
+        return "SEBI_SINGLE_ISSUER_BREACH"
     return f"SEBI_OTHER[{rule_id}]"
 
 
@@ -427,6 +430,75 @@ def _factor_alerts(quant: QuantEngine, dossier: "FundDossier",
 
 
 # ==============================================================================
+# HOLDINGS ALERTS — portfolio structure from a disclosure snapshot (mf_holdings)
+# ==============================================================================
+# System A already colours a `concentration` metric and routes a SEBI single-issuer
+# breach through compliance. Sentinel's job here is the typed-alert view of the SAME
+# facts, so it deliberately reuses mf_holdings' OWN screen bands rather than defining
+# parallel thresholds — if these drifted apart the app could render a green
+# concentration metric beside a concentration WATCH alert on one fund.
+#
+# Basis is DESCRIPTIVE_RISK, never REGULATORY: a concentrated book is a legitimate
+# high-conviction style, not a breach. `_NEVER_HIGH` structurally caps it below HIGH,
+# which is the intended honesty guard — only the genuine SEBI single-issuer breach
+# (raised via the compliance channel as `SEBI_SINGLE_ISSUER_BREACH`) may reach HIGH.
+_HOLDINGS_CONCENTRATION_CODE = "HOLDINGS_CONCENTRATION_HIGH"
+
+
+def _holdings_alerts(dossier: "FundDossier") -> Tuple[List[Alert], List[str], int]:
+    """Concentration alerts from the current disclosure. Returns (alerts, dormant,
+    checks_run).
+
+    Scope is the EQUITY/HYBRID buckets only, mirroring the single-issuer exemption in
+    `TrueToLabelVerifier` (mf_agent_orchestrator.py): an index/ETF scheme's top-10
+    weight is a property of the INDEX it replicates, not a manager decision, so
+    alerting on it would flag the benchmark itself as a risk. Those buckets are
+    mandate-inapplicable, not unevaluable, so they are not reported dormant either.
+    """
+    bucket = dossier.bucket.value
+    if bucket not in ("Equity", "Hybrid"):
+        return [], [], 0
+
+    # Deliberately NOT gated on the NFO eligibility status: concentration needs a
+    # disclosure, not NAV history, so it is often the ONLY evidence available on a
+    # newborn fund whose NAV-based factor rules are all dormant.
+    facts = mf_holdings.analyze(dossier.current_holdings,
+                                available=dossier.holdings_available)
+    if not facts.available or facts.n_equity == 0:
+        # Absence of evidence is dormancy, never a quiet pass.
+        return [], [_HOLDINGS_CONCENTRATION_CODE], 0
+
+    top10 = facts.top10_weight
+    if top10 is None or not np.isfinite(top10):
+        return [], [_HOLDINGS_CONCENTRATION_CODE], 0
+
+    evidence = {
+        "top10_weight": _fmt(top10),
+        "effective_n": _fmt(facts.effective_n),
+        "n_equity": facts.n_equity,
+        "top1": facts.top1_name,
+        "top1_weight": _fmt(facts.top1_weight),
+        "top_sector": facts.top_sector,
+        "top_sector_weight": _fmt(facts.top_sector_weight),
+        "band_diversified": mf_holdings.TOP10_DIVERSIFIED,
+        "band_concentrated": mf_holdings.TOP10_CONCENTRATED,
+    }
+    if top10 >= mf_holdings.TOP10_CONCENTRATED:
+        sev = AlertSeverity.WATCH
+    elif top10 >= mf_holdings.TOP10_DIVERSIFIED:
+        sev = AlertSeverity.INFO
+    else:
+        return [], [], 1
+
+    eff = f"{facts.effective_n:.1f}" if facts.effective_n is not None else "n/a"
+    return ([Alert(_HOLDINGS_CONCENTRATION_CODE, sev.value, "holdings",
+                   AlertBasis.DESCRIPTIVE_RISK.value, evidence,
+                   f"Top-10 equity weight {top10:.1%} across {facts.n_equity} names "
+                   f"(effective N {eff}) — concentrated book, higher single-name risk. "
+                   f"A style observation, not a breach.")], [], 1)
+
+
+# ==============================================================================
 # MANAGER ALERTS — per-scheme MACS (real) + tenure (needs managers.csv)
 # ==============================================================================
 def _manager_alerts(backtest: Dict[str, Any]) -> Tuple[List[Alert], List[str]]:
@@ -583,6 +655,14 @@ class SentinelEngine:
         else:
             dormant.append(f"FACTOR_RULES_SKIPPED_{status}")
 
+        # Outside the eligibility gate on purpose — holdings structure needs a
+        # disclosure, not NAV history, so it still speaks for a NEWBORN/YOUNG fund
+        # whose factor rules were just skipped above.
+        ha, hdorm, hchecks = _holdings_alerts(dossier)
+        alerts += ha
+        dormant += hdorm
+        checks_run += hchecks
+
         ma, mdorm = _manager_alerts(backtest)
         alerts += ma
         dormant += mdorm
@@ -688,6 +768,68 @@ def _selftest() -> None:
     assert _manager_alerts({"manager_alpha_consistency_score": 50})[0][0].severity == AlertSeverity.INFO.value
     assert _manager_alerts({"manager_alpha_consistency_score": 75})[0] == []
     print("[selftest] manager MACS tiers: <40 WATCH, 40-59 INFO, >=60 silent — PASS")
+
+    # 7. The SEBI single-issuer breach gets its OWN typed code, not the SEBI_OTHER[...]
+    #    catch-all — the app branches on alert codes, so a rule_id embedded in the code
+    #    string is not a stable contract. Severity/basis were already correct via
+    #    `critical`; this pins the code.
+    si_alerts, _ = _compliance_alerts(
+        [_F("single_issuer<=10%", False, "critical", "1 equity issuer over SEBI's 10% ceiling: MEGA 22.0%")])
+    assert si_alerts[0].code == "SEBI_SINGLE_ISSUER_BREACH", si_alerts[0].code
+    assert si_alerts[0].severity == AlertSeverity.HIGH.value
+    assert si_alerts[0].basis == AlertBasis.REGULATORY.value
+    print("[selftest] single-issuer breach -> typed SEBI_SINGLE_ISSUER_BREACH, HIGH/REGULATORY — PASS")
+
+    # 8. Holdings concentration alerts.
+    class _B:
+        def __init__(self, value): self.value = value
+
+    class _D:
+        def __init__(self, bucket, holdings, available=True):
+            self.bucket, self.current_holdings, self.holdings_available = _B(bucket), holdings, available
+
+    def _hframe(rows):
+        df = pd.DataFrame(rows)
+        df.index = df["name"].astype(str).str.upper()
+        return df
+
+    diversified = _hframe([dict(name=f"S{i:02d}", weight=0.030, asset_type="equity",
+                                sector=["Financials", "IT", "Pharma", "Auto"][i % 4])
+                           for i in range(30)])
+    concentrated = _hframe([dict(name=f"C{i:02d}", weight=0.085, asset_type="equity", sector="IT")
+                            for i in range(10)] + [dict(name=f"T{i:02d}", weight=0.015,
+                                                        asset_type="equity", sector="Auto")
+                                                   for i in range(10)])
+
+    a, d, c = _holdings_alerts(_D("Equity", diversified))
+    assert not a and not d and c == 1, f"FAIL: diversified book should be silent, got {a}/{d}"
+
+    a, d, c = _holdings_alerts(_D("Equity", concentrated))
+    assert len(a) == 1 and a[0].code == "HOLDINGS_CONCENTRATION_HIGH", a
+    assert a[0].severity == AlertSeverity.WATCH.value, a[0].severity
+    assert a[0].basis == AlertBasis.DESCRIPTIVE_RISK.value
+    assert a[0].evidence["top10_weight"] == 0.85 and a[0].evidence["n_equity"] == 20
+    assert not d and c == 1
+
+    # No disclosure -> dormant, never a silent pass and never an alert.
+    a, d, c = _holdings_alerts(_D("Equity", None, available=False))
+    assert not a and d == ["HOLDINGS_CONCENTRATION_HIGH"] and c == 0, f"{a}/{d}/{c}"
+
+    # Index/ETF: a concentrated top-10 is the INDEX's property, not a manager choice.
+    a, d, c = _holdings_alerts(_D("Other (Index/ETF/FoF)", concentrated))
+    assert not a and not d and c == 0, "FAIL: passive bucket must be mandate-inapplicable, not alerted"
+
+    # DESCRIPTIVE_RISK is structurally barred from HIGH — a concentrated book can
+    # never escalate to the push-notification tier the way a real breach does.
+    raised = False
+    try:
+        Alert("HOLDINGS_CONCENTRATION_HIGH", AlertSeverity.HIGH.value, "holdings",
+              AlertBasis.DESCRIPTIVE_RISK.value, {}, "x")
+    except ValueError:
+        raised = True
+    assert raised, "FAIL: concentration alert accepted HIGH severity"
+    print("[selftest] holdings: concentrated->WATCH, diversified silent, no-disclosure dormant, "
+          "passive exempt, never HIGH — PASS")
 
     print("[selftest] PASS — Sentinel registry + live rules behave honestly")
 
