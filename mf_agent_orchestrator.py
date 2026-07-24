@@ -65,6 +65,7 @@ from mf_pipeline import (  # noqa: E402
     ValidationOrchestrator,
 )
 from mf_sentinel import SentinelEngine  # noqa: E402 — System B: typed alerts, never a fund number
+import mf_holdings  # noqa: E402 — portfolio-structure facts + concentration screen (holdings-only)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
@@ -308,6 +309,17 @@ class TrueToLabelVerifier:
                 findings.append(ComplianceFinding(
                     f"min_equity>={rule.min_equity:.0%}", ok, "critical" if not ok else "info",
                     f"equity allocation {eq_w:.1%}"))
+
+            # (c2) SEBI single-issuer 10% ceiling (MF Regulations) — a scheme may hold
+            # at most 10% of NAV in the equity of one issuer. Index/ETF schemes are
+            # exempt and sit in OTHER_PASSIVE, so restricting to the EQUITY/HYBRID
+            # buckets skips them naturally. A breach on an active mandate is a real
+            # regulatory line, so it rides the same critical -> SELL gate as (b)/(c).
+            if rule.bucket in (SEBIBucket.EQUITY, SEBIBucket.HYBRID):
+                hf = mf_holdings.analyze(holdings, available=True)
+                for rid, passed, detail in mf_holdings.single_issuer_findings(hf):
+                    findings.append(ComplianceFinding(
+                        rid, passed, "critical" if not passed else "info", detail))
 
             # (d) 50% overlap ceiling — quarterly average of daily overlaps
             if rule.overlap_cap is not None and sibling_daily_weights:
@@ -884,6 +896,18 @@ class ProfileRiskScorerAgent:
                           if len(common) > 252 else float("nan"))
         facts = dict(cagr=float(cagr_full), vol_1y=vol_1y, max_dd_3y=max_dd_3y,
                      sortino_3y=float(sortino), excess_cagr_3y=excess_cagr_3y)
+        # Holdings-structure facts (a disclosure snapshot, NOT NAV): surfaced as
+        # ground-truth levels. Coverage-gated to NaN when no disclosure is on file so
+        # the concentration metric greys out downstream — missing holdings can never
+        # colour green (honesty invariant). These are facts + a transparent screen
+        # metric only; they NEVER enter the cohort_q1 predictor (unbacktestable).
+        hf = mf_holdings.analyze(dossier.current_holdings, available=dossier.holdings_available)
+        _na = float("nan")
+        facts.update(
+            top10_weight=hf.top10_weight if hf.top10_weight is not None else _na,
+            effective_n=hf.effective_n if hf.effective_n is not None else _na,
+            top_sector_weight=hf.top_sector_weight if hf.top_sector_weight is not None else _na,
+            n_holdings=float(hf.n_equity) if hf.available and hf.n_equity else _na)
 
         weights = self.utility_weights(profile)
         subs = dict(growth=growth, downside=downside, consistency=consistency,
@@ -1034,6 +1058,14 @@ class RecommendationEngine:
             "consistency": _band(profile_score["sub_scores"]["consistency"], 0.60, 0.40),
             "expense": ("grey" if not np.isfinite(dossier.expense_ratio)
                         else _band(dossier.expense_ratio, 0.010, 0.020, higher_better=False)),
+            # Portfolio concentration (top-10 equity weight, LOWER better). A holdings
+            # fact NAV cannot see; greys out when no disclosure is on file. Surfaced as
+            # a visible screen metric — NOT folded into the greens/reds verdict count
+            # (a high-conviction book is a legitimate style, not a defect); a genuine
+            # SEBI single-issuer breach instead drives the verdict through `compliance`.
+            "concentration": _band(facts.get("top10_weight", float("nan")),
+                                   mf_holdings.TOP10_DIVERSIFIED,
+                                   mf_holdings.TOP10_CONCENTRATED, higher_better=False),
         }
         metric_colors["compliance"] = ("red" if critical else
                                        "amber" if (warnings or (not is_passive and macs is None))
@@ -1289,8 +1321,12 @@ class MasterOrchestrator:
               f"maxDD(3y) {dot[mc['max_dd_3y']]} {_pct(f['max_dd_3y'], 1)} | "
               f"consistency {dot[mc['consistency']]} {r['sub_scores']['consistency']:.2f}")
         exp_str = _pct(d.expense_ratio) if np.isfinite(d.expense_ratio) else "n/a"
+        en = f.get("effective_n", float("nan"))
+        en_str = f"{en:.0f}" if isinstance(en, (int, float)) and np.isfinite(en) else "n/a"
         print(f"      expense {dot[mc['expense']]} {exp_str} | "
-              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])}")
+              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])} | "
+              f"concentration {dot[mc['concentration']]} top10={_pct(f.get('top10_weight', float('nan')), 1)} "
+              f"(eff.N {en_str})")
         print(f"      Supporting screen score: {dot[mc['screen_score']]} "
               f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)")
         print(f"      Manager Alpha: {r['manager_alpha']}")
