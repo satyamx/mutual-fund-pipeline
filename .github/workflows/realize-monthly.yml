@@ -1,0 +1,64 @@
+name: realize-monthly
+
+# The prediction ledger's outcome side. mf_ledger.realize_matured_predictions is an
+# OFFLINE job (explicitly NOT part of the nightly live batch): it joins predictions
+# whose 3y horizon has matured against fresh NAV, using the FROZEN cohort peer set
+# logged at prediction time, and appends the realized outcomes. This is what
+# eventually lets mf_eval's `outcome_skill` graduate from PENDING to a real number
+# (~2029 earliest — nothing matures before then, so early runs are correctly no-ops).
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"          # 03:00 UTC on the 1st of each month
+  workflow_dispatch: {}
+
+permissions:
+  contents: write                # commit the appended realizations ledger
+
+concurrency:
+  group: realize-monthly
+  cancel-in-progress: false
+
+jobs:
+  realize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore generated data cache
+        uses: actions/cache@v4
+        with:
+          path: mf_cache
+          key: mf-cache-realize-${{ github.run_id }}
+          restore-keys: |
+            mf-cache-
+
+      - name: Realize matured predictions (idempotent join vs fresh NAV)
+        run: python mf_ledger.py --realize
+
+      - name: Commit realized outcomes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -z "$(git status --porcelain ledger/)" ]; then
+            echo "nothing matured this month"; exit 0
+          fi
+          git add ledger/
+          git commit -m "monthly: realize matured predictions $(date -u +%F) [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+              && git push origin "HEAD:${GITHUB_REF_NAME}" && break
+            echo "push attempt $i failed; retrying"; sleep $((i * 5))
+          done

@@ -26,7 +26,11 @@ CONTRACT (see mf-architecture-decisions memory for the original 2026-07-16
 design; extended here with the restored verdict + its default-profile stamp):
   top-level: artifact_version, generated_at, pipeline_sha, model_id,
              default_profile{}, coverage{}, monitoring{ledger, realized_ic,
-             psi, rank_stability, note}, funds[]
+             psi, rank_stability, note},
+             evaluation{status, headline, metrics[], outcome, disclaimer} (the
+               app-facing MODEL-HEALTH panel — mf_eval grades the raw monitoring
+               signals GREEN/AMBER/RED; outcome skill stays PENDING pre-maturity
+               and never reddens the headline), funds[]
   per-fund:  amfi_code, isin, scheme_name, category, sector, eligibility,
              facts{cagr, vol, max_dd, sortino, benchmark, expense},
              signal_a{sub_scores, verdict, verdict_color, verdict_caveat,
@@ -63,6 +67,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+import mf_eval
 import mf_ledger
 from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator
 from mf_datasources import CACHE
@@ -168,7 +173,8 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
 
 def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] = None,
                    profile: Optional[InvestorProfile] = None,
-                   ledger_path: Path = mf_ledger.PREDICTIONS_PATH) -> Dict[str, Any]:
+                   ledger_path: Path = mf_ledger.PREDICTIONS_PATH,
+                   realizations_path: Path = mf_ledger.REALIZATIONS_PATH) -> Dict[str, Any]:
     """Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
     RealNAVStore fund cache and cohort-scoring resources build once) against
     `profile` (defaults to InvestorProfile()'s own baseline), and assembles the
@@ -208,7 +214,8 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
               n_features=0, skipped_features=[]))
     monitoring = mf_ledger.monitoring_block(run_id=run_id, rows_appended=n_appended,
                                             current_rows=ledger_rows, psi=psi,
-                                            predictions_path=ledger_path)
+                                            predictions_path=ledger_path,
+                                            realizations_path=realizations_path)
 
     coverage = dict(
         n_total=len(scheme_names), n_ok=len(records), n_errors=len(errors),
@@ -223,6 +230,13 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
             1 for r in records if DATA_FLAG_OUT_OF_TRAINING_UNIVERSE in r["data_flags"]),
         n_expense_available=sum(1 for r in records if r["facts"]["expense"] is not None),
     )
+    # App-facing MODEL-HEALTH panel: the raw monitoring{}/coverage{} signals graded
+    # against documented GREEN/AMBER/RED thresholds (mf_eval), so the app can render
+    # "when should I distrust this model" directly instead of re-deriving it. Outcome
+    # skill stays PENDING (unmeasurable pre-maturity) and never reddens the headline.
+    evaluation = mf_eval.build_report_from_ledger(
+        monitoring, coverage, model_id=orch.cohort_model_id,
+        realizations_path=realizations_path, predictions_path=ledger_path)
     return dict(
         artifact_version=ARTIFACT_VERSION,
         generated_at=run_id,
@@ -231,6 +245,7 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
         default_profile=profile_config,
         coverage=coverage,
         monitoring=monitoring,
+        evaluation=evaluation,
         funds=records,
     )
 
@@ -263,11 +278,13 @@ def _selftest() -> None:
     tmpdir = Path(tempfile.mkdtemp())
     try:
         ledger_path = tmpdir / "predictions.jsonl"   # never touch the real ledger/ from a selftest
+        realizations_path = tmpdir / "realizations.jsonl"
 
         names = _load_scheme_names(limit=3)
         orch = MasterOrchestrator(live=True)
         profile = InvestorProfile()
-        artifact = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path)
+        artifact = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path,
+                                  realizations_path=realizations_path)
 
         assert artifact["coverage"]["n_total"] == 3
         assert artifact["coverage"]["n_ok"] + artifact["coverage"]["n_errors"] == 3
@@ -289,8 +306,25 @@ def _selftest() -> None:
               f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
               f"ledger rows_appended={m['ledger']['rows_appended_this_run']} — PASS")
 
+        # evaluation{}: the app-facing model-health panel. Fresh ledger has no matured
+        # outcomes, so outcome_skill MUST be PENDING and MUST NOT redden the overall
+        # status; the disclaimer separating health from accuracy must be present.
+        ev = artifact["evaluation"]
+        assert ev["status"] in ("GREEN", "AMBER", "RED", "PENDING")
+        outcome_m = next(x for x in ev["metrics"] if x["name"] == "outcome_skill")
+        assert outcome_m["status"] == "PENDING", outcome_m
+        assert ev["status"] != "RED" or "outcome_skill" not in {x["name"] for x in ev["metrics"]
+                                                                 if x["status"] == "RED"}, \
+            "FAIL: a pending outcome must never drive the model to RED"
+        assert "not fund-outcome accuracy" in ev["disclaimer"].lower() or \
+               "not fund" in ev["disclaimer"].lower()
+        assert ev["model_id"] == artifact["model_id"]
+        print(f"[selftest] evaluation{{}}: overall={ev['status']}, outcome_skill=PENDING "
+              f"(never reddens), disclaimer present — PASS")
+
         # Re-running the same batch against the same ledger must be idempotent (dedupe).
-        artifact2 = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path)
+        artifact2 = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path,
+                                   realizations_path=realizations_path)
         assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, \
             "FAIL: re-running the same anchors should append zero new ledger rows"
         # Only 3 funds in this test batch (< mf_ledger.MIN_COMMON_FOR_STABILITY=20), so
@@ -329,7 +363,8 @@ def _selftest() -> None:
         # scores and shouldn't dedupe-collide with the default-profile run above.
         custom = InvestorProfile(horizon_years=3.0, liquidity_need="high", risk_appetite="conservative")
         custom_artifact = build_artifact(names, orch=orch, profile=custom,
-                                         ledger_path=tmpdir / "predictions_custom.jsonl")
+                                         ledger_path=tmpdir / "predictions_custom.jsonl",
+                                         realizations_path=tmpdir / "realizations_custom.jsonl")
         for rec in custom_artifact["funds"]:
             assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, \
                 "FAIL: a custom profile was mislabeled as the default"

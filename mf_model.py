@@ -1025,6 +1025,14 @@ def main() -> None:
         write_cohort_report(cpcv, holdout, coefs, label_stats)
         return
 
+    # RETAINED ON PURPOSE (do not delete as "dead"): the non-cohort stages below
+    # (cpcv/coef/holdout/artifact/report over the old OR-label) train/evaluate the
+    # RETIRED utility model — measured at/below chance (AUC ~0.463) and never shipped
+    # to the live product. They are kept as reproducible BASELINE / AUDIT infra: the
+    # honest "this composite is below chance" number is only defensible if the code
+    # that produces it stays runnable. Same call as the deliberately-kept
+    # ScoringEngine.FACTOR_MAP (see docs/STATUS.md). Only `cohort_q1` (the --stage
+    # cohort path above) is validated and shipped.
     df, feature_cols = load_dataset()
     print(f"dataset: {len(df)} rows, {len(feature_cols)} features, "
           f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}")

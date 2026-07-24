@@ -46,12 +46,11 @@ import logging
 import math
 import re
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -65,6 +64,7 @@ from mf_pipeline import (  # noqa: E402
     ValidationOrchestrator,
 )
 from mf_sentinel import SentinelEngine  # noqa: E402 — System B: typed alerts, never a fund number
+import mf_holdings  # noqa: E402 — portfolio-structure facts + concentration screen (holdings-only)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
@@ -309,6 +309,17 @@ class TrueToLabelVerifier:
                     f"min_equity>={rule.min_equity:.0%}", ok, "critical" if not ok else "info",
                     f"equity allocation {eq_w:.1%}"))
 
+            # (c2) SEBI single-issuer 10% ceiling (MF Regulations) — a scheme may hold
+            # at most 10% of NAV in the equity of one issuer. Index/ETF schemes are
+            # exempt and sit in OTHER_PASSIVE, so restricting to the EQUITY/HYBRID
+            # buckets skips them naturally. A breach on an active mandate is a real
+            # regulatory line, so it rides the same critical -> SELL gate as (b)/(c).
+            if rule.bucket in (SEBIBucket.EQUITY, SEBIBucket.HYBRID):
+                hf = mf_holdings.analyze(holdings, available=True)
+                for rid, passed, detail in mf_holdings.single_issuer_findings(hf):
+                    findings.append(ComplianceFinding(
+                        rid, passed, "critical" if not passed else "info", detail))
+
             # (d) 50% overlap ceiling — quarterly average of daily overlaps
             if rule.overlap_cap is not None and sibling_daily_weights:
                 for sib_name, sib_daily in sibling_daily_weights.items():
@@ -455,8 +466,6 @@ class MockMarketDataStore:
                 snaps[label] = {"as_of": (TODAY - pd.DateOffset(years=yrs)).normalize(),
                                 "holdings": self._disclosure(
                                     tickers, self.rng.dirichlet(np.ones(len(tickers)) * 2.5))}
-            bench = ("NIFTY SMALLCAP 250 TRI" if band == "small"
-                     else self.sector_indices and (declared_sector or "NIFTY 50 TRI"))
             bench = declared_sector if declared_sector else \
                 ("NIFTY SMALLCAP 250 TRI" if band == "small" else "NIFTY 50 TRI")
             nav = self._path(nav_alpha - ter, 0.0, start=float(self.rng.uniform(15, 400)),
@@ -495,59 +504,72 @@ class MockMarketDataStore:
             out[str(d.date())] = w / w.sum() * eq.sum()
         return out
 
-
-# --------------------------- adapter facades ----------------------------------
-class AMFIRegistryAdapter:
-    """Live: AMFI NAVAll.txt + SEBI category master. Mock: MockMarketDataStore."""
-    spec = register_adapter(AdapterSpec(
-        "Scheme_Registry", True, "https://mfdata.in/api/v1/search + api.mfapi.in",
-        "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient", "Agent A"))
-
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
-
-    def resolve(self, query: str) -> Optional[str]:
+    # ---- STORE INTERFACE ------------------------------------------------------
+    # The agents talk to a store through this narrow, stable interface. Implementing
+    # it here keeps the demo runnable offline; mf_datasources.py implements the SAME
+    # interface against live AMFI / mfapi / yfinance / Anthropic, so swapping in real
+    # data is a constructor change, not a rewrite.
+    def resolve(self, query: str):
         q = query.strip().lower()
-        for name, rec in self.store.funds.items():
+        for name, rec in self.funds.items():
             if q == rec["isin"].lower() or q in name.lower():
                 return name
-        # loose token match fallback
-        for name in self.store.funds:
+        for name in self.funds:
             if all(tok in name.lower() for tok in q.split()[:2]):
                 return name
         return None
 
+    def fund(self, name: str):
+        return self.funds[name]
 
-class DisclosureAdapter:
-    """Live: Morningstar/ACE MF/CAMS monthly portfolios. Mock: synthetic snapshots."""
-    spec = register_adapter(AdapterSpec(
-        "Portfolio_Disclosures", True,
-        "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
-        "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
-        "Agents A & B"))
+    def snapshots(self, name: str):
+        return self.funds[name]["snapshots"]
 
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
+    def stock_prices(self, tickers, start):
+        cols = [t for t in tickers if t in self._px.columns]
+        return self._px.loc[start:, cols]
 
-    def snapshots(self, fund_name: str) -> Dict[str, Dict[str, Any]]:
-        return self.store.funds[fund_name]["snapshots"]
+    def sector_index(self, sector: str, start, basket=None):
+        return self.sector_indices[sector].loc[start:]
+
+    def benchmark_series(self, benchmark: str):
+        return self.sector_indices[benchmark]
+
+    def sibling_equity_schemes(self, scheme_name: str, amc: str):
+        out = {}
+        for name, rec in self.funds.items():
+            if name == scheme_name or rec["amc"] != amc:
+                continue
+            if rec["category"] in ("Large Cap", "Index Fund", "ETF"):
+                continue  # SEBI: large-cap schemes exempt from the overlap cap
+            if SEBI_2026_RULES.get(rec["category"],
+                                   CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
+                continue
+            out[name] = self.daily_weights_last_quarter(name)
+        return out
+
+    def news(self, entities):
+        return NewsSearchAdapter().fetch(entities)
 
 
-class StockHistoryAdapter:
-    """Live: yfinance NSE tickers (.NS). Mock: sector-driven synthetic prices."""
-    spec = register_adapter(AdapterSpec(
-        "Stock_Price_History", True, "yfinance (NSE .NS tickers + yf.Search name resolution)",
-        "NO KEY REQUIRED — pip install yfinance", "Agent B"))
-
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
-
-    def prices(self, tickers: Sequence[str], start: pd.Timestamp) -> pd.DataFrame:
-        cols = [t for t in tickers if t in self.store._px.columns]
-        return self.store._px.loc[start:, cols]
-
-    def sector_index(self, sector: str, start: pd.Timestamp) -> pd.Series:
-        return self.store.sector_indices[sector].loc[start:]
+# --------------------------- adapter facades ----------------------------------
+# Registry-only adapters — the live product resolves/discloses/prices via the store
+# interface (see MockMarketDataStore), so these carry no facade class; only their
+# AdapterSpec is registered at import to populate the USER ACTION CHECKLIST.
+# Live: AMFI NAVAll.txt + SEBI category master. Mock: MockMarketDataStore.
+register_adapter(AdapterSpec(
+    "Scheme_Registry", True, "https://mfdata.in/api/v1/search + api.mfapi.in",
+    "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient", "Agent A"))
+# Live: Morningstar/ACE MF/CAMS monthly portfolios. Mock: synthetic snapshots.
+register_adapter(AdapterSpec(
+    "Portfolio_Disclosures", True,
+    "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
+    "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
+    "Agents A & B"))
+# Live: yfinance NSE tickers (.NS). Mock: sector-driven synthetic prices.
+register_adapter(AdapterSpec(
+    "Stock_Price_History", True, "yfinance (NSE .NS tickers + yf.Search name resolution)",
+    "NO KEY REQUIRED — pip install yfinance", "Agent B"))
 
 
 class NewsSearchAdapter:
@@ -884,6 +906,18 @@ class ProfileRiskScorerAgent:
                           if len(common) > 252 else float("nan"))
         facts = dict(cagr=float(cagr_full), vol_1y=vol_1y, max_dd_3y=max_dd_3y,
                      sortino_3y=float(sortino), excess_cagr_3y=excess_cagr_3y)
+        # Holdings-structure facts (a disclosure snapshot, NOT NAV): surfaced as
+        # ground-truth levels. Coverage-gated to NaN when no disclosure is on file so
+        # the concentration metric greys out downstream — missing holdings can never
+        # colour green (honesty invariant). These are facts + a transparent screen
+        # metric only; they NEVER enter the cohort_q1 predictor (unbacktestable).
+        hf = mf_holdings.analyze(dossier.current_holdings, available=dossier.holdings_available)
+        _na = float("nan")
+        facts.update(
+            top10_weight=hf.top10_weight if hf.top10_weight is not None else _na,
+            effective_n=hf.effective_n if hf.effective_n is not None else _na,
+            top_sector_weight=hf.top_sector_weight if hf.top_sector_weight is not None else _na,
+            n_holdings=float(hf.n_equity) if hf.available and hf.n_equity else _na)
 
         weights = self.utility_weights(profile)
         subs = dict(growth=growth, downside=downside, consistency=consistency,
@@ -1034,6 +1068,14 @@ class RecommendationEngine:
             "consistency": _band(profile_score["sub_scores"]["consistency"], 0.60, 0.40),
             "expense": ("grey" if not np.isfinite(dossier.expense_ratio)
                         else _band(dossier.expense_ratio, 0.010, 0.020, higher_better=False)),
+            # Portfolio concentration (top-10 equity weight, LOWER better). A holdings
+            # fact NAV cannot see; greys out when no disclosure is on file. Surfaced as
+            # a visible screen metric — NOT folded into the greens/reds verdict count
+            # (a high-conviction book is a legitimate style, not a defect); a genuine
+            # SEBI single-issuer breach instead drives the verdict through `compliance`.
+            "concentration": _band(facts.get("top10_weight", float("nan")),
+                                   mf_holdings.TOP10_DIVERSIFIED,
+                                   mf_holdings.TOP10_CONCENTRATED, higher_better=False),
         }
         metric_colors["compliance"] = ("red" if critical else
                                        "amber" if (warnings or (not is_passive and macs is None))
@@ -1289,8 +1331,12 @@ class MasterOrchestrator:
               f"maxDD(3y) {dot[mc['max_dd_3y']]} {_pct(f['max_dd_3y'], 1)} | "
               f"consistency {dot[mc['consistency']]} {r['sub_scores']['consistency']:.2f}")
         exp_str = _pct(d.expense_ratio) if np.isfinite(d.expense_ratio) else "n/a"
+        en = f.get("effective_n", float("nan"))
+        en_str = f"{en:.0f}" if isinstance(en, (int, float)) and np.isfinite(en) else "n/a"
         print(f"      expense {dot[mc['expense']]} {exp_str} | "
-              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])}")
+              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])} | "
+              f"concentration {dot[mc['concentration']]} top10={_pct(f.get('top10_weight', float('nan')), 1)} "
+              f"(eff.N {en_str})")
         print(f"      Supporting screen score: {dot[mc['screen_score']]} "
               f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)")
         print(f"      Manager Alpha: {r['manager_alpha']}")
@@ -1397,67 +1443,6 @@ def main() -> None:
     print_user_action_checklist()
 
 
-
-
-# ==============================================================================
-# STORE INTERFACE SHIM
-# ------------------------------------------------------------------------------
-# The agents talk to a store through a narrow, stable interface. Implementing it
-# on MockMarketDataStore keeps the demo runnable offline; mf_datasources.py
-# implements the SAME interface against live AMFI / mfapi / yfinance / Anthropic,
-# so swapping in real data is a constructor change, not a rewrite.
-# ==============================================================================
-def _bind_store_interface() -> None:
-    S = MockMarketDataStore
-
-    def resolve(self, query: str):
-        q = query.strip().lower()
-        for name, rec in self.funds.items():
-            if q == rec["isin"].lower() or q in name.lower():
-                return name
-        for name in self.funds:
-            if all(tok in name.lower() for tok in q.split()[:2]):
-                return name
-        return None
-
-    def fund(self, name: str):
-        return self.funds[name]
-
-    def snapshots(self, name: str):
-        return self.funds[name]["snapshots"]
-
-    def stock_prices(self, tickers, start):
-        cols = [t for t in tickers if t in self._px.columns]
-        return self._px.loc[start:, cols]
-
-    def sector_index(self, sector: str, start, basket=None):
-        return self.sector_indices[sector].loc[start:]
-
-    def benchmark_series(self, benchmark: str):
-        return self.sector_indices[benchmark]
-
-    def sibling_equity_schemes(self, scheme_name: str, amc: str):
-        out = {}
-        for name, rec in self.funds.items():
-            if name == scheme_name or rec["amc"] != amc:
-                continue
-            if rec["category"] in ("Large Cap", "Index Fund", "ETF"):
-                continue  # SEBI: large-cap schemes exempt from the overlap cap
-            if SEBI_2026_RULES.get(rec["category"],
-                                   CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
-                continue
-            out[name] = self.daily_weights_last_quarter(name)
-        return out
-
-    def news(self, entities):
-        return NewsSearchAdapter().fetch(entities)
-
-    for fn in (resolve, fund, snapshots, stock_prices, sector_index,
-               benchmark_series, sibling_equity_schemes, news):
-        setattr(S, fn.__name__, fn)
-
-
-_bind_store_interface()
 
 
 if __name__ == "__main__":

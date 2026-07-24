@@ -223,16 +223,17 @@ class FeatureEngine:
         if te > 1e-12:
             out["ir_3y"] = float((_ann_return(f) - _ann_return(b)) / te)
         up, down = b > 0, b < 0
-        if up.sum() > 10:
-            num = float(np.prod(1.0 + f[up]) ** (1.0 / up.sum()) - 1.0)
-            den = float(np.prod(1.0 + b[up]) ** (1.0 / up.sum()) - 1.0)
-            if abs(den) > 1e-12:
-                out["upcap_3y"] = num / den
-        if down.sum() > 10:
-            num = float(np.prod(1.0 + f[down]) ** (1.0 / down.sum()) - 1.0)
-            den = float(np.prod(1.0 + b[down]) ** (1.0 / down.sum()) - 1.0)
-            if abs(den) > 1e-12:
-                out["downcap_3y"] = num / den
+        # up/down-capture share the same geo-mean(fund)/geo-mean(bench) form over
+        # the mask'd periods; factor it out so the two only differ by the mask.
+        # Guards are preserved exactly: <=10 obs or |den|<=1e-12 => NaN (the seed).
+        def _capture(mask) -> float:
+            if mask.sum() <= 10:
+                return np.nan
+            num = float(np.prod(1.0 + f[mask]) ** (1.0 / mask.sum()) - 1.0)
+            den = float(np.prod(1.0 + b[mask]) ** (1.0 / mask.sum()) - 1.0)
+            return num / den if abs(den) > 1e-12 else np.nan
+        out["upcap_3y"] = _capture(up)
+        out["downcap_3y"] = _capture(down)
         return out
 
     def _excess_persist(self, series: pd.Series, comp: pd.Series | None,
