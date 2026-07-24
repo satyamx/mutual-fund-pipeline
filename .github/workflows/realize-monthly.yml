@@ -8,8 +8,10 @@ name: realize-monthly
 # (~2029 earliest — nothing matures before then, so early runs are correctly no-ops).
 
 on:
-  schedule:
-    - cron: "0 3 1 * *"          # 03:00 UTC on the 1st of each month
+  # SCHEDULE DISABLED for initial manual testing (2026-07-24). Run on demand from the
+  # Actions tab until verified, then UNCOMMENT to enable the monthly auto-run.
+  # schedule:
+  #   - cron: "0 3 1 * *"        # 03:00 UTC on the 1st of each month
   workflow_dispatch: {}
 
 permissions:
