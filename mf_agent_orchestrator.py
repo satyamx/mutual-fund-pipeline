@@ -46,12 +46,11 @@ import logging
 import math
 import re
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -467,8 +466,6 @@ class MockMarketDataStore:
                 snaps[label] = {"as_of": (TODAY - pd.DateOffset(years=yrs)).normalize(),
                                 "holdings": self._disclosure(
                                     tickers, self.rng.dirichlet(np.ones(len(tickers)) * 2.5))}
-            bench = ("NIFTY SMALLCAP 250 TRI" if band == "small"
-                     else self.sector_indices and (declared_sector or "NIFTY 50 TRI"))
             bench = declared_sector if declared_sector else \
                 ("NIFTY SMALLCAP 250 TRI" if band == "small" else "NIFTY 50 TRI")
             nav = self._path(nav_alpha - ter, 0.0, start=float(self.rng.uniform(15, 400)),
@@ -507,59 +504,72 @@ class MockMarketDataStore:
             out[str(d.date())] = w / w.sum() * eq.sum()
         return out
 
-
-# --------------------------- adapter facades ----------------------------------
-class AMFIRegistryAdapter:
-    """Live: AMFI NAVAll.txt + SEBI category master. Mock: MockMarketDataStore."""
-    spec = register_adapter(AdapterSpec(
-        "Scheme_Registry", True, "https://mfdata.in/api/v1/search + api.mfapi.in",
-        "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient", "Agent A"))
-
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
-
-    def resolve(self, query: str) -> Optional[str]:
+    # ---- STORE INTERFACE ------------------------------------------------------
+    # The agents talk to a store through this narrow, stable interface. Implementing
+    # it here keeps the demo runnable offline; mf_datasources.py implements the SAME
+    # interface against live AMFI / mfapi / yfinance / Anthropic, so swapping in real
+    # data is a constructor change, not a rewrite.
+    def resolve(self, query: str):
         q = query.strip().lower()
-        for name, rec in self.store.funds.items():
+        for name, rec in self.funds.items():
             if q == rec["isin"].lower() or q in name.lower():
                 return name
-        # loose token match fallback
-        for name in self.store.funds:
+        for name in self.funds:
             if all(tok in name.lower() for tok in q.split()[:2]):
                 return name
         return None
 
+    def fund(self, name: str):
+        return self.funds[name]
 
-class DisclosureAdapter:
-    """Live: Morningstar/ACE MF/CAMS monthly portfolios. Mock: synthetic snapshots."""
-    spec = register_adapter(AdapterSpec(
-        "Portfolio_Disclosures", True,
-        "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
-        "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
-        "Agents A & B"))
+    def snapshots(self, name: str):
+        return self.funds[name]["snapshots"]
 
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
+    def stock_prices(self, tickers, start):
+        cols = [t for t in tickers if t in self._px.columns]
+        return self._px.loc[start:, cols]
 
-    def snapshots(self, fund_name: str) -> Dict[str, Dict[str, Any]]:
-        return self.store.funds[fund_name]["snapshots"]
+    def sector_index(self, sector: str, start, basket=None):
+        return self.sector_indices[sector].loc[start:]
+
+    def benchmark_series(self, benchmark: str):
+        return self.sector_indices[benchmark]
+
+    def sibling_equity_schemes(self, scheme_name: str, amc: str):
+        out = {}
+        for name, rec in self.funds.items():
+            if name == scheme_name or rec["amc"] != amc:
+                continue
+            if rec["category"] in ("Large Cap", "Index Fund", "ETF"):
+                continue  # SEBI: large-cap schemes exempt from the overlap cap
+            if SEBI_2026_RULES.get(rec["category"],
+                                   CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
+                continue
+            out[name] = self.daily_weights_last_quarter(name)
+        return out
+
+    def news(self, entities):
+        return NewsSearchAdapter().fetch(entities)
 
 
-class StockHistoryAdapter:
-    """Live: yfinance NSE tickers (.NS). Mock: sector-driven synthetic prices."""
-    spec = register_adapter(AdapterSpec(
-        "Stock_Price_History", True, "yfinance (NSE .NS tickers + yf.Search name resolution)",
-        "NO KEY REQUIRED — pip install yfinance", "Agent B"))
-
-    def __init__(self, store: MockMarketDataStore) -> None:
-        self.store = store
-
-    def prices(self, tickers: Sequence[str], start: pd.Timestamp) -> pd.DataFrame:
-        cols = [t for t in tickers if t in self.store._px.columns]
-        return self.store._px.loc[start:, cols]
-
-    def sector_index(self, sector: str, start: pd.Timestamp) -> pd.Series:
-        return self.store.sector_indices[sector].loc[start:]
+# --------------------------- adapter facades ----------------------------------
+# Registry-only adapters — the live product resolves/discloses/prices via the store
+# interface (see MockMarketDataStore), so these carry no facade class; only their
+# AdapterSpec is registered at import to populate the USER ACTION CHECKLIST.
+# Live: AMFI NAVAll.txt + SEBI category master. Mock: MockMarketDataStore.
+register_adapter(AdapterSpec(
+    "Scheme_Registry", True, "https://mfdata.in/api/v1/search + api.mfapi.in",
+    "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient", "Agent A"))
+# Live: Morningstar/ACE MF/CAMS monthly portfolios. Mock: synthetic snapshots.
+register_adapter(AdapterSpec(
+    "Portfolio_Disclosures", True,
+    "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
+    "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
+    "Agents A & B"))
+# Live: yfinance NSE tickers (.NS). Mock: sector-driven synthetic prices.
+register_adapter(AdapterSpec(
+    "Stock_Price_History", True, "yfinance (NSE .NS tickers + yf.Search name resolution)",
+    "NO KEY REQUIRED — pip install yfinance", "Agent B"))
 
 
 class NewsSearchAdapter:
@@ -1433,67 +1443,6 @@ def main() -> None:
     print_user_action_checklist()
 
 
-
-
-# ==============================================================================
-# STORE INTERFACE SHIM
-# ------------------------------------------------------------------------------
-# The agents talk to a store through a narrow, stable interface. Implementing it
-# on MockMarketDataStore keeps the demo runnable offline; mf_datasources.py
-# implements the SAME interface against live AMFI / mfapi / yfinance / Anthropic,
-# so swapping in real data is a constructor change, not a rewrite.
-# ==============================================================================
-def _bind_store_interface() -> None:
-    S = MockMarketDataStore
-
-    def resolve(self, query: str):
-        q = query.strip().lower()
-        for name, rec in self.funds.items():
-            if q == rec["isin"].lower() or q in name.lower():
-                return name
-        for name in self.funds:
-            if all(tok in name.lower() for tok in q.split()[:2]):
-                return name
-        return None
-
-    def fund(self, name: str):
-        return self.funds[name]
-
-    def snapshots(self, name: str):
-        return self.funds[name]["snapshots"]
-
-    def stock_prices(self, tickers, start):
-        cols = [t for t in tickers if t in self._px.columns]
-        return self._px.loc[start:, cols]
-
-    def sector_index(self, sector: str, start, basket=None):
-        return self.sector_indices[sector].loc[start:]
-
-    def benchmark_series(self, benchmark: str):
-        return self.sector_indices[benchmark]
-
-    def sibling_equity_schemes(self, scheme_name: str, amc: str):
-        out = {}
-        for name, rec in self.funds.items():
-            if name == scheme_name or rec["amc"] != amc:
-                continue
-            if rec["category"] in ("Large Cap", "Index Fund", "ETF"):
-                continue  # SEBI: large-cap schemes exempt from the overlap cap
-            if SEBI_2026_RULES.get(rec["category"],
-                                   CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
-                continue
-            out[name] = self.daily_weights_last_quarter(name)
-        return out
-
-    def news(self, entities):
-        return NewsSearchAdapter().fetch(entities)
-
-    for fn in (resolve, fund, snapshots, stock_prices, sector_index,
-               benchmark_series, sibling_equity_schemes, news):
-        setattr(S, fn.__name__, fn)
-
-
-_bind_store_interface()
 
 
 if __name__ == "__main__":
