@@ -2,7 +2,9 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-07-25: MF repo HEAD = `dea20c0`, pushed to `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo now HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only).**
+**As of 2026-07-25: MF repo HEAD = `849752c`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only).**
+
+> **Two standing traps for any new session.** (1) `git fetch` before trusting ANY status: on 2026-07-25 local `master` was found 9 commits behind, with an entire session's work invisible. (2) `mf_cache/` is gitignored AND restored in CI from `actions/cache` — never put unbackfillable work there. `ledger/` and `overrides/` live outside it for exactly that reason, and `mf_cache/universe_manifest.csv` still holds 52 hand-typed sectors that are **not** protected (see Known gaps).
 
 ## Product shape (current)
 - **System A (live, `mf_agent_orchestrator.py` → `RecommendationEngine`)** = the honest SCREEN: raw NAV facts (CAGR/vol/maxDD/Sortino/excess-vs-benchmark) + profile-weighted sub-scores + a **tri-colour 🟢BUY / 🔵HOLD / 🔴SELL verdict**. The verdict is a **transparent RULE over colour-coded metrics + hard compliance gates**, NOT the old below-chance weighted composite (which is deleted). The weighted "screen score" (0–100) is shown only as a banded *supporting datapoint*. Now ALSO carries a `cohort_signal` (see below) as a second, separate supporting datapoint — never folded into the verdict rule.
@@ -46,10 +48,27 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 5. ✅ **Artifact emitter built** (`mf_artifact.py`, this session). Versioned gzipped JSON; per-fund verdict/verdict_color/metric_colors/cohort_signal, all stamped `is_default_profile`. `monitoring{}` honestly null pre-ledger.
 6. ✅ Prediction ledger + monitoring built + wired (`mf_ledger.py`, this session). Git-tracked `ledger/predictions.jsonl`; `realized_ic` honestly null until ~2029; PSI computed fresh each run; `rank_stability` QA proxy added. Ledger now exists BEFORE any deploy, as required.
 7. ✅ **Scheduler built** (`.github/workflows/nightly.yml` + `realize-monthly.yml`, $0). Nightly: restore `mf_cache/` via `actions/cache` (evolving-cache pattern) → pure selftests gate → `bootstrap.py --from-manifest` (NEW flag: refresh the whole tracked universe; throttle = cache-first 20h TTL, no sleep) → model selftests if the cohort artifact is present → `mf_artifact.py` (emit + append ledger) → commit `ledger/` back (git-tracked/unbackfillable) → upload artifact. Monthly: `mf_ledger.py --realize` (offline maturation join) + commit realizations. No secrets (all free no-key APIs; Agent D degrades to NEUTRAL). Cold-cache seeding + app-consumption (workflow artifact now; GitHub Release for a stable app URL) documented in `docs/ci.md`. Both workflows YAML-validated. True NAVAll incremental-append left as a future optimization (TTL already prevents redundant refetch).
-8. Phase 2: whole-market scoring (NAVAll category normalization + `OUT_OF_TRAINING_UNIVERSE` flag).
+8. ✅ **Phase 2 built, RE-SCOPED with user approval** (`a7f4091`, `03260ec`, `24468fb`, `5985e26`, `4fed219`, `849752c`). Literal "whole-market scoring" would breach the honesty invariant: the trained universe is 136 funds / 20 cohorts / **10 categories, all EQUITY**, while NAVAll's 14,202 rows are mostly debt/index/FoF/ETF — emitting a probability there claims the holdout AUC (~0.578) transfers to populations the model never saw. Delivered instead as **"screen wide, gate the model"**:
+   - NEW **`mf_universe.py`** — AMFI `category_raw` → canonical category + trained-universe gate. Trained set read from the LIVE manifest, never hardcoded (asserted to widen *and* narrow with it).
+   - NEW **`mf_overrides.py`** + git-tracked **`overrides/`** — hand-curated `category`/`sector` the pipeline cannot fetch. INPUTS ONLY; any output-setting column (label/probability/verdict/…) rejects the whole file.
+   - `mf_live_score.py` gained `OUT_OF_TRAINING_UNIVERSE` (permanent refusal, distinct from the fixable `NOT_IN_UNIVERSE`), `SECTOR_UNRESOLVED`, and **frozen-panel insertion scoring** for funds in a trained category but outside the 136.
+   - Real numbers: **569** canonical Direct+Growth scoreable schemes vs 136 today; `UNMAPPED_CATEGORY` **0** of 14,202; **433** outside the manifest of which **229 scoreable now** and **204 blocked on a curated sector**.
 9. DEFERRED/GATED: 1y-forward cohort head (only if it clears CPCV >0.5 post phase-2).
+10. **NOT DONE — the last gate before anything reaches the app: the CI has NEVER run.** Both crons in `.github/workflows/` are commented out pending one manual `workflow_dispatch` from the Actions tab. Needs the repo owner (no `gh` CLI on the dev box).
 
 **Then:** Phase C (evaluate NFOs JM Multi Asset + TRUSTMF Large & Mid via B's dossier) → Step 3 (manager-proxy dossiers, subsumed into NFOAssessor) → capstone (layman summary + retrospective + integration plan). App integration itself still deferred.
+
+## Known gaps / blockers (as of `849752c`)
+Ordered by what actually blocks progress, with who can clear it.
+
+1. **CI has never executed** (needs repo owner). Crons commented out in both workflows; run `nightly-refresh` once via **Run workflow**, confirm green, then uncomment the two `schedule:` lines in each. Everything downstream is unverified until this passes once.
+2. **204 funds blocked on a curated sector** (needs a human + sources). `Sectoral/Thematic` cohorts key on `("sector", …)`; AMFI publishes no sector field and the manifest's 52 sectors are hand-typed. Workflow: `mf_overrides.py --gaps` → fill rows → `mf_overrides.py --validate`. Not fixable by fetching.
+3. **`mf_cache/universe_manifest.csv` is gitignored but hand-curated.** Its 52 sector values are unbackfillable, yet it sits in the directory CI restores from an evictable cache. Moving it under `overrides/` (or committing a copy) is unfinished work — `overrides/` exists and is the right home.
+4. **NAV coverage: ~198 cached vs 569 scoreable.** Mechanical — a `bootstrap.py` run; `nav_loader` already fetches a candidate on demand at score time.
+5. **`mf_cache/managers.csv` does not exist**, so Phase C's NFO manager-proxy dossier — the entire point of Phase C — has nothing to read. Schema: `manager_name, amfi_code, scheme_name, start_date, end_date, source_url`, every row traceable to a real AMC factsheet/SID.
+6. **`mf_cache/disclosures/` does not exist**, so holdings are inert on every real fund (concentration greys out, SEBI single-issuer check reports NOT EVALUATED). The code is proven on mock data. Drop `<amfi_code>_<YYYY-MM>.csv` files to activate.
+7. **`/code-review` skill is unusable in this repo** — it resolves its argument as a GitHub PR via `gh`, which is not installed on the dev box. Review the local diff manually (that is what the recent commits did).
+8. **Fable is unavailable** (`Fable 5 requires usage credits`). G1 says flag Fable-level work — expect the spawn to fail. Item #8 was designed on Opus instead and that was sufficient; what mattered was verifying premises against code, not model tier.
 
 ## Env / workflow
 - Python: venv only — `./.venv/Scripts/python.exe`. Bare `python`/`pip` are broken stubs.
