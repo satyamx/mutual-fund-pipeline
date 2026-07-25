@@ -1185,6 +1185,23 @@ class MasterOrchestrator:
         self._universe_index: Optional[Dict[str, str]] = None
         self.log = logging.getLogger("MFOrchestrator.Master")
 
+    @staticmethod
+    def _candidate_nav_loader(code: str):
+        """Fetch one candidate's cleaned NAV series on demand (cache-first).
+
+        `load_nav_panel()` only populates funds in the TRAINED manifest, so a fund
+        outside it reaches scoring with no series at all. mf_live_score calls this
+        only after confirming the fund is in a trained, non-sector-keyed category —
+        i.e. only when it is actually about to be scored — so a batch run never
+        fetches for funds it would refuse anyway.
+        """
+        try:
+            from mf_datasources import MFAPIAdapter
+            series, _meta, _rep = MFAPIAdapter().nav_series(code)
+            return series if series is not None and len(series) >= 5 else None
+        except Exception:  # noqa: BLE001 — a failed fetch is a coverage gap, never a crash
+            return None
+
     def _cohort_universe_index(self) -> Dict[str, str]:
         """Lazy whole-market category index for mf_live_score's trained-universe gate.
 
@@ -1294,7 +1311,8 @@ class MasterOrchestrator:
                         cohort_signal = score_live(dossier.amfi_code, manifest=manifest,
                                                    nav_panel=nav_panel, inferencer=inferencer,
                                                    engine=engine, today=TODAY,
-                                                   universe_index=self._cohort_universe_index())
+                                                   universe_index=self._cohort_universe_index(),
+                                                   nav_loader=self._candidate_nav_loader)
                         if cohort_signal["status"] != "OK":
                             rec["coverage_flags"].append(
                                 f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"

@@ -56,13 +56,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from mf_benchmarks import _asof
-from mf_features import FeatureEngine, assemble_panel
+from mf_features import FeatureEngine, LEVEL_FEATURES, assemble_panel
 from mf_infer import CohortInferencer, DEFAULT_TARGET, load_default
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
 import mf_universe
@@ -77,7 +77,18 @@ STALE_MAX_DAYS = 30
 # NOT_IN_UNIVERSE (a fixable data gap: right category, just no cached NAV / not in
 # the trained sample), because the two demand opposite responses from the caller —
 # one is "never ask again", the other is "refresh and retry".
-_STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE", "OUT_OF_TRAINING_UNIVERSE")
+_STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE",
+             "OUT_OF_TRAINING_UNIVERSE", "SECTOR_UNRESOLVED")
+
+# Categories whose cohort is keyed on SECTOR, not on the category alone:
+# PeerProxyResolver._group_key returns ("sector", row["sector"]) for these. The
+# manifest's 52 sector values are HAND-CURATED and AMFI's NAVAll carries no sector
+# field whatsoever, so a candidate outside the trained sample has no honest cohort.
+# Guessing one would fabricate the very peer set the label is defined against
+# ("top quartile WITHIN cohort") — so these are refused, not guessed. This is the
+# binding constraint on whole-market coverage: 256 of the 569 canonical scoreable
+# schemes are Sectoral/Thematic.
+SECTOR_KEYED_CATEGORIES = frozenset({"Sectoral/Thematic"})
 
 
 def _gap_result(status: str, target: str, **extra: Any) -> Dict[str, Any]:
@@ -128,6 +139,89 @@ def build_live_panel(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series],
     return engine, assemble_panel(engine, pairs)
 
 
+def _augmented_manifest(manifest: pd.DataFrame, code: str, category: str,
+                        series: pd.Series) -> pd.DataFrame:
+    """`manifest` + ONE synthetic row for a candidate outside the trained sample.
+
+    Only `amfi_code`, `category` and `sector` are read by FeatureEngine /
+    PeerProxyResolver; the remaining columns are filled for schema consistency only.
+    `sector` stays None deliberately — this path is barred for sector-keyed
+    categories (see SECTOR_KEYED_CATEGORIES), so it is never consulted.
+    """
+    nav = series.dropna()
+    row = {c: None for c in manifest.columns}
+    row.update(amfi_code=str(code), scheme_name=f"<candidate {code}>", amc=None,
+               category=category, sector=None,
+               first_nav_date=nav.index.min(), last_nav_date=nav.index.max(),
+               n_obs=int(len(nav)))
+    return pd.concat([manifest, pd.DataFrame([row])], ignore_index=True)
+
+
+def _z_candidate_from_reference(panel: pd.DataFrame, reference_codes: set,
+                                code: str) -> pd.DataFrame:
+    """Fill ONLY the candidate row's z_* using the reference population's mean/std.
+
+    Reference rows keep the z-scores they were built with and are never recomputed —
+    that is what makes them provably identical to a no-candidate run. The candidate
+    is then normalized against that same frozen distribution, which is the standard
+    train/serve normalization contract.
+    """
+    ref_mask = panel["amfi_code"].astype(str).isin({str(c) for c in reference_codes})
+    cand_mask = panel["amfi_code"].astype(str) == str(code)
+    for col in LEVEL_FEATURES:
+        ref = panel.loc[ref_mask, col]
+        std, cnt = ref.std(), ref.count()
+        # Same guard assemble_panel applies: std > 1e-12 and at least 5 observations.
+        ok = pd.notna(std) and std > 1e-12 and cnt >= 5
+        panel.loc[cand_mask, f"z_{col}"] = (
+            (panel.loc[cand_mask, col] - ref.mean()) / std if ok else np.nan)
+    return panel
+
+
+def build_candidate_panel(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series],
+                          code: str, category: str, t: pd.Timestamp
+                          ) -> tuple[FeatureEngine, pd.DataFrame, set]:
+    """One-anchor panel: the UNTOUCHED trained reference universe, plus one candidate.
+
+    The reference rows are taken from a panel built as if the candidate did not
+    exist, and are then reused verbatim. That is not a stylistic choice — it is
+    required for correctness, and the naive "assemble one panel over reference +
+    candidate" approach is measurably wrong:
+
+      `excess_1y` / `excess_3y` are benchmark-relative, and where no real index is
+      available the benchmark falls back to `PeerProxyResolver.loo_median`, the
+      leave-one-out median over COHORT PEERS. Adding the candidate to the manifest
+      puts it inside that median, which shifts the benchmark — and therefore the
+      excess_* features — of every reference fund sharing its cohort. Measured on
+      real cached data at anchor 2023-06-30 this moved z_excess_1y by up to 4.7e-2
+      and z_excess_3y by 3.2e-2, i.e. thirteen orders of magnitude above float
+      noise. Freezing only the z-STATISTICS does not help, because the underlying
+      feature VALUES have already moved.
+
+    The candidate's own row is taken from the augmented panel, where its cohort rank
+    and its own peer-proxy benchmark are computed correctly — `loo_median` excludes
+    self, so the candidate's benchmark is the median over reference peers, exactly
+    as it would have been had it been in the trained sample.
+
+    Restricting this path to non-sector-keyed categories additionally leaves
+    `PeerProxyResolver.small_sectors` untouched (it is derived solely from
+    Sectoral/Thematic rows), so no existing fund's cohort is redefined either.
+    """
+    # (1) The reference universe, exactly as a no-candidate run would compute it.
+    _, ref_panel = build_live_panel(manifest, nav_panel, t)
+    ref_codes = [str(c) for c in ref_panel["amfi_code"]]
+
+    # (2) The candidate's own row, computed against those same peers.
+    aug = _augmented_manifest(manifest, code, category, nav_panel[code])
+    engine = FeatureEngine(aug, nav_panel)
+    pairs = pd.DataFrame({"amfi_code": ref_codes + [str(code)], "anchor": t})
+    aug_panel = assemble_panel(engine, pairs)
+    cand_row = aug_panel[aug_panel["amfi_code"].astype(str) == str(code)]
+
+    panel = pd.concat([ref_panel, cand_row], ignore_index=True)
+    return engine, _z_candidate_from_reference(panel, set(ref_codes), code), set(ref_codes)
+
+
 def score_live(code: str, *,
               manifest: Optional[pd.DataFrame] = None,
               nav_panel: Optional[Dict[str, pd.Series]] = None,
@@ -135,6 +229,7 @@ def score_live(code: str, *,
               engine: Optional[FeatureEngine] = None,
               today: Optional[pd.Timestamp] = None,
               universe_index: Optional[Dict[str, str]] = None,
+              nav_loader: Optional[Callable[[str], Optional[pd.Series]]] = None,
               target: str = DEFAULT_TARGET) -> Dict[str, Any]:
     """Score one fund against the cohort model at the latest anchor its own NAV
     data supports. See module docstring for the honesty gates and anchor choice."""
@@ -151,7 +246,12 @@ def score_live(code: str, *,
 
     manifest_idx = manifest.set_index("amfi_code")
     series = nav_panel.get(code)
-    if code not in manifest_idx.index or series is None or series.dropna().empty:
+    has_nav = series is not None and not series.dropna().empty
+    # Set only when the fund is OUTSIDE the trained manifest but its AMFI category IS
+    # one the model trained on — it is then scored by insertion into the frozen
+    # reference panel rather than refused. Stays None for in-manifest funds.
+    candidate_category: Optional[str] = None
+    if code not in manifest_idx.index or not has_nav:
         # Two very different refusals hide behind "not in the manifest", and the
         # caller must be able to tell them apart: a Liquid Fund is permanently
         # unscoreable by an equity-only model, whereas a Flexi Cap fund that simply
@@ -168,8 +268,31 @@ def score_live(code: str, *,
                                         "holdout-validated on equity categories only, so no "
                                         "probability is emitted here — this is a permanent "
                                         "refusal, not a missing-data flag.")
-        return _gap_result("NOT_IN_UNIVERSE", target,
-                           note="Fund not in the trained universe manifest, or no cached NAV.")
+            if verdict.status == mf_universe.STATUS_TRAINED:
+                if verdict.category in SECTOR_KEYED_CATEGORIES:
+                    return _gap_result("SECTOR_UNRESOLVED", target, cohort_key=verdict.category,
+                                       note=f"{verdict.category} cohorts are keyed on SECTOR, and no "
+                                            "free source publishes a scheme's sector (the manifest's "
+                                            "are hand-curated). Guessing one would fabricate the peer "
+                                            "set the within-cohort label is defined against.")
+                if not has_nav and nav_loader is not None:
+                    # load_nav_panel() only populates MANIFEST funds, so a candidate
+                    # arrives with no series. Fetch on demand — gated behind a
+                    # confirmed trained, non-sector-keyed category so a batch run
+                    # never fetches for funds it was going to refuse anyway.
+                    try:
+                        fetched = nav_loader(str(code))
+                    except Exception as exc:  # noqa: BLE001 — a failed fetch is a data gap, not a crash
+                        LOGGER.warning("NAV fetch failed for candidate %s: %s", code, exc)
+                        fetched = None
+                    if fetched is not None and not fetched.dropna().empty:
+                        series, has_nav = fetched, True
+                        nav_panel = {**nav_panel, str(code): fetched}
+                if has_nav:
+                    candidate_category = verdict.category
+        if candidate_category is None:
+            return _gap_result("NOT_IN_UNIVERSE", target,
+                               note="Fund not in the trained universe manifest, or no cached NAV.")
 
     last_dt = series.dropna().index.max()
     t = min(last_dt, today)
@@ -179,7 +302,13 @@ def score_live(code: str, *,
                            note=f"Latest cached NAV is {staleness_days}d behind today "
                                 f"(> {STALE_MAX_DAYS}d tolerance) — refresh the cache before scoring.")
 
-    engine, panel = build_live_panel(manifest, nav_panel, t, engine=engine)
+    if candidate_category is not None:
+        # Fresh engine on purpose: any `engine` passed in was built on the base
+        # manifest and knows nothing about this candidate.
+        engine, panel, _ref = build_candidate_panel(manifest, nav_panel, code,
+                                                    candidate_category, t)
+    else:
+        engine, panel = build_live_panel(manifest, nav_panel, t, engine=engine)
     panel_codes = set(panel["amfi_code"])
     if code not in panel_codes:
         return _gap_result("STALE_NAV", target, anchor=str(t.date()), staleness_days=staleness_days,
@@ -343,6 +472,112 @@ def _selftest() -> None:
         print(f"[selftest] OUT_OF_TRAINING_UNIVERSE gate on real AMFI rows "
               f"({', '.join(found)}): permanent refusal, no probability; "
               f"degrades safely without the index: PASS")
+
+    # ---- Candidate insertion (#8 part 3) ------------------------------------
+    # Score a fund that is NOT in the trained manifest by inserting it into the
+    # frozen reference panel. Built by REMOVING a real fund from the manifest and
+    # re-scoring it as an outsider: its true in-manifest result is the ground truth.
+    victim = None
+    for c in codes_T:
+        row = manifest.set_index("amfi_code").loc[c]
+        if row["category"] not in SECTOR_KEYED_CATEGORIES:
+            peers = [p for p in manifest[manifest["category"] == row["category"]]["amfi_code"]
+                     if p in nav_panel]
+            if len(peers) > COHORT_MIN_SIZE:      # still a valid cohort once removed
+                victim = c
+                break
+    assert victim is not None, "FAIL: no non-sectoral fund available for the insertion test"
+    vic_cat = manifest.set_index("amfi_code").loc[victim]["category"]
+    reduced = manifest[manifest["amfi_code"] != victim].reset_index(drop=True)
+
+    # (a) THE LOAD-BEARING PROPERTY: inserting a candidate must not move ANY
+    #     reference fund's z-scores. If it did, every peer would be scored on a
+    #     different scale than the model was calibrated on.
+    _, base_panel = build_live_panel(reduced, nav_panel, T)
+    _, cand_panel, ref_codes = build_candidate_panel(reduced, nav_panel, victim, vic_cat, T)
+    zcols = [f"z_{c}" for c in LEVEL_FEATURES]
+    b = base_panel[base_panel["amfi_code"].isin(ref_codes)].sort_values("amfi_code")
+    a = cand_panel[cand_panel["amfi_code"].isin(ref_codes)].sort_values("amfi_code")
+    assert len(a) == len(b) and len(b) > 0
+    assert a[zcols].reset_index(drop=True).equals(b[zcols].reset_index(drop=True)), \
+        "FAIL: candidate insertion shifted the reference universe's z-scores"
+    assert victim not in set(base_panel["amfi_code"]) and victim in set(cand_panel["amfi_code"])
+    print(f"[selftest] insertion leaves all {len(ref_codes)} reference z-scores bit-identical: PASS")
+
+    # (a2) TEETH: the naive "one panel over reference + candidate" really is wrong,
+    #      so the split construction above is load-bearing, not defensive styling.
+    #      The candidate joins its cohort's leave-one-out peer-proxy benchmark, which
+    #      shifts peers' excess_* features.
+    naive_engine = FeatureEngine(
+        _augmented_manifest(reduced, victim, vic_cat, nav_panel[victim]), nav_panel)
+    naive = assemble_panel(naive_engine, pd.DataFrame(
+        {"amfi_code": list(ref_codes) + [str(victim)], "anchor": T}))
+    nv = naive[naive["amfi_code"].isin(ref_codes)].sort_values("amfi_code").reset_index(drop=True)
+    drift = (nv[zcols] - b[zcols].reset_index(drop=True)).abs().max().max()
+    assert drift > 1e-6, (f"FAIL: expected the naive panel to contaminate peers, but max "
+                          f"drift was {drift:.2e} — the guard may no longer be needed")
+    print(f"[selftest] naive single-panel build WOULD contaminate peers "
+          f"(max |Δz|={drift:.2e}) — split construction is load-bearing: PASS")
+
+    # (b) cohorts of existing funds must be unchanged (small_sectors untouched).
+    eng_base = FeatureEngine(reduced, nav_panel)
+    eng_cand = build_candidate_panel(reduced, nav_panel, victim, vic_cat, T)[0]
+    assert eng_cand.resolver.small_sectors == eng_base.resolver.small_sectors, \
+        "FAIL: inserting a candidate redefined the sector-pooling of existing funds"
+    for c in list(reduced["amfi_code"])[:25]:
+        assert eng_cand.group_key(c) == eng_base.group_key(c), f"FAIL: cohort of {c} changed"
+    print("[selftest] insertion leaves existing cohorts + small_sectors unchanged: PASS")
+
+    # (c) Outsiders actually score, and track their in-manifest truth. Run over
+    #     SEVERAL funds and require a spread of probabilities, so this can't pass
+    #     vacuously on a cluster of near-zero scores.
+    mi = manifest.set_index("amfi_code")
+    checked, deltas = [], []
+    for c in codes_T:
+        if len(checked) >= 6:
+            break
+        cat = mi.loc[c]["category"]
+        if cat in SECTOR_KEYED_CATEGORIES:
+            continue
+        peers = [p for p in manifest[manifest["category"] == cat]["amfi_code"] if p in nav_panel]
+        if len(peers) <= COHORT_MIN_SIZE:
+            continue
+        red = manifest[manifest["amfi_code"] != c].reset_index(drop=True)
+        # Build the AMFI string from the SHIPPED mapping rather than hand-writing it:
+        # the manifest's category is not always AMFI's sub-category name (e.g. the
+        # manifest pools AMFI's "Value Fund"/"Contra Fund" into one "Value/Contra").
+        sub = next(k for k, v in mf_universe._SUBCATEGORY_MAP.items() if v == cat)
+        got = score_live(c, manifest=red, nav_panel=nav_panel, inferencer=inf, today=T,
+                         universe_index={str(c): f"Open Ended Schemes(Equity Scheme - {sub})"})
+        truth = score_live(c, manifest=manifest, nav_panel=nav_panel, inferencer=inf, today=T)
+        assert got["status"] == "OK", f"FAIL: candidate {c} not scored: {got['status']} / {got['note']}"
+        assert 0.0 <= got["probability"] <= 1.0
+        assert got["cohort_key"] == truth["cohort_key"], \
+            f"FAIL: {c} landed in cohort {got['cohort_key']} vs true {truth['cohort_key']}"
+        if truth["status"] == "OK":
+            # Not bit-identical by construction: the trained cohort had one more
+            # member, so peer ranks and the leave-one-out benchmark differ slightly.
+            deltas.append(abs(got["probability"] - truth["probability"]))
+        checked.append((c, cat, got["probability"]))
+
+    assert len(checked) >= 3, f"FAIL: only {len(checked)} insertion cases exercised"
+    assert deltas and max(deltas) < 0.05, f"FAIL: insertion drifted from truth by {max(deltas):.4f}"
+    spread = max(p for _, _, p in checked) - min(p for _, _, p in checked)
+    assert spread > 1e-3, (f"FAIL: all {len(checked)} probabilities within {spread:.2e} — the "
+                           "comparison against truth would pass vacuously")
+    print(f"[selftest] {len(checked)} outsiders scored via insertion "
+          f"(p spread {spread:.3f}, max |Δ| vs in-manifest truth {max(deltas):.4f}, "
+          f"cohorts all matched): PASS")
+
+    # (d) sector-keyed categories are REFUSED, never guessed.
+    sect = next((c for c in codes_T
+                 if manifest.set_index("amfi_code").loc[c]["category"] in SECTOR_KEYED_CATEGORIES), None)
+    if sect is not None:
+        red2 = manifest[manifest["amfi_code"] != sect].reset_index(drop=True)
+        res = score_live(sect, manifest=red2, nav_panel=nav_panel, inferencer=inf, today=T,
+                         universe_index={str(sect): "Open Ended Schemes(Equity Scheme - Sectoral/ Thematic)"})
+        assert res["status"] == "SECTOR_UNRESOLVED" and res["probability"] is None, res["status"]
+        print("[selftest] sector-keyed outsider refused (no free sector source): PASS")
 
     # ---- End-to-end sanity: a real fund scores OK with a stable-shaped dict --
     res = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
