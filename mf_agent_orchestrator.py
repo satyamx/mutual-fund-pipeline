@@ -1183,7 +1183,31 @@ class MasterOrchestrator:
         # None = "not attempted yet"; {} = "attempted and unavailable", which the gate
         # treats as a safe degrade rather than retrying the master read per fund.
         self._universe_index: Optional[Dict[str, str]] = None
+        # Same sentinel convention as _universe_index: None = not attempted yet.
+        self._overrides: Optional[Dict[str, Any]] = None
         self.log = logging.getLogger("MFOrchestrator.Master")
+
+    def _curated_overrides(self, manifest) -> Dict[str, Any]:
+        """Hand-curated universe overrides (git-tracked), loaded once per run.
+
+        Validation issues are logged the FIRST time only — a batch scores 136+ funds
+        through one orchestrator, and repeating the same warning per fund would bury
+        it. ERROR-severity rows are dropped by mf_overrides itself and never applied.
+        """
+        if self._overrides is None:
+            try:
+                import mf_overrides
+                self._overrides, issues = mf_overrides.load(manifest=manifest)
+                for issue in issues:
+                    log = (self.log.warning if issue.severity == mf_overrides.SEVERITY_ERROR
+                           else self.log.info)
+                    log("universe override %s", issue)
+                if self._overrides:
+                    self.log.info("Loaded %d curated universe override(s)", len(self._overrides))
+            except Exception as exc:  # noqa: BLE001 — curation is optional, never fatal
+                self.log.warning("Universe overrides unavailable: %s", exc)
+                self._overrides = {}
+        return self._overrides
 
     @staticmethod
     def _candidate_nav_loader(code: str):
@@ -1312,7 +1336,8 @@ class MasterOrchestrator:
                                                    nav_panel=nav_panel, inferencer=inferencer,
                                                    engine=engine, today=TODAY,
                                                    universe_index=self._cohort_universe_index(),
-                                                   nav_loader=self._candidate_nav_loader)
+                                                   nav_loader=self._candidate_nav_loader,
+                                                   overrides=self._curated_overrides(manifest))
                         if cohort_signal["status"] != "OK":
                             rec["coverage_flags"].append(
                                 f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"
