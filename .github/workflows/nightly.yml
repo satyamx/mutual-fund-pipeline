@@ -9,11 +9,12 @@ name: nightly-refresh
 # cache means bootstrap only refetches NAV that is actually stale. That IS the
 # politeness mechanism for the free, no-key APIs (AMFI / mfapi.in / yfinance).
 #
-# COLD-CACHE NOTE: the universe manifest (mf_cache/universe_manifest.csv) and the
-# cohort model artifact are GENERATED, not committed (mf_cache/ is gitignored). Seed
-# the cache once locally (bootstrap + `python mf_model.py --stage cohort`) and let the
-# first run populate the actions/cache; steps that need those inputs degrade honestly
-# until then rather than fabricating.
+# COLD-CACHE NOTE: the universe manifest is hand-curated and GIT-TRACKED
+# (overrides/universe_manifest.csv), so `bootstrap.py --from-manifest` works on a
+# cold runner straight off the checkout. The cohort model artifact is still
+# GENERATED, not committed (mf_cache/ is gitignored and evictable) — seed it once
+# locally (`python mf_model.py --stage cohort`) and let the first run populate the
+# actions/cache; steps needing it degrade honestly until then rather than fabricating.
 
 on:
   # SCHEDULE DISABLED for initial manual testing (2026-07-24). Run it on demand from

@@ -25,6 +25,8 @@ Output: mf_cache/phase_b/labels.parquet
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from mf_datasources import CACHE, MFAPIAdapter
@@ -36,7 +38,15 @@ OUT_DIR = CACHE / "phase_b"
 LABELS_PATH = OUT_DIR / "labels.parquet"
 REPORT_PATH = OUT_DIR / "base_rate_sensitivity.md"
 
-MANIFEST_PATH = CACHE / "universe_manifest.csv"
+# The universe manifest is HAND-CURATED (52 of its sector values are typed by a
+# human; AMFI publishes no sector field) and nothing in this repo regenerates it.
+# It therefore lives git-tracked in `overrides/`, NOT in gitignored `mf_cache/`,
+# for the same reason as `ledger/` and `overrides/universe_overrides.csv`: CI
+# restores `mf_cache/` from `actions/cache`, which GitHub evicts on idle or size
+# pressure, so anything unbackfillable in there is one eviction from gone.
+# Single definition on purpose — `mf_realstore` imports this rather than keeping
+# a second literal that could drift.
+MANIFEST_PATH = Path(__file__).parent / "overrides" / "universe_manifest.csv"
 
 # Within-cohort relative targets (see add_cohort_targets below): minimum number
 # of funds with a valid R_fwd in a fund's (anchor, cohort) cell, else excluded.

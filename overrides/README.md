@@ -7,6 +7,33 @@ which GitHub evicts on idle or size pressure — curated work put there is one
 eviction from gone). Same reasoning that placed `ledger/predictions.jsonl` outside
 the cache.
 
+## `universe_manifest.csv`
+
+```
+amfi_code,scheme_name,amc,category,sector,first_nav_date,last_nav_date,n_obs
+```
+
+The **trained universe** — the 136 funds the `cohort_q1` model was fitted on, and
+the definition of what "in the trained universe" means everywhere in the pipeline
+(`mf_universe.trained_categories`, `mf_live_score`'s `OUT_OF_TRAINING_UNIVERSE`
+gate, `mf_labels`' cohort construction, `mf_artifact`'s batch loop). **52 of its
+sector values were typed by hand and no script in this repo regenerates this
+file** — it is not derivable from AMFI, which publishes no sector field.
+
+It lived in `mf_cache/` until 2026-07-25, which meant the single most
+unbackfillable file in the project sat in the one directory CI restores from an
+evictable cache. Moving it here also makes `bootstrap.py --from-manifest` work on
+a cold CI runner, since the manifest now arrives with the checkout.
+
+Read it through `mf_labels.load_manifest()` / `mf_labels.MANIFEST_PATH`, which is
+the single definition of the path; `mf_realstore.UNIVERSE_MANIFEST` is an alias of
+it, not a second literal.
+
+**Editing it is a retrain-level change**, not curation: adding a fund changes the
+within-cohort labels and invalidates the holdout metrics. To make a fund scoreable
+*without* retraining, add a row to `universe_overrides.csv` below — out-of-manifest
+funds are scored by insertion against this frozen panel.
+
 ## `universe_overrides.csv`
 
 ```

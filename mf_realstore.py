@@ -40,10 +40,15 @@ from mf_datasources import (
     YFinanceAdapter,
 )
 from mf_benchmarks import CATEGORY_BENCHMARK, SECTOR_BENCHMARK, load_benchmark_series
+from mf_labels import MANIFEST_PATH
 
 LOGGER = logging.getLogger("MFOrchestrator.RealStore")
 
-UNIVERSE_MANIFEST = CACHE / "universe_manifest.csv"
+# Re-exported alias, not a second definition: the manifest is hand-curated and
+# git-tracked under overrides/ (see mf_labels.MANIFEST_PATH for why). Two
+# independent literals here is exactly how a moved file silently keeps working
+# in one module and breaks in the other.
+UNIVERSE_MANIFEST = MANIFEST_PATH
 DISCLOSURES_DIR = CACHE / "disclosures"
 
 # AMFI publishes category as free text inside the NAVAll.txt banner lines, e.g.
