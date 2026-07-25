@@ -88,10 +88,19 @@ _SUBCATEGORY_MAP: Dict[str, str] = {
 }
 
 # "Open Ended Schemes(Equity Scheme - Large Cap Fund)" ->
-#   family="Open Ended", asset="Equity Scheme", sub="Large Cap Fund"
-_CATEGORY_RE = re.compile(
-    r"^(?P<family>.*?)\s*Schemes?\s*\(\s*(?P<asset>[^-)]+?)\s*-\s*(?P<sub>.+?)\s*\)\s*$",
-    re.IGNORECASE)
+#   family="Open Ended", inner="Equity Scheme - Large Cap Fund"
+#
+# `inner` is greedy to the LAST ')' on purpose: AMFI nests parentheses inside the
+# category itself — "Exchange Traded Funds (ETFs) - Equity ETF" and "Fund of Funds
+# Scheme (Domestic) - Fund of Funds Scheme (Domestic)". A character class excluding
+# ')' truncates those and makes 35 perfectly readable live rows look unreadable.
+_ENVELOPE_RE = re.compile(r"^(?P<family>.*?)\s*Schemes?\s*\((?P<inner>.*)\)\s*$",
+                          re.IGNORECASE)
+
+# Splits `inner` into asset + sub on the FIRST " - " that has whitespace on BOTH
+# sides. The whitespace requirement matters: "ELSS- Tax Saver Fund" must NOT split
+# at its internal hyphen, or ELSS stops resolving to a trained category.
+_ASSET_SUB_SPLIT_RE = re.compile(r"\s+-\s+")
 
 # Asset-class prefix that marks an EQUITY row. AMFI uses both singular and plural.
 _EQUITY_ASSET_RE = re.compile(r"^equity\s+schemes?$", re.IGNORECASE)
@@ -102,10 +111,10 @@ _EQUITY_ASSET_RE = re.compile(r"^equity\s+schemes?$", re.IGNORECASE)
 # READABLE — they are simply pre-SEBI-categorization labels with no modern
 # sub-category, so they parse and are then refused as out-of-universe. Treating them
 # as unreadable would repeat the very conflation `parsed` exists to prevent.
-# Note this cannot swallow "IL&FS Mutual Fund (IDF)": that string has no
-# Scheme/Schemes token before the parenthesis, so it still fails to parse.
-_LEGACY_RE = re.compile(
-    r"^(?P<family>.*?)\s*Schemes?\s*\(\s*(?P<sub>[^-()]+?)\s*\)\s*$", re.IGNORECASE)
+# Detected by `inner` containing no " - " split, not by a separate pattern.
+#
+# Nothing here can swallow "IL&FS Mutual Fund (IDF)": that string has no
+# Scheme/Schemes token before the parenthesis, so the envelope never matches.
 
 
 def _norm(s: str) -> str:
@@ -144,25 +153,26 @@ def normalize_category(category_raw: Optional[str]) -> CategoryParse:
     if not raw:
         return CategoryParse(None, None, False, False, False, "category_raw is empty")
 
-    m = _CATEGORY_RE.match(raw)
+    m = _ENVELOPE_RE.match(raw)
     if not m:
-        legacy = _LEGACY_RE.match(raw)
-        if legacy:
-            # Readable, but a pre-2018 label ("Income"/"Growth"/"Gilt"/"ELSS") with no
-            # modern SEBI sub-category. Mapping the old broad "Growth" onto one of the
-            # 10 trained categories would be a guess, so it deliberately yields none.
-            label = legacy.group("sub").strip()
-            return CategoryParse(None, None, True, False, _norm(legacy.group("family")) == "open ended",
-                                 f"legacy pre-2018 AMFI label {label!r} — no SEBI sub-category to map")
         # e.g. "IL&FS Mutual Fund (IDF)" — an AMC name where a category belongs.
         # This is the ONLY genuine parse failure: we cannot say what this fund is.
         return CategoryParse(None, None, False, False, False,
-                             f"does not match AMFI's 'Family Schemes(Asset - Sub)' shape: {raw!r}")
+                             f"does not match AMFI's 'Family Schemes(...)' shape: {raw!r}")
 
-    asset = m.group("asset").strip()
-    sub = _norm(m.group("sub"))
     is_open = _norm(m.group("family")) == "open ended"
-    is_equity = bool(_EQUITY_ASSET_RE.match(asset.strip()))
+    parts = _ASSET_SUB_SPLIT_RE.split(m.group("inner").strip(), maxsplit=1)
+    if len(parts) < 2:
+        # Readable, but a pre-2018 label ("Income"/"Growth"/"Gilt"/"ELSS") with no
+        # modern SEBI sub-category. Mapping the old broad "Growth" onto one of the
+        # 10 trained categories would be a guess, so it deliberately yields none.
+        return CategoryParse(None, None, True, False, is_open,
+                             f"legacy pre-2018 AMFI label {parts[0].strip()!r} — "
+                             "no SEBI sub-category to map")
+
+    asset, sub_raw = parts[0].strip(), parts[1].strip()
+    sub = _norm(sub_raw)
+    is_equity = bool(_EQUITY_ASSET_RE.match(asset))
 
     if not is_equity:
         # Fully understood — a debt/index/FoF/ETF scheme. Not a data gap.
@@ -177,7 +187,7 @@ def normalize_category(category_raw: Optional[str]) -> CategoryParse:
     canonical = _SUBCATEGORY_MAP.get(sub)
     if canonical is None:
         return CategoryParse(None, asset, True, True, True,
-                             f"equity sub-category {m.group('sub').strip()!r} has no canonical mapping")
+                             f"equity sub-category {sub_raw!r} has no canonical mapping")
     return CategoryParse(canonical, asset, True, True, True, "mapped")
 
 
@@ -303,6 +313,20 @@ def _selftest() -> None:
         assert v.status == STATUS_OUT_OF_UNIVERSE and "legacy" in v.reason, (legacy, v)
     # ...and the legacy pattern must NOT swallow the AMC-name row above.
     assert classify("IL&FS Mutual Fund (IDF)", trained_10).status == STATUS_UNMAPPED
+
+    # AMFI NESTS parentheses inside the category itself. A pattern that stops at the
+    # first ')' truncates these and reports 35 readable live rows as unreadable.
+    for nested in ("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)",
+                   "Open Ended Schemes(Exchange Traded Funds (ETFs) - Debt ETF)",
+                   "Open Ended Schemes(Fund of Funds Scheme (Domestic) - "
+                   "Fund of Funds Scheme (Domestic))"):
+        v = classify(nested, trained_10)
+        assert v.status == STATUS_OUT_OF_UNIVERSE, (nested, v)
+        assert normalize_category(nested).parsed, nested
+    # An Equity ETF is equity-flavoured but passively tracks an index; the trained
+    # universe is ACTIVE open-ended categories, so it must still be refused.
+    assert not classify("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)",
+                        trained_10).scoreable
     print("[selftest] unreadable -> UNMAPPED; understood-but-untrained (debt/index) -> "
           "OUT_OF_TRAINING_UNIVERSE, kept distinct — PASS")
 
