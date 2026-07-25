@@ -283,6 +283,21 @@ class AMFIRegistryLive:
     LINE = re.compile(r"^(?P<code>\d{4,8});(?P<isin1>[^;]*);(?P<isin2>[^;]*);"
                       r"(?P<name>[^;]+);(?P<nav>[0-9.]+|N\.A\.);(?P<date>[^;]+)\s*$")
 
+    # A category header is "<Family> Schemes(<Asset> - <Sub>)". The literal
+    # Scheme/Schemes token before the parenthesis is what separates it from an AMC
+    # banner — testing only for "(" and ")" mis-reads any AMC whose COMPANY NAME
+    # contains parentheses as a category, which then persists to every scheme after
+    # it until the next real header. Verified on the live file: 75 genuine headers
+    # vs exactly 1 paren-bearing AMC banner, "IL&FS Mutual Fund (IDF)".
+    #
+    # That banner sits inside the "Close Ended Schemes(Income)" block as an ordinary
+    # AMC, so its 12 IDF schemes correctly inherit that legacy debt label and remain
+    # unscoreable. Deliberately NOT special-cased any further: blanking the category
+    # at a paren-bearing banner would also strip the correct
+    # "Close Ended Schemes(Income)" from the 2,532 schemes of the 7 AMCs listed
+    # after it in the same block.
+    CATEGORY_HEADER = re.compile(r"^.*Schemes?\s*\(.*\)\s*$", re.IGNORECASE)
+
     def __init__(self) -> None:
         self.live = False
 
@@ -312,9 +327,9 @@ class AMFIRegistryLive:
                                  scheme_name=m.group("name").strip(),
                                  category_raw=category, amc=amc,
                                  nav=float(m.group("nav")), date=m.group("date")))
-            elif "(" in line and ")" in line:      # e.g. "Open Ended Schemes(Equity Scheme - Large Cap Fund)"
+            elif self.CATEGORY_HEADER.match(line):  # "Open Ended Schemes(Equity Scheme - Large Cap Fund)"
                 category = line
-            elif ";" not in line:                  # AMC banner line
+            elif ";" not in line:                   # AMC banner line
                 amc = line
         df = pd.DataFrame(rows)
         if not df.empty:
@@ -600,3 +615,86 @@ def readiness() -> pd.DataFrame:
     df = pd.DataFrame(checks, columns=["source", "ready", "how", "consumer"])
     df["status"] = np.where(df["ready"], "READY", "MISSING")
     return df[["source", "status", "how", "consumer"]]
+
+
+# ==============================================================================
+# SELFTEST — NAVAll header/banner discrimination (pure, no network)
+# ==============================================================================
+def _selftest_navall() -> None:
+    """Regression test for the AMFI header-vs-AMC-banner split.
+
+    The original rule ("any line with '(' and ')' is a category header") mis-read
+    `IL&FS Mutual Fund (IDF)` — an AMC whose COMPANY NAME contains parentheses — as
+    a category. That bogus category then persisted to every scheme after it, and the
+    AMC column silently inherited whichever firm was listed before it. On the live
+    file that mislabelled 2,544 rows and misattributed 12 IL&FS schemes to ICICI
+    Prudential.
+    """
+    sample = "\n".join([
+        "Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date",
+        "",
+        "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+        "",
+        "Alpha Mutual Fund",
+        "100001;INF000000001;-;Alpha Large Cap Fund - Direct - Growth;123.45;01-Jul-2026",
+        "",
+        "Close Ended Schemes(Income)",
+        "",
+        "Beta Mutual Fund",
+        "100002;INF000000002;-;Beta Income Fund - Growth;10.11;01-Jul-2026",
+        "",
+        "IL&FS Mutual Fund (IDF)",                       # AMC banner, NOT a category
+        "100003;INF000000003;-;IL&FS Infrastructure Debt Fund Series 1A - Growth;9.87;01-Jul-2026",
+        "",
+        "Gamma Mutual Fund",                              # follows the IDF block
+        "100004;INF000000004;-;Gamma Income Fund - Growth;12.34;01-Jul-2026",
+    ])
+
+    rows, category, amc = [], None, None
+    for line in sample.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Scheme Code"):
+            continue
+        m = AMFIRegistryLive.LINE.match(line)
+        if m:
+            rows.append(dict(code=m.group("code"), name=m.group("name").strip(),
+                             category_raw=category, amc=amc))
+        elif AMFIRegistryLive.CATEGORY_HEADER.match(line):
+            category = line
+        elif ";" not in line:
+            amc = line
+    by = {r["code"]: r for r in rows}
+
+    assert by["100001"]["category_raw"] == "Open Ended Schemes(Equity Scheme - Large Cap Fund)"
+    assert by["100001"]["amc"] == "Alpha Mutual Fund"
+
+    # The paren-bearing AMC must be read as an AMC, never as a category...
+    assert by["100003"]["amc"] == "IL&FS Mutual Fund (IDF)", by["100003"]
+    assert "IL&FS" not in str(by["100003"]["category_raw"]), by["100003"]
+    # ...and its schemes keep the enclosing (legacy, debt) header — which mf_universe
+    # then refuses, so they can never reach the equity model.
+    assert by["100003"]["category_raw"] == "Close Ended Schemes(Income)", by["100003"]
+
+    # Schemes of the NEXT AMC must retain that same real category. Suppressing the
+    # category at a paren-bearing banner would strip it from these — on the live file
+    # that would wrongly blank 2,532 legitimate close-ended income schemes.
+    assert by["100004"]["category_raw"] == "Close Ended Schemes(Income)", by["100004"]
+    assert by["100004"]["amc"] == "Gamma Mutual Fund"
+
+    # No AMC banner may ever be mistaken for a category.
+    assert not AMFIRegistryLive.CATEGORY_HEADER.match("IL&FS Mutual Fund (IDF)")
+    assert not AMFIRegistryLive.CATEGORY_HEADER.match("Alpha Mutual Fund")
+    assert AMFIRegistryLive.CATEGORY_HEADER.match("Open Ended Schemes(Equity Scheme - ELSS)")
+    assert AMFIRegistryLive.CATEGORY_HEADER.match(
+        "Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)")
+    print("[selftest] NAVAll: paren-bearing AMC banner read as AMC (not category); "
+          "following AMCs keep their real category — PASS")
+    print("[selftest] PASS — mf_datasources NAVAll parsing")
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="mf_datasources checks")
+    ap.add_argument("--selftest", action="store_true")
+    ap.parse_args()
+    _selftest_navall()
