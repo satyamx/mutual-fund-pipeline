@@ -1178,7 +1178,28 @@ class MasterOrchestrator:
         self._cohort_inferencer = None
         self._cohort_engine = None
         self._cohort_unavailable: Optional[str] = None
+        # Whole-market amfi_code -> category map, built at most ONCE per orchestrator
+        # (a batch run scores ~136+ funds through the same instance). Sentinel value
+        # None = "not attempted yet"; {} = "attempted and unavailable", which the gate
+        # treats as a safe degrade rather than retrying the master read per fund.
+        self._universe_index: Optional[Dict[str, str]] = None
         self.log = logging.getLogger("MFOrchestrator.Master")
+
+    def _cohort_universe_index(self) -> Dict[str, str]:
+        """Lazy whole-market category index for mf_live_score's trained-universe gate.
+
+        Without it the gate still refuses out-of-universe funds — it just reports the
+        coarser NOT_IN_UNIVERSE instead of the permanent OUT_OF_TRAINING_UNIVERSE. So
+        a failure here costs precision in the coverage flag, never safety.
+        """
+        if self._universe_index is None:
+            try:
+                from mf_live_score import load_universe_index
+                self._universe_index = load_universe_index()
+            except Exception as exc:  # noqa: BLE001 — never break a run over a flag's precision
+                self.log.warning("Universe index unavailable: %s", exc)
+                self._universe_index = {}
+        return self._universe_index
 
     def _cohort_resources(self):
         """Lazy-load + instance-cache the cohort_q1 live-scoring resources
@@ -1272,7 +1293,8 @@ class MasterOrchestrator:
                         manifest, nav_panel, inferencer, engine = res
                         cohort_signal = score_live(dossier.amfi_code, manifest=manifest,
                                                    nav_panel=nav_panel, inferencer=inferencer,
-                                                   engine=engine, today=TODAY)
+                                                   engine=engine, today=TODAY,
+                                                   universe_index=self._cohort_universe_index())
                         if cohort_signal["status"] != "OK":
                             rec["coverage_flags"].append(
                                 f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"

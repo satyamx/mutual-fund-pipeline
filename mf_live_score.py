@@ -55,6 +55,7 @@ small, and it is documented here rather than patched with a fake filter.
 from __future__ import annotations
 
 import argparse
+import logging
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -64,10 +65,19 @@ from mf_benchmarks import _asof
 from mf_features import FeatureEngine, assemble_panel
 from mf_infer import CohortInferencer, DEFAULT_TARGET, load_default
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
+import mf_universe
+
+LOGGER = logging.getLogger("MFLiveScore")
 
 STALE_MAX_DAYS = 30
 
-_STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE")
+# OUT_OF_TRAINING_UNIVERSE is a PERMANENT refusal — the cohort_q1 model was fitted
+# and holdout-validated on 10 equity categories only, so no amount of fetching makes
+# a liquid fund or an index fund scoreable by it. It is deliberately distinct from
+# NOT_IN_UNIVERSE (a fixable data gap: right category, just no cached NAV / not in
+# the trained sample), because the two demand opposite responses from the caller —
+# one is "never ask again", the other is "refresh and retry".
+_STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE", "OUT_OF_TRAINING_UNIVERSE")
 
 
 def _gap_result(status: str, target: str, **extra: Any) -> Dict[str, Any]:
@@ -80,6 +90,25 @@ def _gap_result(status: str, target: str, **extra: Any) -> Dict[str, Any]:
               note=None)
     out.update(extra)
     return out
+
+
+def load_universe_index() -> Dict[str, str]:
+    """`amfi_code -> AMFI category_raw` for the whole market, from the NAVAll master.
+
+    Built once and injected into `score_live` so a batch loop doesn't re-read the
+    master per fund. Returns {} if the master isn't cached — the gate then simply
+    can't distinguish a permanent category refusal from a data gap, and falls back
+    to the conservative NOT_IN_UNIVERSE, which is still a refusal.
+    """
+    try:
+        import mf_datasources  # noqa: PLC0415 — optional/heavier dependency, loaded on demand
+        df = mf_datasources.AMFIRegistryLive().master()
+    except Exception as exc:  # noqa: BLE001 — a missing master must never break scoring
+        LOGGER.warning("Universe index unavailable (%s) — category gate degrades to NOT_IN_UNIVERSE", exc)
+        return {}
+    if df is None or df.empty:
+        return {}
+    return {str(c): cat for c, cat in zip(df["amfi_code"], df["category_raw"])}
 
 
 def build_live_panel(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series],
@@ -105,6 +134,7 @@ def score_live(code: str, *,
               inferencer: Optional[CohortInferencer] = None,
               engine: Optional[FeatureEngine] = None,
               today: Optional[pd.Timestamp] = None,
+              universe_index: Optional[Dict[str, str]] = None,
               target: str = DEFAULT_TARGET) -> Dict[str, Any]:
     """Score one fund against the cohort model at the latest anchor its own NAV
     data supports. See module docstring for the honesty gates and anchor choice."""
@@ -122,6 +152,22 @@ def score_live(code: str, *,
     manifest_idx = manifest.set_index("amfi_code")
     series = nav_panel.get(code)
     if code not in manifest_idx.index or series is None or series.dropna().empty:
+        # Two very different refusals hide behind "not in the manifest", and the
+        # caller must be able to tell them apart: a Liquid Fund is permanently
+        # unscoreable by an equity-only model, whereas a Flexi Cap fund that simply
+        # wasn't sampled into the 136 becomes scoreable the moment its NAV is cached.
+        # Collapsing both into one status would tell the app to keep retrying the
+        # former forever, and to give up on the latter.
+        if universe_index:
+            verdict = mf_universe.classify(universe_index.get(str(code)),
+                                           mf_universe.trained_categories(manifest))
+            if verdict.status == mf_universe.STATUS_OUT_OF_UNIVERSE:
+                return _gap_result("OUT_OF_TRAINING_UNIVERSE", target,
+                                   cohort_key=verdict.category,
+                                   note=f"{verdict.reason}. The cohort_q1 model was fitted and "
+                                        "holdout-validated on equity categories only, so no "
+                                        "probability is emitted here — this is a permanent "
+                                        "refusal, not a missing-data flag.")
         return _gap_result("NOT_IN_UNIVERSE", target,
                            note="Fund not in the trained universe manifest, or no cached NAV.")
 
@@ -256,6 +302,47 @@ def _selftest() -> None:
                     inferencer=inf, today=T)
     assert res["status"] == "NOT_IN_UNIVERSE"
     print("[selftest] NOT_IN_UNIVERSE gate (unknown code): PASS")
+
+    # ---- OUT_OF_TRAINING_UNIVERSE: a PERMANENT refusal, distinct from a data gap --
+    # Driven by real AMFI categories, so this exercises the actual shipped mapping
+    # rather than a hand-written fixture.
+    uni = load_universe_index()
+    if uni:
+        trained = mf_universe.trained_categories(manifest)
+        off = {"debt": None, "index": None, "equity_untrained": None}
+        for c, raw in uni.items():
+            if c in nav_panel or c in set(manifest["amfi_code"]):
+                continue
+            v = mf_universe.classify(raw, trained)
+            if v.status != mf_universe.STATUS_OUT_OF_UNIVERSE:
+                continue
+            r = str(raw)
+            if off["debt"] is None and "Debt Scheme" in r:
+                off["debt"] = c
+            elif off["index"] is None and "Index Fund" in r:
+                off["index"] = c
+            elif off["equity_untrained"] is None and "Dividend Yield" in r:
+                off["equity_untrained"] = c
+
+        for kind, c in off.items():
+            if c is None:
+                continue
+            res = score_live(c, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
+                            today=T, universe_index=uni)
+            assert res["status"] == "OUT_OF_TRAINING_UNIVERSE", (kind, c, res["status"])
+            assert res["probability"] is None, "FAIL: a refused fund must carry no probability"
+            assert "permanent refusal" in res["note"], res["note"]
+        found = {k: v for k, v in off.items() if v}
+        assert found, "FAIL: no out-of-universe fund found in the real AMFI master"
+
+        # Same call WITHOUT the index must degrade to the conservative refusal —
+        # never to a score. A missing master may cost precision, never safety.
+        any_code = next(iter(found.values()))
+        res = score_live(any_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf, today=T)
+        assert res["status"] == "NOT_IN_UNIVERSE" and res["probability"] is None
+        print(f"[selftest] OUT_OF_TRAINING_UNIVERSE gate on real AMFI rows "
+              f"({', '.join(found)}): permanent refusal, no probability; "
+              f"degrades safely without the index: PASS")
 
     # ---- End-to-end sanity: a real fund scores OK with a stable-shaped dict --
     res = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
