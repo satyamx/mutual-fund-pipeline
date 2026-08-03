@@ -17,11 +17,12 @@ name: nightly-refresh
 # actions/cache; steps needing it degrade honestly until then rather than fabricating.
 
 on:
-  # SCHEDULE DISABLED for initial manual testing (2026-07-24). Run it on demand from
-  # the Actions tab (Run workflow) until it's verified, then UNCOMMENT the two lines
-  # below to enable the nightly auto-run.
-  # schedule:
-  #   - cron: "30 20 * * *"   # 20:30 UTC ≈ 02:00 IST, after AMFI's evening NAV publish
+  # ENABLED 2026-08-03, after run 30775066004 went green on 136/136 funds with 0
+  # errors. The two runs before it are worth remembering: the first failed on an
+  # unpushed manifest fix, and the second reported SUCCESS while silently dropping
+  # 118 of 136 funds — which is why the emit step now carries --max-error-rate.
+  schedule:
+    - cron: "30 20 * * *"   # 20:30 UTC ≈ 02:00 IST, after AMFI's evening NAV publish
   workflow_dispatch: {}
 
 permissions:
