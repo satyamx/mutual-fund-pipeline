@@ -7,9 +7,10 @@ manifest and serializes the honest, per-fund SCREEN + Sentinel + cohort_signal
 fields into ONE versioned, gzipped JSON artifact for the Hisaab Kitaab app to
 ingest later (still gated "DO NOT START INTEGRATION YET" — this is the batch
 producer side only). Never a fabricated number: every gap the live orchestrator
-already reports (coverage_flags, NOT_IN_UNIVERSE/STALE_NAV/THIN_COHORT, missing
+already reports (coverage_flags, every mf_live_score refusal status, missing
 TER/AUM/manager) is carried through as `null` or a `data_flags` entry, not
-guessed.
+guessed. Note that a refusal is CORRECT behaviour, not a pipeline error: the
+refusal counts in coverage{} are deliberately kept out of mf_eval's error rate.
 
 DEFAULT-PROFILE VERDICT (user decision, 2026-07-19): each fund's `signal_a`
 carries a verdict/verdict_color/metric_colors computed against InvestorProfile's
@@ -34,8 +35,9 @@ design; extended here with the restored verdict + its default-profile stamp):
   per-fund:  amfi_code, isin, scheme_name, category, sector, eligibility,
              facts{cagr, vol, max_dd, sortino, benchmark, expense},
              signal_a{sub_scores, verdict, verdict_color, verdict_caveat,
-                      metric_colors, verdict_basis, cohort_q1_prob,
-                      cohort_percentile, cohort_n, signal_context},
+                      metric_colors, verdict_basis, cohort_status,
+                      cohort_q1_prob, cohort_percentile, cohort_n,
+                      signal_context},
              alerts_b[], nfo_dossier, data_flags[], lock{type, exit_load_days}
 
 monitoring{} (to-do #6, mf_ledger.py): every OK cohort_signal this run is
@@ -80,10 +82,39 @@ LOGGER = logging.getLogger("MFArtifact")
 
 DATA_FLAG_THIN_COHORT = "THIN_COHORT"
 DATA_FLAG_EXPENSE_UNAVAILABLE = "EXPENSE_UNAVAILABLE"
+DATA_FLAG_NOT_IN_UNIVERSE = "NOT_IN_UNIVERSE"
 DATA_FLAG_OUT_OF_TRAINING_UNIVERSE = "OUT_OF_TRAINING_UNIVERSE"
+DATA_FLAG_SECTOR_UNRESOLVED = "SECTOR_UNRESOLVED"
 DATA_FLAG_STALE_NAV = "STALE_NAV"
 DATA_FLAG_SHORT_HISTORY = "SHORT_HISTORY"
 DATA_FLAG_SECTOR_UNMAPPED = "SECTOR_UNMAPPED"
+DATA_FLAG_COHORT_UNSCORED_OTHER = "COHORT_UNSCORED_OTHER"
+
+# One flag per mf_live_score refusal status, as an exhaustive mapping rather than
+# the if/elif chain this used to be — that chain is precisely how these drifted.
+# Phase 2 (#8) added OUT_OF_TRAINING_UNIVERSE and SECTOR_UNRESOLVED to
+# mf_live_score and this module was never updated, so both produced NO flag at
+# all: a fund the model PERMANENTLY refuses looked, in the artifact, identical to
+# one carrying a clean signal. Worse, NOT_IN_UNIVERSE was mapped onto the
+# OUT_OF_TRAINING_UNIVERSE flag, and since #8 those mean opposite things — a
+# fixable data gap (fetch the NAV / add to the manifest) versus a permanent
+# refusal (the model was never fitted on this category and a probability here
+# would claim the holdout AUC transfers to a population it never saw). The app
+# branches on these codes, so the two demand opposite caller behaviour.
+#
+# The fallback is a STABLE generic code, never an interpolated one — the same
+# reason SEBI_OTHER[{rule_id}] was replaced by a typed SEBI_SINGLE_ISSUER_BREACH
+# in mf_sentinel: a status embedded in a string is not stably branchable. The
+# exact status always travels in signal_a.cohort_status, so nothing is lost.
+# The selftest asserts this mapping covers mf_live_score's whole vocabulary, so
+# a future status addition fails loudly instead of silently vanishing again.
+_COHORT_STATUS_FLAG = {
+    "THIN_COHORT": DATA_FLAG_THIN_COHORT,
+    "STALE_NAV": DATA_FLAG_STALE_NAV,
+    "NOT_IN_UNIVERSE": DATA_FLAG_NOT_IN_UNIVERSE,
+    "OUT_OF_TRAINING_UNIVERSE": DATA_FLAG_OUT_OF_TRAINING_UNIVERSE,
+    "SECTOR_UNRESOLVED": DATA_FLAG_SECTOR_UNRESOLVED,
+}
 
 
 def _git_sha() -> str:
@@ -146,12 +177,8 @@ def _data_flags(dossier, cohort_signal: Optional[Dict[str, Any]], eligibility: s
         flags.append(DATA_FLAG_SHORT_HISTORY)
     if cohort_signal is not None:
         status = cohort_signal["status"]
-        if status == "THIN_COHORT":
-            flags.append(DATA_FLAG_THIN_COHORT)
-        elif status == "STALE_NAV":
-            flags.append(DATA_FLAG_STALE_NAV)
-        elif status == "NOT_IN_UNIVERSE":
-            flags.append(DATA_FLAG_OUT_OF_TRAINING_UNIVERSE)
+        if status != "OK":
+            flags.append(_COHORT_STATUS_FLAG.get(status, DATA_FLAG_COHORT_UNSCORED_OTHER))
     return flags
 
 
@@ -193,6 +220,11 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             verdict_caveat=rec["verdict_caveat"], metric_colors=rec["metric_colors"],
             verdict_basis=dict(is_default_profile=is_default_profile,
                                profile=profile.model_dump(mode="json")),
+            # The exact mf_live_score status — OK, or WHICH refusal. data_flags[]
+            # below carries only the coarse enum subset, so this is the app's
+            # stable source of truth for *why* cohort_q1_prob is null, and the
+            # one field that survives a future status this module doesn't know.
+            cohort_status=cs["status"] if cs else None,
             cohort_q1_prob=_finite_or_none(cs["probability"]) if cs else None,
             cohort_percentile=_finite_or_none(cs["cohort_percentile"]) if cs else None,
             cohort_n=cs["cohort_n"] if cs else None,
@@ -265,8 +297,17 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
         n_evaluable=sum(1 for r in records if r["eligibility"] == "EVALUABLE"),
         n_thin_cohort=sum(1 for r in records if DATA_FLAG_THIN_COHORT in r["data_flags"]),
         n_stale_nav=sum(1 for r in records if DATA_FLAG_STALE_NAV in r["data_flags"]),
+        # Counted separately, not summed into one "unscored" number: NOT_IN_UNIVERSE
+        # is a backlog item (fetch it), OUT_OF_TRAINING_UNIVERSE is a permanent
+        # property of the trained model, and SECTOR_UNRESOLVED is a curation
+        # worklist (mf_overrides.py --gaps). Collapsing them would hide which of
+        # the three is actually growing.
+        n_not_in_universe=sum(
+            1 for r in records if DATA_FLAG_NOT_IN_UNIVERSE in r["data_flags"]),
         n_out_of_training_universe=sum(
             1 for r in records if DATA_FLAG_OUT_OF_TRAINING_UNIVERSE in r["data_flags"]),
+        n_sector_unresolved=sum(
+            1 for r in records if DATA_FLAG_SECTOR_UNRESOLVED in r["data_flags"]),
         n_expense_available=sum(1 for r in records if r["facts"]["expense"] is not None),
     )
     # App-facing MODEL-HEALTH panel: the raw monitoring{}/coverage{} signals graded
@@ -393,9 +434,48 @@ def _selftest() -> None:
                 assert DATA_FLAG_EXPENSE_UNAVAILABLE in rec["data_flags"]
             for v in rec["signal_a"]["sub_scores"].values():
                 assert v is None or (isinstance(v, float) and np.isfinite(v))
+            # Why cohort_q1_prob is null must always be readable, not inferred from
+            # the absence of a number.
+            assert "cohort_status" in rec["signal_a"]
+            if rec["signal_a"]["cohort_q1_prob"] is None:
+                assert rec["signal_a"]["cohort_status"] != "OK"
         print(f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
               f"lock always null, verdict_basis stamped default-profile, "
-              f"expense gap flagged not guessed, sub_scores NaN-safe — PASS")
+              f"expense gap flagged not guessed, sub_scores NaN-safe, "
+              f"cohort_status always present — PASS")
+
+        # ---- Every mf_live_score refusal reaches the app as its OWN flag ----------
+        # Phase 2 added two statuses that this module silently dropped, and mapped a
+        # third onto a flag meaning the OPPOSITE thing. These asserts are what stop
+        # that recurring: the mapping must stay in sync with mf_live_score's whole
+        # vocabulary, and the two universe statuses must never collapse together.
+        import types
+
+        import mf_live_score
+        stub = types.SimpleNamespace(category="Flexi Cap", declared_sector="",
+                                     expense_ratio=0.01)
+        expected_statuses = set(mf_live_score._STATUSES) - {"OK"}
+        assert expected_statuses <= set(_COHORT_STATUS_FLAG), (
+            "FAIL: mf_live_score gained a status with no artifact flag — the app would "
+            f"see no reason at all for a null score: {expected_statuses - set(_COHORT_STATUS_FLAG)}")
+
+        seen = {}
+        for st in sorted(expected_statuses):
+            got = _data_flags(stub, {"status": st}, "EVALUABLE")
+            assert got == [_COHORT_STATUS_FLAG[st]], f"FAIL: {st} -> {got}"
+            seen[st] = got[0]
+        assert len(set(seen.values())) == len(seen), \
+            f"FAIL: two statuses share one flag — they demand different caller behaviour: {seen}"
+        # The specific regression: a fixable data gap must NOT read as a permanent refusal.
+        assert seen["NOT_IN_UNIVERSE"] != seen["OUT_OF_TRAINING_UNIVERSE"]
+        assert _data_flags(stub, {"status": "OK"}, "EVALUABLE") == []
+        # An unknown future status degrades to a STABLE generic code — never vanishes,
+        # and never an interpolated one the app can't branch on.
+        assert _data_flags(stub, {"status": "SOME_FUTURE_STATUS"}, "EVALUABLE") == \
+            [DATA_FLAG_COHORT_UNSCORED_OTHER]
+        print(f"[selftest] all {len(seen)} refusal statuses map to distinct flags "
+              f"(NOT_IN_UNIVERSE != OUT_OF_TRAINING_UNIVERSE), OK is silent, "
+              f"unknown status degrades to a stable code — PASS")
 
         # A NON-default profile must NOT be mislabeled as the default. Separate tmp
         # ledger path — a custom profile's predictions are still real cohort_q1
