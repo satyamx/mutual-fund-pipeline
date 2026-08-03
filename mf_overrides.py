@@ -47,6 +47,7 @@ Further checks, each guarding a real failure mode rather than tidiness:
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -246,8 +247,13 @@ def _selftest() -> None:
     print("[selftest] PASS — mf_overrides accepts curated inputs and refuses curated ANSWERS")
 
 
-def _gaps() -> None:
-    """Worklist: which real funds are blocked, and what filling them in would unlock."""
+def _gaps(out_path: Optional[Path] = None) -> None:
+    """Worklist: which real funds are blocked, and what filling them in would unlock.
+
+    With --out, writes EVERY blocked fund as a ready-to-edit CSV skeleton instead of
+    the 10-row console preview. The preview is fine for "how bad is it"; it is useless
+    as a work surface, and this is the single biggest hand-curation task in the project
+    (204 funds), so it needs to leave the terminal."""
     import mf_labels, mf_universe as U
     manifest = mf_labels.load_manifest()
     trained = U.trained_categories(manifest)
@@ -277,20 +283,46 @@ def _gaps() -> None:
     print(f"  of those, resolved by overrides            : {len(resolved)}")
     print(f"  still needing a curated sector             : {len(blocked) - len(resolved)}")
     print(f"\noverrides file: {OVERRIDES_PATH} ({len(have)} valid row(s))")
-    if blocked and len(resolved) < len(blocked):
+    todo = [b for b in blocked if b[0] not in have]
+    if out_path is not None:
+        # Never write over the curated file itself — that is hand-typed, unbackfillable
+        # work and a skeleton dump would silently erase it (same reasoning that keeps
+        # this whole directory out of mf_cache/).
+        if out_path.resolve() == OVERRIDES_PATH.resolve():
+            raise SystemExit(f"refusing to overwrite the curated overrides file "
+                             f"({OVERRIDES_PATH}) with a blank skeleton — pick another --out path")
+        with out_path.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["amfi_code", "category", "sector", "source_url", "note"])
+            for code, name, _ in todo:
+                # sector/source_url deliberately BLANK, not guessed: a wrong sector
+                # silently builds the wrong peer group, and the cohort label is defined
+                # against exactly that peer group.
+                w.writerow([code, "Sectoral/Thematic", "", "", name])
+        print(f"\nwrote {len(todo)} row(s) to {out_path}")
+        print("fill the `sector` column (reuse an existing sector where one fits — a new "
+              "one-member sector is below COHORT_MIN_SIZE and fails later as THIN_COHORT),")
+        print(f"then append the filled rows to {OVERRIDES_PATH} and run --validate")
+        known = sorted({s for s in manifest["sector"].dropna().astype(str) if s.strip()})
+        print(f"\nsectors already in use ({len(known)}): {', '.join(known)}")
+    elif todo:
         print("\nnext rows to curate (amfi_code,category,sector,source_url,note):")
-        for code, name, _ in [b for b in blocked if b[0] not in have][:10]:
+        for code, name, _ in todo[:10]:
             print(f"  {code},Sectoral/Thematic,<sector>,<source_url>,{name[:52]}")
+        print(f"  ... and {max(0, len(todo) - 10)} more — use --gaps --out <file.csv> for all of them")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--gaps", action="store_true", help="show what is blocked and what to curate")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="with --gaps: write EVERY blocked fund to this CSV as a "
+                         "ready-to-edit skeleton, instead of the 10-row console preview")
     ap.add_argument("--validate", action="store_true", help="validate the real overrides file")
     a = ap.parse_args()
     if a.gaps:
-        _gaps()
+        _gaps(a.out)
     elif a.validate:
         import mf_labels
         _have, _issues = load(manifest=mf_labels.load_manifest())
