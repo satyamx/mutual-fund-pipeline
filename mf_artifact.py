@@ -63,6 +63,7 @@ import gzip
 import json
 import logging
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -340,6 +341,27 @@ def write_artifact(artifact: Dict[str, Any], out_dir: Path = OUT_DIR) -> Path:
     return path
 
 
+def error_rate_exceeded(coverage: Dict[str, Any], max_rate: float) -> Optional[str]:
+    """None if the batch's failure rate is acceptable, else a human-readable reason.
+
+    A batch that drops most of the universe is a FAILED run, not a thin one. Dropping
+    ONE bad fund is deliberate (the alternative — nuking the batch — is worse), but
+    that same tolerance meant the first real CI run emitted 18 of 136 funds and still
+    reported success. Pure so the selftest can prove it fires, not just that it passes.
+    """
+    n_total = coverage.get("n_total", 0) or 0
+    if n_total <= 0:
+        return "no funds were attempted at all"
+    n_err = coverage.get("n_errors", 0) or 0
+    rate = n_err / n_total
+    if rate <= max_rate:
+        return None
+    reasons = sorted({e.get("error", "?") for e in coverage.get("errors", [])})
+    return (f"{n_err}/{n_total} funds ({rate:.1%}) failed to evaluate, above the "
+            f"--max-error-rate of {max_rate:.1%}. Distinct reasons: "
+            + ("; ".join(reasons[:5]) or "none recorded"))
+
+
 def _load_scheme_names(limit: Optional[int] = None) -> List[str]:
     names = list(load_manifest()["scheme_name"])
     return names[:limit] if limit else names
@@ -477,6 +499,27 @@ def _selftest() -> None:
               f"(NOT_IN_UNIVERSE != OUT_OF_TRAINING_UNIVERSE), OK is silent, "
               f"unknown status degrades to a stable code — PASS")
 
+        # ---- The batch-failure gate must FIRE, not merely not-crash ---------------
+        # This exists because the first real CI run reported success while dropping
+        # 118 of 136 funds, so a test that only proves the happy path would reproduce
+        # exactly the blindness it is meant to remove.
+        assert error_rate_exceeded(artifact["coverage"], 0.25) is None, \
+            "FAIL: a clean batch must pass the gate"
+        fired = error_rate_exceeded(
+            dict(n_total=136, n_errors=118,
+                 errors=[{"query": "x", "error": "No such file: benchmark_availability.csv"}]), 0.25)
+        assert fired and "118/136" in fired and "86.8%" in fired, fired
+        # The real CI failure was a SINGLE systemic cause, so the reason must survive
+        # into the message — a bare count is indistinguishable from ordinary attrition.
+        assert "benchmark_availability.csv" in fired, fired
+        # Boundary: exactly at the ceiling is acceptable, one fund past it is not.
+        assert error_rate_exceeded(dict(n_total=100, n_errors=25, errors=[]), 0.25) is None
+        assert error_rate_exceeded(dict(n_total=100, n_errors=26, errors=[]), 0.25)
+        # A batch that attempted nothing is a failure, never a vacuous 0% error rate.
+        assert error_rate_exceeded(dict(n_total=0, n_errors=0, errors=[]), 0.99)
+        print("[selftest] batch-failure gate fires at 118/136 with the cause named, "
+              "passes a clean batch, is exact at the boundary, and refuses an empty batch — PASS")
+
         # A NON-default profile must NOT be mislabeled as the default. Separate tmp
         # ledger path — a custom profile's predictions are still real cohort_q1
         # scores and shouldn't dedupe-collide with the default-profile run above.
@@ -538,6 +581,11 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=None,
                     help="score only the first N funds in the manifest (quick test)")
     ap.add_argument("--out", type=str, default=None, help="output directory")
+    ap.add_argument("--max-error-rate", type=float, default=None,
+                    help="exit non-zero if more than this FRACTION of funds failed to "
+                         "evaluate (e.g. 0.25). Off by default; the scheduled job sets it "
+                         "so a run that silently drops most of the universe cannot report "
+                         "success. The artifact is still written first, for diagnosis.")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -551,3 +599,13 @@ if __name__ == "__main__":
         LOGGER.info("Wrote %s (%d funds, %d errors) -> %s",
                    artifact["artifact_version"], artifact["coverage"]["n_ok"],
                    artifact["coverage"]["n_errors"], path)
+
+        # A batch that drops most of the universe is a FAILED run, not a thin one.
+        # The first real CI run emitted 18 of 136 funds and still reported success,
+        # because nothing here ever returned non-zero — the artifact is written
+        # before this check precisely so a failing run is still inspectable.
+        if args.max_error_rate is not None:
+            reason = error_rate_exceeded(artifact["coverage"], args.max_error_rate)
+            if reason:
+                LOGGER.error("FAILING: %s", reason)
+                sys.exit(1)

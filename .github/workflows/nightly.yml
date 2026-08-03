@@ -78,8 +78,13 @@ jobs:
             echo "cohort model artifact absent (cold cache) — skipping model selftests"
           fi
 
+      # --max-error-rate makes "green" mean something. The first real run (2026-08-03,
+      # 30773638867 -> 30774345802) emitted 18 of 136 funds and still reported success,
+      # because a per-fund drop is by design not fatal to the batch. A quarter of the
+      # universe failing is a broken run, not a thin one; the artifact is still written
+      # and uploaded (below, if: always()) so the failure is diagnosable.
       - name: Emit batch artifact (+ append prediction ledger)
-        run: python mf_artifact.py
+        run: python mf_artifact.py --max-error-rate 0.25
 
       - name: Commit the prediction ledger (git-tracked, unbackfillable)
         run: |

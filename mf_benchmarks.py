@@ -26,6 +26,7 @@ and a more granular benchmark_quality tag.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
@@ -34,6 +35,8 @@ import numpy as np
 import pandas as pd
 
 from mf_datasources import CACHE
+
+LOGGER = logging.getLogger("MFBenchmarks")
 
 BENCH_DIR = CACHE / "benchmarks"
 AVAILABILITY_CSV = BENCH_DIR / "benchmark_availability.csv"
@@ -85,6 +88,29 @@ def _slug(name: str) -> str:
 
 @lru_cache(maxsize=1)
 def _availability() -> pd.DataFrame:
+    """The benchmark availability sheet, or an EMPTY one if it isn't cached yet.
+
+    This used to be a bare read_csv, so a cold cache raised FileNotFoundError out
+    of every benchmark lookup. That is not a degrade — it propagated through
+    MasterOrchestrator.evaluate()'s outer handler and DISCARDED each fund's
+    otherwise-complete evaluation. On the first real CI run (2026-08-03, run
+    30774345802) it dropped 118 of 136 funds while the workflow still reported
+    success. mf_cache/benchmarks/ is gitignored and restored from an evictable
+    actions/cache, so "absent" is a normal cold-runner state, not a broken install.
+
+    Empty is the honest degrade and needs no downstream change: _benchmark_meta()
+    becomes {}, load_benchmark_series() returns None for every name (its existing
+    "source == NONE" path), and the caller falls back to PeerProxyResolver — the
+    same route already taken by a sector with no mapped index. The fund is scored
+    with excess-vs-benchmark reported as unavailable, never fabricated.
+    """
+    if not AVAILABILITY_CSV.exists():
+        LOGGER.warning(
+            "No benchmark availability sheet at %s — every real-index lookup will "
+            "report unavailable and fall back to the peer proxy. Benchmark-relative "
+            "facts (excess_cagr_*) degrade to NOT AVAILABLE; they are never guessed.",
+            AVAILABILITY_CSV)
+        return pd.DataFrame(columns=["benchmark_name", "source", "return_type"])
     return pd.read_csv(AVAILABILITY_CSV)
 
 
