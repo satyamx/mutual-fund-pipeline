@@ -324,8 +324,8 @@ class RealNAVStore:
             return pd.Series(dtype=float)
         s = load_benchmark_series(name)
         if s is None:
-            self.log.warning("Real index series for %r not cached under "
-                             "mf_cache/benchmarks/; sector benchmark unavailable.", name)
+            self.log.warning("Real index series for %r not present under "
+                             "benchmarks/; sector benchmark unavailable.", name)
             return pd.Series(dtype=float)
         return s.loc[pd.Timestamp(start):]
 
@@ -338,8 +338,8 @@ class RealNAVStore:
             return pd.Series(dtype=float)
         s = load_benchmark_series(benchmark)
         if s is None:
-            self.log.warning("Real index series for %r not cached under "
-                             "mf_cache/benchmarks/ — benchmark unavailable.", benchmark)
+            self.log.warning("Real index series for %r not present under "
+                             "benchmarks/ — benchmark unavailable.", benchmark)
             return pd.Series(dtype=float)
         return s
 

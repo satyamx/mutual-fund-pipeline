@@ -29,16 +29,23 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from mf_datasources import CACHE
-
 LOGGER = logging.getLogger("MFBenchmarks")
 
-BENCH_DIR = CACHE / "benchmarks"
+# GIT-TRACKED, deliberately NOT under mf_cache/ (2026-08-03). No script in this
+# repo regenerates any of this: mf_benchmarks has no builder and bootstrap.py never
+# writes it, so the availability sheet (partly hand-annotated — its `notes` column
+# maps each index to a specific AMFI code or yfinance ticker) and the 20 index
+# parquets are unbackfillable. Living in mf_cache/ meant gitignored AND restored
+# from an evictable actions/cache, i.e. one eviction from gone — the same trap
+# already fixed for ledger/ and overrides/universe_manifest.csv. It also meant
+# every cold CI runner scored the whole universe with no benchmark at all.
+BENCH_DIR = Path(__file__).parent / "benchmarks"
 AVAILABILITY_CSV = BENCH_DIR / "benchmark_availability.csv"
 
 # Dividend-yield addback applied to PRI (price-return) index series to
@@ -46,7 +53,7 @@ AVAILABILITY_CSV = BENCH_DIR / "benchmark_availability.csv"
 DIVIDEND_YIELD_ADDBACK = 0.013  # 1.3%/yr, documented estimate for Nifty sector indices
 
 # ---- fund category -> benchmark index name (manifest `category`) -----------------
-# Large & Mid Cap has no matching single real index in mf_cache/benchmarks; it
+# Large & Mid Cap has no matching single real index in benchmarks/; it
 # falls straight through to peer-proxy (documented, not silently guessed).
 CATEGORY_BENCHMARK: Dict[str, Optional[str]] = {
     "Flexi Cap": "Nifty 500",
@@ -88,15 +95,17 @@ def _slug(name: str) -> str:
 
 @lru_cache(maxsize=1)
 def _availability() -> pd.DataFrame:
-    """The benchmark availability sheet, or an EMPTY one if it isn't cached yet.
+    """The benchmark availability sheet, or an EMPTY one if it is missing.
 
-    This used to be a bare read_csv, so a cold cache raised FileNotFoundError out
-    of every benchmark lookup. That is not a degrade — it propagated through
+    This used to be a bare read_csv, so an absent sheet raised FileNotFoundError
+    out of every benchmark lookup. That is not a degrade — it propagated through
     MasterOrchestrator.evaluate()'s outer handler and DISCARDED each fund's
     otherwise-complete evaluation. On the first real CI run (2026-08-03, run
     30774345802) it dropped 118 of 136 funds while the workflow still reported
-    success. mf_cache/benchmarks/ is gitignored and restored from an evictable
-    actions/cache, so "absent" is a normal cold-runner state, not a broken install.
+    success, because BENCH_DIR then lived under gitignored, cache-restored
+    mf_cache/. BENCH_DIR is git-tracked now, so absence should no longer happen
+    on a clean checkout — the guard stays because the failure mode it prevents is
+    silent and universe-wide, and "it can't happen now" is what was assumed before.
 
     Empty is the honest degrade and needs no downstream change: _benchmark_meta()
     becomes {}, load_benchmark_series() returns None for every name (its existing

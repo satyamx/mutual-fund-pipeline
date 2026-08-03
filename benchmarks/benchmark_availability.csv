@@ -1,0 +1,24 @@
+benchmark_name,matched_sector_or_segment,source,return_type,earliest_date,latest_date,n_obs,covers_2013,notes
+Nifty 50,Broad market,mfapi_fund,fund_NAV,2006-04-02,2026-07-13,4991,yes,AMFI code 101349 = ICICI Prudential Nifty 50 Index Fund - Cumulative Option
+Nifty 100,Broad market,yfinance_PRI,PRI,2005-11-30,2026-07-10,5068,yes,yfinance ticker ^CNX100; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty 500,Broad market,yfinance_PRI,PRI,2005-09-26,2026-07-10,5111,yes,yfinance ticker ^CRSLDX; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty Midcap 150,Broad market (midcap),mfapi_fund,fund_NAV,2019-09-11,2026-07-13,1684,no,AMFI code 147622 = Motilal Oswal Nifty Midcap 150 Index Fund - Direct Plan
+Nifty Smallcap 250,Broad market (smallcap),mfapi_fund,fund_NAV,2019-09-11,2026-07-13,1684,no,AMFI code 147623 = Motilal Oswal Nifty Smallcap 250 Index Fund- Direct Plan
+Nifty Bank,Banking / Financial Services,yfinance_PRI,PRI,2007-09-17,2026-07-10,4629,yes,yfinance ticker ^NSEBANK; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty PSU Bank,Banking (PSU) [bonus/best-quality alt],mfapi_fund,fund_NAV,2007-11-13,2026-07-13,4592,yes,AMFI code 106929 = Kotak Nifty PSU Bank ETF
+Nifty IT,IT,yfinance_PRI,PRI,2007-09-17,2026-07-10,4629,yes,yfinance ticker ^CNXIT; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty Pharma,Pharma / Healthcare,yfinance_PRI,PRI,2011-01-31,2026-07-10,3801,yes,yfinance ticker ^CNXPHARMA; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty FMCG,FMCG,yfinance_PRI,PRI,2011-01-31,2026-07-10,3786,yes,yfinance ticker ^CNXFMCG; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty Infrastructure,Infrastructure,yfinance_PRI,PRI,2010-07-19,2026-07-10,3922,yes,yfinance ticker ^CNXINFRA; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty Auto,Auto,yfinance_PRI,PRI,2011-07-12,2026-07-10,3675,yes,yfinance ticker ^CNXAUTO; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty Energy,Energy (Oil & Gas / Energy),yfinance_PRI,PRI,2011-01-31,2026-07-10,3787,yes,yfinance ticker ^CNXENERGY; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty PSE,PSU (PSE / CPSE),yfinance_PRI,PRI,2011-01-31,2026-07-10,3787,yes,yfinance ticker ^CNXPSE; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty MNC,MNC,yfinance_PRI,PRI,2011-01-31,2026-07-10,3787,yes,yfinance ticker ^CNXMNC; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty India Manufacturing,Manufacturing,mfapi_fund,fund_NAV,2022-01-28,2026-07-13,1099,no,AMFI code 149786 = Mirae Asset Nifty India Manufacturing ETF
+Nifty Commodities,Commodities,mfapi_fund,fund_NAV,2022-12-16,2026-07-13,881,no,AMFI code 151207 = ICICI Prudential Nifty Commodities ETF
+Nifty Realty,Housing / Real Estate,yfinance_PRI,PRI,2010-07-19,2026-07-10,3922,yes,yfinance ticker ^CNXREALTY; PRICE RETURN (understates TR by ~1-1.5%/yr dividend yield)
+Nifty India Defence,Defence,mfapi_fund,fund_NAV,2024-07-09,2026-07-13,495,no,AMFI code 152711 = Motilal Oswal Nifty India Defence Index Fund Regular Plan Growth
+Nifty Exports,Exports,NONE,NONE,,,0,no,No matching Nifty index exists / no data source found (see report).
+Nifty100 ESG Sector Leaders,ESG,mfapi_fund,fund_NAV,2020-11-18,2026-07-13,1394,no,AMFI code 148572 = Mirae Asset Nifty 100 ESG Sector Leaders ETF
+Nifty Quant,Quant,NONE,NONE,,,0,no,No matching Nifty index exists / no data source found (see report).
+Nifty Business Cycle,Business Cycle,NONE,NONE,,,0,no,No matching Nifty index exists / no data source found (see report).
