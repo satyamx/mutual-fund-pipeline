@@ -25,9 +25,24 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from mf_datasources import CACHE
 
-COHORT_ARTIFACT_PATH = CACHE / "phase_b" / "model_artifact_cohort.json"
+# The SHIPPED model, git-tracked at top-level model/ (2026-08-03) — deliberately
+# separate from mf_cache/phase_b/, which holds the regenerable research outputs
+# (features/labels parquets, CPCV results, reports) and stays gitignored.
+#
+# This one file is different in kind: it is the frozen, holdout-validated payload
+# that actually scores funds, and mf_ledger stamps its `version` as the `model_id`
+# on every prediction so an outcome realized in ~2029 can be tied back to the exact
+# model that made it. If it can be evicted from an actions/cache and silently
+# rebuilt, that model_id stops meaning anything — and rebuilding it nightly would
+# emit predictions from a model whose holdout AUC (~0.578) was never measured.
+# Frozen and versioned is the only honest option; regenerate deliberately with
+# `python mf_model.py --stage cohort` and commit the result as a model change.
+#
+# SINGLE DEFINITION on purpose — mf_model.py imports this rather than keeping a
+# second literal that could drift (same rule as mf_labels.MANIFEST_PATH).
+MODEL_DIR = Path(__file__).parent / "model"
+COHORT_ARTIFACT_PATH = MODEL_DIR / "model_artifact_cohort.json"
 DEFAULT_TARGET = "cohort_q1"
 
 

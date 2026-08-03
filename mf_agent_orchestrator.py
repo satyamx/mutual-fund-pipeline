@@ -1169,7 +1169,7 @@ class MasterOrchestrator:
         self.recommender = RecommendationEngine(self.validator)
         self.sentinel = SentinelEngine(self.validator)
         # Cohort-signal (cohort_q1) resources are loaded lazily on first use, not
-        # here: they need mf_cache/phase_b/model_artifact_cohort.json + the
+        # here: they need model/model_artifact_cohort.json + the
         # universe manifest + a full NAV panel, none of which the MOCK demo
         # ships with. A missing artifact must degrade evaluate() to "signal
         # unavailable", never crash __init__ for a plain mock run.

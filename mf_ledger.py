@@ -69,7 +69,7 @@ import pandas as pd
 
 from mf_benchmarks import forward_return
 from mf_datasources import CACHE
-from mf_infer import COHORT_ARTIFACT_PATH
+from mf_infer import COHORT_ARTIFACT_PATH, MODEL_DIR
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
 from mf_live_score import build_live_panel
 
@@ -79,7 +79,12 @@ SCHEMA_VERSION = 1
 LEDGER_DIR = Path(__file__).parent / "ledger"
 PREDICTIONS_PATH = LEDGER_DIR / "predictions.jsonl"
 REALIZATIONS_PATH = LEDGER_DIR / "realizations.jsonl"
-PSI_REFERENCE_PATH = CACHE / "phase_b" / "psi_reference.json"
+# Git-tracked alongside the shipped model (see mf_infer.MODEL_DIR): this is the
+# empirical training-time decile distribution the live PSI drift check compares
+# against, so it is only meaningful paired with the exact model it was built from.
+# Left in an evictable cache it would silently vanish and turn every drift check
+# into REFERENCE_MISSING — a monitoring blind spot that looks like "no drift".
+PSI_REFERENCE_PATH = MODEL_DIR / "psi_reference.json"
 
 # Raw, non-derived features only. Excluded (with reasons): z_* (9, within-anchor
 # z-scores — mean~0/std~1 at every anchor by construction, mf_features.py

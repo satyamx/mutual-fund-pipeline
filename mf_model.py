@@ -421,7 +421,11 @@ COHORT_HOLDOUT_STAMP = OUT_DIR / "holdout_evaluated_cohort.json"
 COHORT_HOLDOUT_PRED_PATH = OUT_DIR / "holdout_predictions_cohort.parquet"
 COHORT_COEF_PATH = OUT_DIR / "coefficients_cohort.json"
 COHORT_REPORT_PATH = OUT_DIR / "cohort_target_report.md"
-COHORT_ARTIFACT_PATH = OUT_DIR / "model_artifact_cohort.json"
+# Imported, NOT redeclared: this is the one artifact that leaves mf_cache/ and is
+# committed (see mf_infer for why). Two literals for the same path is exactly the
+# drift mf_labels.MANIFEST_PATH is single-defined to avoid — and here a drift would
+# mean the trainer writes a model the inference side never reads.
+from mf_infer import COHORT_ARTIFACT_PATH  # noqa: E402 — path constant, not logic
 
 
 def load_cohort_dataset() -> tuple[pd.DataFrame, list[str]]:
