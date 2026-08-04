@@ -30,7 +30,7 @@ Two failure modes that forces closed:
    successful run.
 2. **Silent retraining.** Rebuilding it on a schedule would emit predictions from a
    model whose holdout AUC was never measured, while the ledger kept stamping a
-   `model_id` that no longer identified anything. The reported ~0.578 belongs to one
+   `model_id` that no longer identified anything. The reported ~0.558 belongs to one
    specific fit on one specific training window.
 
 **Do not retrain on a schedule.** Regenerate deliberately:

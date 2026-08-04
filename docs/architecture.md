@@ -20,7 +20,7 @@ flowchart TB
     end
 
     %% ================= MODEL LAYER =================
-    subgraph MODEL["MODEL LAYER — Phase B · within-cohort cohort_q1 (holdout AUC ~0.578, weak but real)"]
+    subgraph MODEL["MODEL LAYER — Phase B · within-cohort cohort_q1 (phase_b_v2 holdout AUC ~0.558, weak but real)"]
         direction TB
         LAB["mf_labels.py<br/>3y-fwd OR-label + cohort target"]
         BENCH["mf_benchmarks.py<br/>peer / benchmark resolver"]

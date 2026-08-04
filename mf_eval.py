@@ -73,8 +73,10 @@ STABILITY_GREEN, STABILITY_RED = 0.90, 0.70
 ERROR_RATE_GREEN, ERROR_RATE_RED = 0.05, 0.20
 
 # realized outcome LIFT on matured predictions = precision in the model's top
-# tier / the cohort base rate. >1 beats chance; the training holdout showed
-# ~1.76x. Below 1.0 the model is worse than a coin at its own game -> RED "tweak".
+# tier / the cohort base rate. >1 beats chance; the phase_b_v2 training holdout
+# showed ~1.10x (v1 showed 1.76x on a smaller, more generously-quartiled test set
+# -- see CLAUDE.md; the two are not comparable). Below 1.0 the model is worse than
+# a coin at its own game -> RED "tweak".
 LIFT_GREEN, LIFT_RED = 1.20, 1.00
 # top tier = predicted cohort_percentile at/above this (the cohort_q1 target is
 # top-quartile membership, so the natural decision cut is the 75th pct).
@@ -236,8 +238,8 @@ class ModelHealthReport:
 
 _DISCLAIMER = (
     "This panel reflects data-drift and pipeline health — NOT fund-outcome accuracy. "
-    "The cohort signal is a weak, within-cohort ranking aid (training holdout AUC "
-    "~0.578, lift ~1.76x); its real-world accuracy cannot be measured until ~3 years "
+    "The cohort signal is a weak, within-cohort ranking aid (phase_b_v2 training holdout "
+    "AUC ~0.558, lift ~1.10x); its real-world accuracy cannot be measured until ~3 years "
     "of logged predictions mature. 'Pending' means not-yet-measurable, not bad.")
 
 

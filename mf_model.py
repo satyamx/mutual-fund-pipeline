@@ -70,7 +70,16 @@ COEF_PATH = OUT_DIR / "coefficients.json"
 ARTIFACT_PATH = OUT_DIR / "model_artifact.json"
 REPORT_PATH = OUT_DIR / "model_report.md"
 
-MODEL_VERSION = "phase_b_v1"
+# BUMP THIS whenever the fit changes in a way that makes predictions from before
+# and after incomparable — a different training universe, target definition,
+# feature set, or hyperparameters. mf_ledger stamps it as `model_id` on every
+# prediction, and mf_eval segments outcome history by it, so a stale version
+# silently averages two different models into one accuracy claim.
+#   phase_b_v1 — 136-fund manifest, cohort_q1 base rate 0.325, holdout AUC 0.578
+#   phase_b_v2 — 367-fund manifest (2026-08-04). Cohorts are ~2.7x larger, so
+#                y_cohort_q1 is a DIFFERENT label (base rate 0.280): v1 and v2
+#                predictions are not one series and must never be pooled.
+MODEL_VERSION = "phase_b_v2"
 
 TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_peer"}
 
@@ -533,7 +542,7 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         hyperparameters=PRIMARY_ENET,
         note=("Within-cohort relative targets (top-quartile / top-half vs same "
               "(anchor, cohort) peers). The ONLY validated edge in this pipeline "
-              "(cohort_q1 holdout AUC ~0.578, lift ~1.76x) — weak, a signal INPUT "
+              "(cohort_q1 holdout AUC ~0.558, lift ~1.10x) — weak, a signal INPUT "
               "not a standalone verdict. Elastic-net only (HGBT showed no edge on "
               "these targets). Fitted on all cohort-eligible anchors except the "
               "last-25% calibration slice."),

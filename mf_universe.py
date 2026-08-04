@@ -7,7 +7,7 @@ WHY THIS EXISTS
 `mf_cache/amfi_master.parquet` (AMFI's NAVAll.txt) carries ~14k rows covering the
 whole Indian mutual-fund market. The trained `cohort_q1` model saw 136 funds across
 10 EQUITY categories and nothing else. Serving a probability for the other ~14k rows
-would claim the holdout AUC (~0.578) transfers to debt/index/FoF/ETF populations the
+would claim the holdout AUC (~0.558) transfers to debt/index/FoF/ETF populations the
 model never saw — the exact "fabricated accuracy" the honesty invariant forbids.
 
 This module is the boundary. It answers two questions, and only these two:

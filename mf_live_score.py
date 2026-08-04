@@ -13,7 +13,7 @@ WHY THE PANEL IS UNIVERSE-WIDE, NOT COHORT-RESTRICTED: rank_3y is cohort-local
 (grouped by (cohort_key, anchor)) but z_* is grouped by anchor ACROSS THE WHOLE
 MANIFEST (mf_features.py assemble_panel). Restricting the live panel to only the
 target fund's cohort peers would compute z_* over ~5-20 funds instead of the
-~136-fund training universe — a silent distribution shift the model was never
+~367-fund training universe — a silent distribution shift the model was never
 calibrated for. So build_live_panel always spans the full manifest at one anchor;
 the ~100x saving is 1 anchor vs 144, not a narrower universe.
 
@@ -29,7 +29,7 @@ HONESTY GATES (never fabricate a probability):
                     exact gate mf_labels.add_cohort_targets used at training
                     time to mark a row ineligible rather than guess a target).
   OK              — probability + cohort_percentile, always alongside
-                    signal_context (holdout AUC ~0.578, lift ~1.76x — weak) and
+                    signal_context (phase_b_v2 holdout AUC ~0.558, lift ~1.10x — weak) and
                     imputed_features (which inputs fell back to a training
                     median), never presented as a standalone verdict.
 
@@ -47,7 +47,7 @@ anchor T only contained funds that survived >= 2.75y past T (mf_labels.
 forward_return's requirement for a valid label). The live pool at t=today
 cannot filter on a future that hasn't happened — it includes funds that would
 have been excluded from a comparable training anchor. This is irreducible
-(survivorship is unknowable), the effect on a ~136-fund pool's mean/std is
+(survivorship is unknowable), the effect on a ~367-fund pool's mean/std is
 small, and it is documented here rather than patched with a fake filter.
 ====================================================================================
 """
@@ -87,8 +87,8 @@ _STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE",
 # field whatsoever, so a candidate outside the trained sample has no honest cohort.
 # Guessing one would fabricate the very peer set the label is defined against
 # ("top quartile WITHIN cohort") — so these are refused, not guessed. This is the
-# binding constraint on whole-market coverage: 256 of the 569 canonical scoreable
-# schemes are Sectoral/Thematic.
+# binding constraint on whole-market coverage: 257 of the 572 canonical scoreable
+# schemes are Sectoral/Thematic, and 205 of those are still uncurated (2026-08-04).
 SECTOR_KEYED_CATEGORIES = frozenset({"Sectoral/Thematic"})
 
 
@@ -360,11 +360,20 @@ def score_live(code: str, *,
               if not (isinstance(target_features.get(c), (int, float))
                       and np.isfinite(target_features.get(c)))]
 
+    # Derived from the artifact, never hardcoded: this string reaches the app, and a
+    # literal here went stale the moment the model was refitted (v1's 0.578 would
+    # have been shipped alongside v2's probabilities).
+    ctx = inferencer.signal_context(target) or {}
+    auc = ctx.get("holdout_auc")
+    note = ("weak validated signal (holdout AUC ~%.3f) — supporting datapoint, "
+            "never a verdict" % auc if isinstance(auc, (int, float))
+            else "weak validated signal — supporting datapoint, never a verdict")
+
     return dict(status="OK", target=target, probability=probs[code],
                cohort_percentile=cohort_percentile, cohort_key=str(cohort_key),
                cohort_n=len(cohort_present), universe_n=len(panel),
                anchor=str(t.date()), staleness_days=staleness_days,
-               signal_context=inferencer.signal_context(target),
+               signal_context=ctx,
                imputed_features=imputed,
                # Frozen for the prediction ledger (mf_ledger.py): cohorts reshuffle
                # over time (manifest edits, closures), so realizing this prediction
@@ -377,8 +386,7 @@ def score_live(code: str, *,
                # features.parquet); NaN -> None to stay JSON-safe for the ledger.
                features={c: (float(v) if isinstance(v, (int, float)) and np.isfinite(v) else None)
                         for c, v in target_features.items()},
-               note="weak validated signal (AUC ~0.578, lift ~1.76x) — "
-                    "supporting datapoint, never a verdict")
+               note=note)
 
 
 # ==============================================================================

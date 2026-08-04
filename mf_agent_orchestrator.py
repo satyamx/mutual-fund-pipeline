@@ -1313,8 +1313,8 @@ class MasterOrchestrator:
                                        profile_score, sentiment, profile)
             sentinel_report = self.sentinel.run(dossier, compliance, backtest, sentiment, bench)
 
-            # cohort_q1 — the one out-of-sample-validated signal (holdout AUC
-            # ~0.578, lift ~1.76x — weak). A supporting datapoint alongside the
+            # cohort_q1 — the one out-of-sample-validated signal (phase_b_v2:
+            # holdout AUC ~0.558, lift ~1.10x — weak). A supporting datapoint alongside the
             # screen, never folded into the verdict rule (that's a separate,
             # deliberate decision — see mf-architecture-decisions memory).
             # Isolated in its own try/except: a bug or transient failure in this

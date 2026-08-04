@@ -8,7 +8,7 @@ Some facts the pipeline needs are published by NO free source and can only come 
 a human reading an AMC factsheet or SID. The binding case today is SECTOR: a
 Sectoral/Thematic fund's cohort is keyed on `("sector", ...)`, the trained manifest's
 52 sector values are hand-typed, and AMFI's NAVAll carries no sector field at all.
-Without a sector, 256 of the 569 canonical scoreable schemes have no honest cohort
+Without a sector, 257 of the 572 canonical scoreable schemes have no honest cohort
 and `mf_live_score` correctly refuses them with SECTOR_UNRESOLVED.
 
 This module is where that human knowledge lives, and the guard rail around it.

@@ -8,7 +8,7 @@ WITHOUT importing sklearn into the orchestrator. This module does exactly that
 for the cohort artifact written by mf_model.build_cohort_artifact.
 
 The cohort_q1 probability is the only validated predictive signal in the
-pipeline (holdout AUC ~0.578, lift ~1.76x) — a weak signal INPUT, never an
+pipeline (phase_b_v2 holdout AUC ~0.558, lift ~1.10x) — a weak signal INPUT, never an
 oracle. `signal_context()` exposes its measured accuracy so callers surface it
 honestly.
 
@@ -35,7 +35,7 @@ import numpy as np
 # on every prediction so an outcome realized in ~2029 can be tied back to the exact
 # model that made it. If it can be evicted from an actions/cache and silently
 # rebuilt, that model_id stops meaning anything — and rebuilding it nightly would
-# emit predictions from a model whose holdout AUC (~0.578) was never measured.
+# emit predictions from a model whose holdout AUC (~0.558) was never measured.
 # Frozen and versioned is the only honest option; regenerate deliberately with
 # `python mf_model.py --stage cohort` and commit the result as a model change.
 #
