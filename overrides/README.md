@@ -13,7 +13,7 @@ the cache.
 amfi_code,scheme_name,amc,category,sector,first_nav_date,last_nav_date,n_obs
 ```
 
-The **trained universe** — the 136 funds the `cohort_q1` model was fitted on, and
+The **trained universe** — the 367 funds the `cohort_q1` model was fitted on, and
 the definition of what "in the trained universe" means everywhere in the pipeline
 (`mf_universe.trained_categories`, `mf_live_score`'s `OUT_OF_TRAINING_UNIVERSE`
 gate, `mf_labels`' cohort construction, `mf_artifact`'s batch loop). **52 of its
@@ -85,3 +85,32 @@ Fill in `<sector>` and `<source_url>`, then check your edit before it reaches a 
 Use a sector string that already appears in the manifest where one fits — matching
 an existing cohort is what makes the fund scoreable, since a brand-new sector with
 one member is below `COHORT_MIN_SIZE`.
+
+## `_sector_worklist.csv`
+
+```
+amfi_code,category,sector,source_url,note
+```
+
+The open curation queue: every `Sectoral/Thematic` fund that is otherwise
+scoreable but has **no sector**, and is therefore refused with `SECTOR_UNRESOLVED`.
+Regenerate with `mf_overrides.py --gaps --out overrides/_sector_worklist.csv`;
+fill the `sector` column from a real source, append the filled rows to
+`universe_overrides.csv`, then run `mf_overrides.py --validate`.
+
+**Git-tracked even though an empty one is regenerable**, because a partly-filled
+one is not — it is the same "one eviction from gone" argument as the rest of this
+directory, and partial curation is exactly the work worth protecting. The
+leading underscore marks it as a worklist, not an input: nothing in the pipeline
+reads this file.
+
+**Do not fill it from scheme names.** Many names do carry their theme
+("… Banking and Financial Services Fund"), and it is tempting to script it. The
+sector defines the *peer set* the within-cohort label is computed against, so a
+name-derived guess does not merely mislabel one fund — it fabricates the cohort
+every one of its peers is scored relative to. Reuse an existing sector where one
+genuinely fits; a new one-member sector is below `COHORT_MIN_SIZE` and will fail
+later as `THIN_COHORT` anyway.
+
+As of 2026-08-05: **205 rows**, all blank, and they are the entire gap between the
+367 funds shipping today and the 572-fund ceiling.
