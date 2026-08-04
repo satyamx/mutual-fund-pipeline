@@ -338,8 +338,14 @@ class AMFIRegistryLive:
         return df
 
     def resolve(self, query: str) -> Optional[pd.Series]:
-        """Accepts a full scheme name, a scheme name fragment, OR an ISIN.
-        Prefers DIRECT GROWTH plans.
+        """Accepts an AMFI scheme code, a full scheme name, a scheme name fragment,
+        OR an ISIN. Prefers DIRECT GROWTH plans.
+
+        The amfi_code branch exists because the code is the only truly unambiguous
+        handle AMFI publishes, and it is the key `mf_universe.canonical_candidates`
+        yields — without it, every out-of-manifest fund fell through name matching
+        (which cannot match a bare number) and resolved to nothing. Codes are 4-8
+        digits and ISINs are 12 alphanumerics, so the two branches cannot collide.
 
         The token fallback below is a SUBSET test — every query token must appear
         somewhere in the candidate name — so a full name can match a *longer*
@@ -355,7 +361,9 @@ class AMFIRegistryLive:
             return None
         q = query.strip().upper()
         names = m["scheme_name"].str.upper()
-        hit = m[m["isin"].fillna("").str.upper() == q]
+        hit = m[m["amfi_code"].astype(str) == q]
+        if hit.empty:
+            hit = m[m["isin"].fillna("").str.upper() == q]
         if hit.empty:
             hit = m[names == q]
         if hit.empty:
@@ -715,7 +723,42 @@ def _selftest_navall() -> None:
         "Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)")
     print("[selftest] NAVAll: paren-bearing AMC banner read as AMC (not category); "
           "following AMCs keep their real category — PASS")
-    print("[selftest] PASS — mf_datasources NAVAll parsing")
+    _selftest_resolve()
+    print("[selftest] PASS — mf_datasources NAVAll parsing + scheme resolution")
+
+
+def _selftest_resolve() -> None:
+    """AMFIRegistryLive.resolve: exact handles beat the token-subset fallback.
+
+    Two regressions are locked here. (1) A bare AMFI code resolved to NOTHING —
+    resolve() accepted a name or ISIN only, and a number matches no scheme name,
+    so every out-of-manifest candidate (which is keyed by code) failed outright.
+    (2) A full name that is a token-SUBSET of a longer scheme resolved to the
+    longer one, because the fallback took the first row it found.
+    """
+    master = pd.DataFrame([
+        ("118510", "INF090I01JR0", "Franklin India Large & Mid Cap Fund - Direct - Growth"),
+        ("118509", "INF090I01JS8", "Franklin India Mid Cap Fund - Direct - Growth"),
+        ("151078", "INF209KB1ZH3", "Zeta Focused Fund - Direct Plan - Growth"),
+        ("151079", "INF209KB1ZH4", "Zeta Focused Fund - Regular Plan - IDCW"),
+    ], columns=["amfi_code", "isin", "scheme_name"])
+
+    class _Stub(AMFIRegistryLive):
+        def master(self):  # noqa: D102 — no network, no cache
+            return master
+
+    reg = _Stub()
+    assert reg.resolve("151078")["scheme_name"].startswith("Zeta"), \
+        "FAIL: a bare AMFI code must resolve — it is the key candidates are enumerated by"
+    assert reg.resolve("118509")["amfi_code"] == "118509"
+    assert reg.resolve("INF209KB1ZH3")["amfi_code"] == "151078", "FAIL: ISIN lookup regressed"
+    # The subset collision: the full Mid Cap name must not land on Large & Mid Cap.
+    assert reg.resolve("Franklin India Mid Cap Fund - Direct - Growth")["amfi_code"] == "118509", \
+        "FAIL: exact name lost to the token-subset fallback"
+    # A genuine fragment still works, and still prefers DIRECT+GROWTH over IDCW.
+    assert reg.resolve("Zeta Focused")["amfi_code"] == "151078"
+    assert reg.resolve("no such fund") is None
+    print("[selftest] resolve: amfi_code / ISIN / exact name beat the fuzzy fallback — PASS")
 
 
 if __name__ == "__main__":
