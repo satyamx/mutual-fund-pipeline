@@ -79,7 +79,13 @@ REPORT_PATH = OUT_DIR / "model_report.md"
 #   phase_b_v2 — 367-fund manifest (2026-08-04). Cohorts are ~2.7x larger, so
 #                y_cohort_q1 is a DIFFERENT label (base rate 0.280): v1 and v2
 #                predictions are not one series and must never be pooled.
-MODEL_VERSION = "phase_b_v2"
+#   phase_b_v2_1 — same fit as v2, calibration bounded away from 0 and 1 by the
+#                rule of three (see Calibrator.fit). RANK-PRESERVING, so AUC and
+#                lift are bit-identical to v2; only the probabilities the payload
+#                emits changed. Bumped anyway: model_id must identify the exact
+#                payload that produced a logged number, and v2 rows carry literal
+#                0.0 probabilities this payload no longer emits.
+MODEL_VERSION = "phase_b_v2_1"
 
 TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_peer"}
 
@@ -165,7 +171,20 @@ class Calibrator:
         minority = min(int(y.sum()), int((~y).sum()))
         if len(y) >= MIN_ISOTONIC_N and minority >= MIN_ISOTONIC_MINORITY:
             self.kind = "isotonic"
-            self._iso = IsotonicRegression(y_min=0.0, y_max=1.0,
+            # Bounded away from 0 and 1 by the RULE OF THREE. Isotonic happily
+            # returns a flat 0.0 over any region of the calibration slice that
+            # happened to contain no positives — and phase_b_v1 shipped exactly
+            # that, giving 47 of 120 live funds a literal `probability: 0.0`.
+            # Observing 0 positives in n samples does not evidence "impossible";
+            # it bounds the rate at roughly 3/n with 95% confidence, and claiming
+            # certainty a 0.558-AUC model cannot support is the "fabricated
+            # accuracy" the honesty invariant forbids.
+            #
+            # This is RANK-PRESERVING: the bound clips a monotone map, so the
+            # ordering (and therefore AUC, lift and cohort_percentile) is
+            # unchanged. It corrects what the number CLAIMS, not what it ranks.
+            eps = _certainty_floor(len(y))
+            self._iso = IsotonicRegression(y_min=eps, y_max=1.0 - eps,
                                            out_of_bounds="clip").fit(p_raw, y)
         else:
             self.kind = "platt"
@@ -185,6 +204,16 @@ class Calibrator:
                         y=[float(v) for v in self._iso.y_thresholds_])
         return dict(kind="platt", coef=float(self._platt.coef_[0][0]),
                     intercept=float(self._platt.intercept_[0]))
+
+
+def _certainty_floor(n_calibration: int) -> float:
+    """Rule of three: 0 events in n trials bounds the rate at ~3/n (95%).
+
+    The smallest probability the calibration slice can honestly justify. Capped
+    at 0.01 so a very small slice cannot produce an absurdly wide floor, and
+    guarded against n=0.
+    """
+    return min(0.01, 3.0 / max(n_calibration, 1))
 
 
 def _logit(p: np.ndarray) -> np.ndarray:

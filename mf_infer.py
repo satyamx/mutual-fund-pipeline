@@ -152,6 +152,22 @@ def _selftest() -> None:
         print(f"[selftest] {tname:16s} n={len(rows)} max|Δp|={err:.2e} "
               f"context={inf.signal_context(tname)}")
         assert err < 1e-9, f"{tname}: numpy inference diverges from sklearn (max {err})"
+
+    # ---- the SHIPPED payload may never claim certainty ----------------------
+    # Structural guard on the artifact itself, not on one fit: phase_b_v1 shipped
+    # an isotonic map with a flat 0.0 region and gave 47 of 120 live funds a
+    # literal `probability: 0.0`. Any future regeneration that reintroduces a 0
+    # or 1 endpoint fails here rather than reaching the app.
+    for tname in inf.targets:
+        cal = inf.artifact["models"][tname]["calibration"]
+        if cal.get("kind") != "isotonic":
+            continue          # Platt is asymptotic — it cannot emit 0 or 1
+        ys = [float(v) for v in cal["y"]]
+        assert min(ys) > 0.0 and max(ys) < 1.0, (
+            f"FAIL: {tname} calibration claims certainty (min={min(ys)}, max={max(ys)}) — "
+            "a 0 or 1 probability asserts more than this model can support")
+    print(f"[selftest] shipped calibration is bounded away from 0 and 1 "
+          f"(min={min(float(v) for v in inf.artifact['models'][DEFAULT_TARGET]['calibration']['y']):.6f}) — PASS")
     print(f"[selftest] PASS — numpy inference reproduces sklearn (max|Δp|={max_err:.2e})")
 
 
