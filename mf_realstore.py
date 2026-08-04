@@ -51,6 +51,12 @@ LOGGER = logging.getLogger("MFOrchestrator.RealStore")
 UNIVERSE_MANIFEST = MANIFEST_PATH
 DISCLOSURES_DIR = CACHE / "disclosures"
 
+
+class AmbiguousFundQuery(LookupError):
+    """Raised when a query token-matches more than one manifest fund. Distinct
+    from "not found" on purpose: silently answering an ambiguous query with the
+    first candidate is what let three funds be scored as the wrong scheme."""
+
 # AMFI publishes category as free text inside the NAVAll.txt banner lines, e.g.
 # "Open Ended Schemes(Equity Scheme - Flexi Cap Fund)". Extracted from real,
 # structured AMFI text — not guessed — and mapped to the label vocabulary
@@ -136,7 +142,13 @@ class RealNAVStore:
         q = query.strip()
         if not q:
             return None
-        row = self._manifest_match(q)
+        try:
+            row = self._manifest_match(q)
+        except AmbiguousFundQuery:
+            # Deliberately NOT falling through to the live registry: a query that
+            # names two funds in the curated manifest is ambiguous, full stop, and
+            # deferring it to a fuzzier index would just relocate the guess.
+            return None
         if row is not None:
             name = row["scheme_name"]
             sector = row.get("sector")
@@ -157,15 +169,44 @@ class RealNAVStore:
         return name
 
     def _manifest_match(self, q: str) -> Optional[pd.Series]:
+        """Exact amfi_code, then exact scheme_name, then a token-subset fallback
+        that REFUSES rather than guessing when it matches more than one fund.
+
+        The fallback is a subset test, so a full scheme name can match a *longer*
+        one whose extra words it doesn't contain. Three funds in the current
+        136-row manifest do exactly that — "Franklin India Mid Cap Fund" is a
+        token-subset of "Franklin India Large & Mid Cap Fund", likewise Nippon
+        and Tata — and until 2026-08-04 this method took `hit.iloc[0]`, i.e.
+        whichever collided first in manifest order. Every one of the three
+        resolved to the WRONG fund, silently: the batch scored 136 names into 117
+        distinct funds and reported 0 errors, and three predictions against the
+        wrong scheme reached the append-only ledger.
+
+        Hence: an exact-name branch (the batch passes full manifest names, so it
+        never reaches the fallback at all), and an explicit refusal on ambiguity.
+        Returning the first of several candidates is the defect — a caller that
+        gets None degrades to a visible resolution error, which is the honest
+        outcome for a query that genuinely names two funds.
+        """
         if self._manifest.empty:
             return None
+        names = self._manifest["scheme_name"].str.upper()
+        q_up = q.upper()
         hit = self._manifest[self._manifest["amfi_code"].astype(str) == q]
         if hit.empty:
-            toks = [t for t in re.split(r"\s+", q.upper()) if t]
+            hit = self._manifest[names == q_up]
+        if hit.empty:
+            toks = [t for t in re.split(r"\s+", q_up) if t]
             mask = pd.Series(True, index=self._manifest.index)
             for t in toks:
-                mask &= self._manifest["scheme_name"].str.upper().str.contains(re.escape(t), na=False)
+                mask &= names.str.contains(re.escape(t), na=False)
             hit = self._manifest[mask]
+            if len(hit) > 1:
+                raise AmbiguousFundQuery(
+                    f"{q!r} matches {len(hit)} manifest funds — "
+                    + "; ".join(f"{r.scheme_name} [{r.amfi_code}]"
+                                for r in hit.head(4).itertuples())
+                    + ". Name the fund exactly or pass its AMFI code.")
         return None if hit.empty else hit.iloc[0]
 
     # ------------------------------------------------------------------ fund
@@ -360,3 +401,71 @@ class RealNAVStore:
                 days_ago = 0
             items.append(dict(it, days_ago=days_ago))
         return items
+
+
+# ==============================================================================
+# Selftest — resolution only. Hermetic: a synthetic manifest, no network, no cache.
+# ==============================================================================
+def _selftest() -> None:
+    import tempfile
+
+    # The three real collisions from the 136-fund manifest, reduced to their
+    # shape: a full scheme name that is a token-SUBSET of a longer one. Ordered
+    # so the wrong answer comes first, which is exactly how iloc[0] picked it.
+    rows = [
+        dict(amfi_code="118510", scheme_name="Franklin India Large & Mid Cap Fund - Direct - Growth",
+             amc="Franklin", category="Large & Mid Cap", sector=""),
+        dict(amfi_code="118509", scheme_name="Franklin India Mid Cap Fund - Direct - Growth",
+             amc="Franklin", category="Mid Cap", sector=""),
+        dict(amfi_code="120505", scheme_name="Parag Parikh Flexi Cap Fund - Direct - Growth",
+             amc="PPFAS", category="Flexi Cap", sector=""),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "manifest.csv"
+        pd.DataFrame(rows).to_csv(p, index=False)
+        store = RealNAVStore(manifest_path=p)
+
+        # ---- the regression: a full name must resolve to ITSELF, never to the
+        # longer scheme it is a token-subset of.
+        for r in rows:
+            hit = store._manifest_match(r["scheme_name"])
+            assert hit is not None, f"FAIL: {r['scheme_name']!r} did not resolve"
+            assert str(hit["amfi_code"]) == r["amfi_code"], (
+                f"FAIL: {r['scheme_name']!r} resolved to {hit['amfi_code']} "
+                f"(expected {r['amfi_code']}) — the subset collision is back")
+        assert len({str(store._manifest_match(r["scheme_name"])["amfi_code"]) for r in rows}) == 3, \
+            "FAIL: three distinct names must resolve to three distinct funds"
+        print("[selftest] exact scheme_name beats the token-subset fallback — PASS")
+
+        # ---- an ambiguous FRAGMENT must refuse, not pick the first candidate.
+        try:
+            store._manifest_match("Franklin India Mid Cap")
+            raise AssertionError("FAIL: an ambiguous fragment must raise, not guess")
+        except AmbiguousFundQuery:
+            pass
+        # ...and resolve() must swallow it as an honest miss WITHOUT falling
+        # through to the fuzzier live registry (which would relocate the guess).
+        assert store.resolve("Franklin India Mid Cap") is None, \
+            "FAIL: an ambiguous query must not resolve via the AMFI fallback"
+        print("[selftest] ambiguous fragment refuses + does not fall through to AMFI — PASS")
+
+        # ---- unambiguous fragments and code lookups still work.
+        assert str(store._manifest_match("Parag Parikh")["amfi_code"]) == "120505"
+        assert str(store._manifest_match("118509")["amfi_code"]) == "118509"
+        assert store._manifest_match("No Such Fund Anywhere") is None
+        print("[selftest] unambiguous fragment / amfi_code / miss all unchanged — PASS")
+
+    print("[selftest] PASS — manifest resolution is exact-first and refuses to guess")
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="RealNAVStore resolution selftest")
+    ap.add_argument("--selftest", action="store_true")
+    args = ap.parse_args()
+    if args.selftest:
+        logging.basicConfig(level=logging.WARNING,
+                            format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+        _selftest()
+    else:
+        ap.print_help()

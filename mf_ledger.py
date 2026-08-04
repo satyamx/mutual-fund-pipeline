@@ -164,7 +164,21 @@ def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH,
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = {k for k in (_dedupe_key_of(r, dedupe_key) for r in read_jsonl(path)) if k is not None}
-    to_write = [r for r in rows if _dedupe_key_of(r, dedupe_key) not in existing]
+    # Dedupe against the incoming batch too, not just the file. On 2026-08-03 a
+    # resolver collision handed this function two rows with an identical
+    # (amfi_code, target, anchor) inside ONE run; both were written, because
+    # `existing` was a snapshot of the file taken before the loop. The resolver is
+    # fixed, but "idempotent on dedupe_key" has to hold for the argument as well
+    # as the file or it isn't a property of the ledger, only of repeated calls.
+    seen = set(existing)
+    to_write: List[dict] = []
+    for r in rows:
+        k = _dedupe_key_of(r, dedupe_key)
+        if k is not None and k in seen:
+            continue
+        if k is not None:
+            seen.add(k)
+        to_write.append(r)
     if not to_write:
         return 0
     if path.exists() and path.stat().st_size > 0:
@@ -181,8 +195,40 @@ def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH,
     return len(to_write)
 
 
-def ledger_stats(path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
+def load_predictions(path: Path = PREDICTIONS_PATH,
+                     dedupe_key: tuple = DEDUPE_KEY) -> List[dict]:
+    """`read_jsonl` plus the ledger's own uniqueness invariant, enforced on READ.
+
+    Every consumer of the prediction ledger wants "one row per prediction", which
+    is what append_predictions promises. The 2026-08-03 run broke that promise
+    (see the note in append_predictions) and left three duplicate pairs in a
+    file that is append-only and git-tracked — deleting them would rewrite an
+    unbackfillable history to hide a mistake, which is the opposite of what the
+    ledger is for. So the bytes stay and readers dedupe: first occurrence wins,
+    which is well-defined here because the affected pairs are identical except
+    for `logged_at`. Rows with no extractable key are kept — they are already
+    unmatchable and dropping them would lose data rather than restore an invariant.
+    """
     rows = read_jsonl(path)
+    seen, out, dropped = set(), [], 0
+    for r in rows:
+        k = _dedupe_key_of(r, dedupe_key)
+        if k is None:
+            out.append(r)
+            continue
+        if k in seen:
+            dropped += 1
+            continue
+        seen.add(k)
+        out.append(r)
+    if dropped:
+        LOGGER.info("Prediction ledger: %d duplicate row(s) collapsed on %s "
+                    "(append-only file, deduped on read).", dropped, dedupe_key)
+    return out
+
+
+def ledger_stats(path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
+    rows = load_predictions(path)
     if not rows:
         return dict(rows_total=0, first_anchor=None, last_anchor=None, n_runs=0)
     anchors = sorted(r["anchor"] for r in rows)
@@ -407,7 +453,7 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
     manifest = manifest if manifest is not None else load_manifest()
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
 
-    predictions = read_jsonl(predictions_path)
+    predictions = load_predictions(predictions_path)
     already = {(r["amfi_code"], r["target"], r["anchor"]) for r in read_jsonl(realizations_path)}
 
     new_rows: List[dict] = []
@@ -429,7 +475,7 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
 
 def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
                      predictions_path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
-    preds = read_jsonl(predictions_path)
+    preds = load_predictions(predictions_path)
     rows = read_jsonl(realizations_path)
     realized = [r for r in rows if r["status"] == "REALIZED"]
     dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
@@ -466,7 +512,7 @@ def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict
     prior run are deliberately NOT re-appended (append-only + dedupe), so they
     never carry the new run_id in the file; looking them up by run_id there
     would find nothing on an ordinary no-op rerun and starve rank_stability."""
-    all_rows = read_jsonl(predictions_path)
+    all_rows = load_predictions(predictions_path)
     stats = ledger_stats(predictions_path)
     previous = _previous_run_rows(all_rows, run_id)
     return dict(
@@ -508,6 +554,30 @@ def _selftest() -> None:
         assert n2 == 0, "FAIL: re-appending the same row should be a no-op (dedupe)"
         assert len(read_jsonl(pred_path)) == 1
         print("[selftest] append/read round-trip + idempotency — PASS")
+
+        # ---- idempotency WITHIN one batch, not just across calls -------------
+        # The 2026-08-03 run passed two rows with the same (amfi_code, target,
+        # anchor) in a single call and wrote both, because `existing` was a
+        # snapshot of the file taken before the loop.
+        dup_path = tmpdir / "intra_batch.jsonl"
+        twin = dict(row, logged_at="2026-08-03T19:22:26+00:00")   # same key, later stamp
+        n_dup = append_predictions([row, twin], path=dup_path)
+        assert n_dup == 1, f"FAIL: one key twice in ONE batch must write once, wrote {n_dup}"
+        assert len(read_jsonl(dup_path)) == 1
+        print("[selftest] intra-batch dedupe: same key twice in one call writes once — PASS")
+
+        # ---- load_predictions collapses duplicates already on disk ----------
+        # Restoring the invariant on read, because the historical duplicates are
+        # in an append-only git-tracked file and deleting them would hide the bug.
+        legacy_path = tmpdir / "legacy_dupes.jsonl"
+        with open(legacy_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+            fh.write(json.dumps(twin, sort_keys=True) + "\n")
+        assert len(read_jsonl(legacy_path)) == 2, "FAIL: raw read must not hide the bytes"
+        loaded = load_predictions(legacy_path)
+        assert len(loaded) == 1, f"FAIL: load_predictions must dedupe, got {len(loaded)}"
+        assert loaded[0]["logged_at"] == row["logged_at"], "FAIL: first occurrence should win"
+        print("[selftest] load_predictions collapses on-disk duplicates, keeps the bytes — PASS")
 
         # ---- torn-tail recovery ---------------------------------------------
         with open(pred_path, "a", encoding="utf-8") as fh:

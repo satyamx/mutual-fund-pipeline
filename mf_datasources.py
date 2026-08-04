@@ -338,26 +338,52 @@ class AMFIRegistryLive:
         return df
 
     def resolve(self, query: str) -> Optional[pd.Series]:
-        """Accepts a scheme name fragment OR an ISIN. Prefers DIRECT GROWTH plans."""
+        """Accepts a full scheme name, a scheme name fragment, OR an ISIN.
+        Prefers DIRECT GROWTH plans.
+
+        The token fallback below is a SUBSET test — every query token must appear
+        somewhere in the candidate name — so a full name can match a *longer*
+        scheme whose extra words it doesn't contain: "Tata Mid Cap Fund" is a
+        token-subset of "Tata Large & MId Cap Fund". Hence two guards, in order:
+        an exact-name branch before the fallback (a caller who already knows the
+        full name must never be fuzzy-matched at all), and a tightest-match
+        tie-break after it so a fragment resolves to the most specific candidate
+        rather than to whichever row happened to come first in AMFI's file.
+        """
         m = self.master()
         if m.empty:
             return None
         q = query.strip().upper()
+        names = m["scheme_name"].str.upper()
         hit = m[m["isin"].fillna("").str.upper() == q]
+        if hit.empty:
+            hit = m[names == q]
         if hit.empty:
             toks = [t for t in re.split(r"\s+", q) if t]
             mask = pd.Series(True, index=m.index)
             for t in toks:
-                mask &= m["scheme_name"].str.upper().str.contains(re.escape(t), na=False)
+                mask &= names.str.contains(re.escape(t), na=False)
             hit = m[mask]
         if hit.empty:
             return None
-        # rank: DIRECT + GROWTH first (the only plan worth analysing)
+        # rank: DIRECT + GROWTH first (the only plan worth analysing), then the
+        # tightest match — fewest characters beyond the query — so an equal-ranked
+        # tie is broken by specificity instead of by file order.
         name = hit["scheme_name"].str.upper()
         score = (name.str.contains("DIRECT").astype(int) * 2
                  + name.str.contains("GROWTH").astype(int) * 2
                  - name.str.contains("IDCW|DIVIDEND").astype(int) * 3)
-        return hit.assign(_s=score).sort_values("_s", ascending=False).iloc[0]
+        ranked = hit.assign(_s=score, _len=name.str.len()).sort_values(
+            ["_s", "_len"], ascending=[False, True])
+        if len(ranked) > 1:
+            top = ranked.iloc[0]
+            rest = ranked[(ranked["_s"] == top["_s"]) & (ranked["_len"] == top["_len"])]
+            if len(rest) > 1:
+                LOGGER.warning("AMFI resolve(%r) is ambiguous — %d equally-specific "
+                               "schemes (%s); taking %s (%s).", query, len(rest),
+                               ", ".join(rest["amfi_code"].astype(str).head(4)),
+                               top["scheme_name"], top["amfi_code"])
+        return ranked.iloc[0]
 
     def health(self) -> bool:
         return self.live or (CACHE / "amfi_master.parquet").exists()
