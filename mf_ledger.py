@@ -112,7 +112,15 @@ MATURITY = pd.DateOffset(years=3)     # matches forward_return's own `years=3` d
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
-DEDUPE_KEY = ("amfi_code", "target", "anchor")
+# model_id is part of the key on purpose. Without it, one fund+target+anchor can
+# hold only ONE prediction ever, so the first model to log an anchor permanently
+# blocks every later model at that anchor — which is precisely backwards: a model
+# change is the one time you most want both predictions on record, side by side and
+# distinguishable. Shipping phase_b_v2 over an anchor phase_b_v1 had already
+# written silently dropped 117 of 348 v2 predictions before this was caught.
+# mf_eval segments outcome history by model_id, so the two never pool into one
+# accuracy claim; the key just has to let both exist.
+DEDUPE_KEY = ("amfi_code", "target", "anchor", "model_id")
 
 
 # ==============================================================================
@@ -433,7 +441,13 @@ def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
 
     return dict(
         schema_version=SCHEMA_VERSION, amfi_code=row["amfi_code"], target=row["target"],
-        anchor=row["anchor"], realized_at=datetime.now(timezone.utc).isoformat(),
+        anchor=row["anchor"],
+        # Carried through so an outcome can be attributed to the model that made
+        # the call. Two models may predict the same fund at the same anchor against
+        # DIFFERENT frozen cohorts, so even y_realized can differ between them —
+        # pooling the outcomes would average two different questions.
+        model_id=row.get("model_id"),
+        realized_at=datetime.now(timezone.utc).isoformat(),
         status=status, y_realized=y_realized,
         own_r_fwd=own_fwd.value if own_fwd is not None else None,
         n_peer_r_fwd=len(peer_fwds), probability=row["probability"],
@@ -454,13 +468,14 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
 
     predictions = load_predictions(predictions_path)
-    already = {(r["amfi_code"], r["target"], r["anchor"]) for r in read_jsonl(realizations_path)}
+    already = {k for k in (_dedupe_key_of(r, DEDUPE_KEY) for r in read_jsonl(realizations_path))
+               if k is not None}
 
     new_rows: List[dict] = []
     n_pending = 0
     for row in predictions:
-        key = (row["amfi_code"], row["target"], row["anchor"])
-        if key in already:
+        key = _dedupe_key_of(row, DEDUPE_KEY)
+        if key is not None and key in already:
             continue
         if today < pd.Timestamp(row["anchor"]) + MATURITY:
             n_pending += 1
@@ -468,7 +483,7 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
         new_rows.append(_realize_one(row, nav_panel))
 
     n_appended = append_predictions(new_rows, path=realizations_path,
-                                    dedupe_key=("amfi_code", "target", "anchor"))
+                                    dedupe_key=DEDUPE_KEY)
     return dict(n_predictions=len(predictions), n_pending=n_pending,
                n_matured_this_run=len(new_rows), n_newly_realized=n_appended)
 
@@ -578,6 +593,23 @@ def _selftest() -> None:
         assert len(loaded) == 1, f"FAIL: load_predictions must dedupe, got {len(loaded)}"
         assert loaded[0]["logged_at"] == row["logged_at"], "FAIL: first occurrence should win"
         print("[selftest] load_predictions collapses on-disk duplicates, keeps the bytes — PASS")
+
+        # ---- a NEW model at an anchor an OLD model already logged --------------
+        # The shipping bug this locks: with model_id outside the dedupe key, the
+        # first model to write an anchor blocked every later one, and rolling out
+        # phase_b_v2 silently dropped 117 of 348 predictions.
+        two_model_path = tmpdir / "two_models.jsonl"
+        v1 = build_row("A", cs_ok, run_id="r1", pipeline_sha="x", model_id="phase_b_v1_cohort")
+        v2 = build_row("A", cs_ok, run_id="r2", pipeline_sha="x", model_id="phase_b_v2_cohort")
+        assert append_predictions([v1], path=two_model_path) == 1
+        assert append_predictions([v2], path=two_model_path) == 1, \
+            "FAIL: a second model at the same (fund, target, anchor) must still be logged"
+        assert append_predictions([v2], path=two_model_path) == 0, \
+            "FAIL: re-appending the same model's row must still be a no-op"
+        got = load_predictions(two_model_path)
+        assert len(got) == 2 and {r["model_id"] for r in got} == {
+            "phase_b_v1_cohort", "phase_b_v2_cohort"}, got
+        print("[selftest] two models may log the same fund+anchor, and only re-runs dedupe — PASS")
 
         # ---- torn-tail recovery ---------------------------------------------
         with open(pred_path, "a", encoding="utf-8") as fh:
