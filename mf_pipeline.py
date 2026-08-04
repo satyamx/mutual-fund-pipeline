@@ -50,6 +50,8 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from scipy import stats as scistats
 
+from mf_datasources import CACHE  # gitignored, MF_CACHE_DIR-overridable output root
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
 LOGGER = logging.getLogger("MFPipeline")
 
@@ -1342,8 +1344,9 @@ def main() -> None:
     print(f"\nTotal validation checks: {len(orch.validator.records)} | "
           f"failures: {orch.validator.failure_count}")
 
-    scored.to_csv("/home/claude/mf_universe_scored.csv")
-    LOGGER.info("Scored universe written to mf_universe_scored.csv")
+    out_path = CACHE / "mf_universe_scored.csv"
+    scored.to_csv(out_path)
+    LOGGER.info("Scored universe written to %s", out_path)
 
 
 if __name__ == "__main__":
