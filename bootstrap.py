@@ -30,6 +30,41 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)-7s | %(message)s")
 LOG = logging.getLogger("bootstrap")
 
 
+def _candidate_codes(master) -> list:
+    """AMFI codes for the canonical funds OUTSIDE the manifest that are worth fetching.
+
+    Two filters, and the second one is the point of this function. `mf_universe`
+    decides which funds the model may score at all; on top of that we drop the
+    sector-keyed categories with no curated sector, because `score_live` refuses
+    those (SECTOR_UNRESOLVED) *before* it would ever call its nav_loader. Fetching
+    them would download hundreds of NAV histories that nothing can score until a
+    human fills the sector worklist — see blocker #2.
+    """
+    import mf_overrides
+    import mf_universe
+    from mf_labels import load_manifest
+    # Imported rather than restated: if this list and score_live's ever diverged,
+    # we would fetch funds it refuses, or refuse funds we never fetched.
+    from mf_live_score import SECTOR_KEYED_CATEGORIES
+
+    manifest = load_manifest()
+    cands = mf_universe.canonical_candidates(master, manifest)
+    outsiders = cands[~cands["in_manifest"]]
+
+    overrides, _issues = mf_overrides.load(manifest=manifest)
+    curated = {str(code) for code, ov in (overrides or {}).items()
+               if getattr(ov, "sector", None)}
+    sector_keyed = outsiders["category"].isin(SECTOR_KEYED_CATEGORIES)
+    blocked = sector_keyed & ~outsiders["amfi_code"].isin(curated)
+
+    keep = outsiders[~blocked]
+    LOG.info("[2/5] --candidates: %d canonical funds, %d in the manifest, %d outside it",
+             len(cands), int(cands["in_manifest"].sum()), len(outsiders))
+    LOG.info("      fetching %d; skipping %d blocked on a curated sector (mf_overrides.py --gaps)",
+             len(keep), int(blocked.sum()))
+    return [str(c) for c in keep["amfi_code"]]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--funds", nargs="*", default=[], help="Fund names or ISINs (your shortlist)")
@@ -41,6 +76,12 @@ def main() -> int:
                          "Cache-first + 20h TTL means only stale NAV is refetched — the "
                          "throttle is the cache, not a sleep. The manifest is git-tracked, "
                          "so this works on a COLD runner with no cache at all.")
+    ap.add_argument("--candidates", action="store_true",
+                    help="ALSO fetch NAV for the canonical Direct+Growth funds OUTSIDE the "
+                         "manifest that the cohort model may score by insertion. Fetches by "
+                         "AMFI CODE, so it never touches name resolution. Sector-keyed "
+                         "categories with no curated sector are skipped, because score_live "
+                         "refuses them before it would ever ask for their NAV.")
     args = ap.parse_args()
 
     if args.from_manifest:
@@ -73,18 +114,30 @@ def main() -> int:
                 continue
             LOG.info("      %-30s -> %s | %s", q, row["amfi_code"], row["scheme_name"][:50])
             resolved.append(row["amfi_code"])
-        LOG.info("[3/5] Pulling NAV history ...")
+    elif not args.candidates:
+        LOG.info("[2/5] no --funds given, skipped")
+    if args.candidates and not master.empty:
+        resolved += _candidate_codes(master)
+    # A code reached by BOTH paths (a --funds query naming an out-of-manifest fund)
+    # would otherwise be fetched twice. Order-preserving so the log reads sensibly.
+    resolved = list(dict.fromkeys(resolved))
+
+    if resolved:
+        LOG.info("[3/5] Pulling NAV history for %d code(s) ...", len(resolved))
+        n_ok = n_fail = 0
         for code in resolved:
             nav, meta, rep = mfapi.nav_series(code)
             if nav is None:
                 LOG.warning("      NAV fetch failed: %s", code)
+                n_fail += 1
                 continue
+            n_ok += 1
             msg = f"      {code}: {len(nav)} obs, {nav.index.min().date()} -> {nav.index.max().date()}"
             if rep and (rep.spikes_removed or rep.payout_steps_detected):
                 msg += f"  [{rep.summary()}]"
             LOG.info(msg)
+        LOG.info("      NAV: %d ok, %d failed", n_ok, n_fail)
     else:
-        LOG.info("[2/5] no --funds given, skipped")
         LOG.info("[3/5] skipped")
 
     if args.stocks:

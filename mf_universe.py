@@ -268,6 +268,38 @@ def plan_option(scheme_name: str) -> Tuple[str, str]:
     return plan, option
 
 
+# ==============================================================================
+# CANDIDATE ENUMERATION — the one definition of "which funds may be scored"
+# ==============================================================================
+def canonical_candidates(master: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
+    """Every canonical (Direct+Growth) scheme the cohort model is allowed to score.
+
+    ONE row per fund, columns: amfi_code, scheme_name, category, in_manifest.
+    Deliberately a single shared definition rather than a filter each caller
+    rebuilds — `bootstrap.py --candidates` fetches exactly this set and the batch
+    emitter scores exactly this set, and if the two ever drifted the batch would
+    ask for NAV that was never fetched (or fetch NAV nothing scores).
+
+    Note this returns candidates, NOT a promise that each will produce a
+    probability: `score_live` still applies its own gates (a sector-keyed
+    category with no curated sector is refused there, as is stale or absent NAV).
+    """
+    trained = trained_categories(manifest)
+    verdicts = [classify(c, trained) for c in master["category_raw"]]
+    keep = [v.scoreable for v in verdicts]
+    df = master[keep].copy()
+    df["category"] = [v.category for v in verdicts if v.scoreable]
+    plans = [plan_option(n) for n in df["scheme_name"]]
+    df["_plan"] = [p for p, _ in plans]
+    df["_option"] = [o for _, o in plans]
+    df = df[(df["_plan"] == "DIRECT") & (df["_option"] == "GROWTH")]
+    in_manifest = {str(c) for c in manifest["amfi_code"]}
+    out = df[["amfi_code", "scheme_name", "category"]].copy()
+    out["amfi_code"] = out["amfi_code"].astype(str)
+    out["in_manifest"] = out["amfi_code"].isin(in_manifest)
+    return out.reset_index(drop=True)
+
+
 def _selftest() -> None:
     # ---- 1. The two AMFI spellings of the same category must agree ------------
     for raw in ("Open Ended Schemes(Equity Scheme - Large Cap Fund)",
@@ -365,6 +397,37 @@ def _selftest() -> None:
     assert plan_option("Some Legacy Equity Fund") == ("UNKNOWN", "UNKNOWN")
     print("[selftest] plan/option parsed, unmarked legacy names stay UNKNOWN — PASS")
 
+    # ---- 8. canonical_candidates: one row per scoreable Direct+Growth fund ----
+    master = pd.DataFrame([
+        # kept: trained category, Direct+Growth, one in the manifest and one not
+        ("100001", "Alpha Large Cap Fund - Direct Plan - Growth",
+         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
+        ("100002", "Beta Small Cap Fund - Direct Plan - Growth",
+         "Open Ended Schemes(Equity Scheme - Small Cap Fund)"),
+        # dropped: same fund's Regular and IDCW variants would inflate every cohort
+        ("100003", "Alpha Large Cap Fund - Regular Plan - Growth",
+         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
+        ("100004", "Alpha Large Cap Fund - Direct Plan - IDCW",
+         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
+        # dropped: untrained category, even though it is Direct+Growth
+        ("100005", "Gamma Liquid Fund - Direct Plan - Growth",
+         "Open Ended Schemes(Debt Scheme - Liquid Fund)"),
+    ], columns=["amfi_code", "scheme_name", "category_raw"])
+    # 999999 makes Small Cap a TRAINED category without itself appearing in NAVAll —
+    # so 100002 is a genuine out-of-manifest candidate rather than an untrained one.
+    manifest = pd.DataFrame([("100001", "Alpha Large Cap Fund - Direct Plan - Growth", "Large Cap"),
+                             ("999999", "Delta Small Cap Fund", "Small Cap")],
+                            columns=["amfi_code", "scheme_name", "category"])
+    cands = canonical_candidates(master, manifest)
+    assert list(cands["amfi_code"]) == ["100001", "100002"], \
+        f"FAIL: expected only the Direct+Growth trained funds, got {list(cands['amfi_code'])}"
+    assert list(cands["in_manifest"]) == [True, False], "FAIL: in_manifest flag is wrong"
+    assert list(cands["category"]) == ["Large Cap", "Small Cap"]
+    # A manifest fund absent from NAVAll must not be conjured into the candidate set.
+    assert "999999" not in set(cands["amfi_code"]), \
+        "FAIL: candidates must come from the live master, not the manifest"
+    print("[selftest] canonical_candidates: one row per fund, plan/option and gate applied — PASS")
+
     print("[selftest] PASS — mf_universe parses AMFI honestly and refuses everything untrained")
 
 
@@ -385,17 +448,14 @@ def _report() -> None:
         n = counts.get(status, 0)
         print(f"  {status:26s} {n:6d}  ({n / total:.1%})")
 
-    scoreable = df[[v.scoreable for v in verdicts]].copy()
-    scoreable["_cat"] = [v.category for v in verdicts if v.scoreable]
-    plans = [plan_option(n) for n in scoreable["scheme_name"]]
-    scoreable["_plan"] = [p for p, _ in plans]
-    scoreable["_option"] = [o for _, o in plans]
-    canon = scoreable[(scoreable["_plan"] == "DIRECT") & (scoreable["_option"] == "GROWTH")]
-    print(f"\nscoreable rows (all plans/options): {len(scoreable)}")
+    n_scoreable = sum(1 for v in verdicts if v.scoreable)
+    canon = canonical_candidates(df, mf_labels.load_manifest())
+    print(f"\nscoreable rows (all plans/options): {n_scoreable}")
     print(f"  of which Direct+Growth (canonical): {len(canon)}")
-    print(f"  distinct ISINs among canonical    : {canon['isin'].nunique()}")
+    print(f"    in the trained manifest         : {int(canon['in_manifest'].sum())}")
+    print(f"    outside it (widening candidates): {int((~canon['in_manifest']).sum())}")
     print("\nby trained category (canonical Direct+Growth only):")
-    print(canon["_cat"].value_counts().to_string())
+    print(canon["category"].value_counts().to_string())
 
 
 if __name__ == "__main__":
