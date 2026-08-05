@@ -53,6 +53,18 @@ They cannot be deleted: `predictions.jsonl` is append-only precisely so a predic
 
 Verified against the live ledger at a simulated 2099 maturity: **1,161 rows retained, 696 skipped (v2 + v2_1), 465 graded** — v1's 117 stay in as a legitimate historical series alongside v3's 348. A malformed declaration degrades to "nothing superseded" rather than raising, so a bad edit re-grades a retired model (visible, recoverable) instead of killing a batch run.
 
+## The frozen clock — why the ledger appended nothing for weeks (fixed 2026-08-06)
+`mf_agent_orchestrator.TODAY` was a hardcoded `pd.Timestamp("2026-07-13")`, and `score_live` anchors at `min(fund_last_nav, TODAY)`. So **every anchor was pinned to that date forever**. Measured at the time: 230 of 367 funds already had newer NAV (freshest 2026-08-03), the ledger held exactly **one** distinct anchor, and every nightly spent ~24 minutes refreshing NAV, re-scored the same historical anchor, deduped against rows that already existed, appended **0 rows** — and reported success. The prediction ledger exists so predictions accumulate now and mature ~2029; with a frozen clock that was structurally impossible.
+
+Nothing flagged it: the run was green, `pipeline_coverage` was GREEN, and `rows_appended_this_run: 0` reads as ordinary idempotence.
+
+- **`TODAY` now defaults to the real date** (normalized to midnight so an anchor never depends on the hour a run started). `MF_TODAY=YYYY-MM-DD` pins it for selftests, backfills and historical replay, and logs a warning when set — live runs must never set it.
+- **`mf_artifact --max-anchor-age-days N`** (nightly sets 7) fails the run if the NEWEST anchor is more than N days behind the run date. Deliberately keyed on **anchor age, not "zero rows appended"**: zero appended is correct and common on a same-day re-run, and failing on it would break every manual dispatch. What is never correct is the anchor drifting behind the clock.
+- `monitoring.ledger` gained **`last_anchor`**. `first_anchor` never moves once seeded, so it can only answer "when did this start", never "is this still alive" — and the gate deliberately does **not** fall back to it, which would fail every healthy run once the ledger aged past the window.
+- Every run now logs rows-total / appended / newest-anchor, and warns on zero appended.
+
+**Verified:** the first run under a live clock appended **348 rows at new anchors** (`2026-08-04` ×342, `2026-08-05` ×6) — ledger 1,164 → 1,512, the first growth it has ever had.
+
 ## Verdict rule + coloring thresholds (as implemented, `RecommendationEngine.run`)
 Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey if n/a:
 - `cagr` ≥0.10 green / ≤0.06 red · `excess_cagr_3y` ≥+0.01 / ≤−0.01 · `sortino_3y` ≥0.75 / ≤0.0 · `max_dd_3y` ≥−0.20 / ≤−0.35 (shallower better) · `consistency` ≥0.60 / ≤0.40 · `expense` ≤0.010 green / ≥0.020 red (lower better) · `compliance` = red if any critical, amber if warnings or (active & holdings missing), else green · `screen_score` ≥65 green / <45 red / else blue.

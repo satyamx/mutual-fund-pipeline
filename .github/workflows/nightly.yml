@@ -97,8 +97,16 @@ jobs:
       # because a per-fund drop is by design not fatal to the batch. A quarter of the
       # universe failing is a broken run, not a thin one; the artifact is still written
       # and uploaded (below, if: always()) so the failure is diagnosable.
+      # --max-anchor-age-days catches the OTHER way a run can be green and useless.
+      # Until 2026-08-06 the orchestrator's TODAY was hardcoded to 2026-07-13, so
+      # every scoring anchor was pinned to that date: the nightly refreshed NAV for
+      # 14 minutes, re-scored one historical anchor, deduped against rows that
+      # already existed, appended NOTHING, and reported success — every single
+      # night. TODAY now tracks the real date, and this gate makes a relapse fail
+      # loudly. 7 days tolerates a weekend plus a couple of missed runs; it does NOT
+      # fire on an ordinary same-day re-run, which legitimately appends zero rows.
       - name: Emit batch artifact (+ append prediction ledger)
-        run: python mf_artifact.py --max-error-rate 0.25
+        run: python mf_artifact.py --max-error-rate 0.25 --max-anchor-age-days 7
 
       - name: Commit the prediction ledger (git-tracked, unbackfillable)
         run: |

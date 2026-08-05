@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 
 import mf_eval
 import mf_ledger
@@ -362,6 +363,39 @@ def error_rate_exceeded(coverage: Dict[str, Any], max_rate: float) -> Optional[s
             + ("; ".join(reasons[:5]) or "none recorded"))
 
 
+def ledger_stalled(monitoring: Dict[str, Any], today: pd.Timestamp,
+                   max_anchor_age_days: int) -> Optional[str]:
+    """None if the ledger is progressing, else a human-readable reason.
+
+    Guards the failure this pipeline actually had: with `TODAY` frozen at
+    2026-07-13, every scoring anchor was pinned to that date, so the nightly
+    re-scored one historical anchor forever, deduped against rows that already
+    existed and appended NOTHING — for weeks, while reporting success. The
+    prediction ledger exists to accumulate predictions that mature in ~2029; a
+    run that cannot add one is doing 24 minutes of work for no purpose.
+
+    Deliberately keyed on ANCHOR AGE, not on "zero rows appended". Zero appended
+    is correct and common — a same-day re-run, or a manual dispatch after the
+    cron, has nothing new to say and must not fail. What is never correct is the
+    newest anchor drifting far behind the run date: that means the pipeline has
+    stopped tracking time, whatever the append count says.
+    """
+    ledger = (monitoring or {}).get("ledger") or {}
+    newest = ledger.get("last_anchor")
+    if not newest:
+        # Empty ledger, or a schema too old to carry last_anchor. Deliberately NOT
+        # falling back to first_anchor: that never moves once seeded, so it would
+        # fail every healthy run the moment the ledger got older than the window.
+        return None
+    age = (pd.Timestamp(today).normalize() - pd.Timestamp(newest).normalize()).days
+    if age <= max_anchor_age_days:
+        return None
+    return (f"newest prediction anchor is {newest} — {age} days behind the run date, "
+            f"above --max-anchor-age-days of {max_anchor_age_days}. The scoring "
+            f"anchor has stopped advancing, so no new prediction can ever be logged. "
+            f"Check that TODAY is not pinned (MF_TODAY) and that NAV is refreshing.")
+
+
 def _load_scheme_names(limit: Optional[int] = None) -> List[str]:
     names = list(load_manifest()["scheme_name"])
     return names[:limit] if limit else names
@@ -517,6 +551,28 @@ def _selftest() -> None:
         assert error_rate_exceeded(dict(n_total=100, n_errors=26, errors=[]), 0.25)
         # A batch that attempted nothing is a failure, never a vacuous 0% error rate.
         assert error_rate_exceeded(dict(n_total=0, n_errors=0, errors=[]), 0.99)
+        # ---- stalled-ledger gate --------------------------------------------
+        # The real defect: TODAY frozen at 2026-07-13 pinned every anchor, so the
+        # nightly appended nothing for weeks and still reported success.
+        run_day = pd.Timestamp("2026-08-05")
+        def _mon(last_anchor, appended=0):
+            return dict(ledger=dict(rows_total=1161, rows_appended_this_run=appended,
+                                    first_anchor="2026-07-13", last_anchor=last_anchor))
+        stalled = ledger_stalled(_mon("2026-07-13"), run_day, 7)
+        assert stalled and "stopped advancing" in stalled, stalled
+        # ...but a same-day re-run appends nothing and MUST NOT fail: zero appended
+        # is ordinary idempotence, and failing on it would break every manual rerun.
+        assert ledger_stalled(_mon("2026-08-05", appended=0), run_day, 7) is None, \
+            "FAIL: a fresh anchor with 0 appended rows is a re-run, not a stall"
+        assert ledger_stalled(_mon("2026-07-29"), run_day, 7) is None, "FAIL: exact boundary"
+        assert ledger_stalled(_mon("2026-07-28"), run_day, 7), "FAIL: one day past the boundary"
+        # An empty ledger has nothing to be stale about, and must not fall back to
+        # first_anchor — that never moves, so it would fail every healthy run later.
+        assert ledger_stalled(dict(ledger=dict(first_anchor="2020-01-01")), run_day, 7) is None
+        assert ledger_stalled({}, run_day, 7) is None
+        print("[selftest] stalled-ledger gate fires on a pinned anchor, stays silent on "
+              "a same-day re-run and an empty ledger — PASS")
+
         print("[selftest] batch-failure gate fires at 118/136 with the cause named, "
               "passes a clean batch, is exact at the boundary, and refuses an empty batch — PASS")
 
@@ -586,6 +642,12 @@ if __name__ == "__main__":
                          "evaluate (e.g. 0.25). Off by default; the scheduled job sets it "
                          "so a run that silently drops most of the universe cannot report "
                          "success. The artifact is still written first, for diagnosis.")
+    ap.add_argument("--max-anchor-age-days", type=int, default=None,
+                    help="exit non-zero if the NEWEST prediction anchor is more than this "
+                         "many days behind the run date. Off by default; the scheduled job "
+                         "sets it. Catches a pipeline that has stopped tracking time — a "
+                         "frozen TODAY pinned every anchor for weeks while the nightly "
+                         "reported success and appended nothing.")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -604,8 +666,28 @@ if __name__ == "__main__":
         # The first real CI run emitted 18 of 136 funds and still reported success,
         # because nothing here ever returned non-zero — the artifact is written
         # before this check precisely so a failing run is still inspectable.
+        # Zero appended rows is normal (a same-day re-run has nothing new to say),
+        # so it is logged, not failed on. What IS reported loudly, every run.
+        led = (artifact.get("monitoring") or {}).get("ledger") or {}
+        LOGGER.info("Ledger: %s rows total, %s appended this run, newest anchor %s",
+                    led.get("rows_total"), led.get("rows_appended_this_run"),
+                    led.get("last_anchor"))
+        if not led.get("rows_appended_this_run"):
+            LOGGER.warning("No new prediction rows were appended — expected on a re-run, "
+                           "but if it repeats across days the anchor has stopped advancing.")
+
+        failures = []
+        # A batch that drops most of the universe is a FAILED run, not a thin one.
+        # The first real CI run emitted 18 of 136 funds and still reported success,
+        # because nothing here ever returned non-zero — the artifact is written
+        # before these checks precisely so a failing run is still inspectable.
         if args.max_error_rate is not None:
-            reason = error_rate_exceeded(artifact["coverage"], args.max_error_rate)
-            if reason:
+            failures.append(error_rate_exceeded(artifact["coverage"], args.max_error_rate))
+        if args.max_anchor_age_days is not None:
+            failures.append(ledger_stalled(artifact.get("monitoring") or {}, TODAY,
+                                           args.max_anchor_age_days))
+        failures = [f for f in failures if f]
+        if failures:
+            for reason in failures:
                 LOGGER.error("FAILING: %s", reason)
-                sys.exit(1)
+            sys.exit(1)

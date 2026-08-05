@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import math
 import re
 import sys
@@ -67,7 +68,22 @@ import mf_holdings  # noqa: E402 — portfolio-structure facts + concentration s
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
 LOGGER = logging.getLogger("MFOrchestrator")
-TODAY = pd.Timestamp("2026-07-13")
+# The canonical "now" for every live evaluation. It MUST advance in production:
+# score_live anchors at min(fund_last_nav, TODAY), so a frozen value pins every
+# anchor forever and the prediction ledger can never gain a row. That is not
+# hypothetical — it was measured on 2026-08-05, with TODAY hardcoded to
+# 2026-07-13: 230 of 367 funds already had newer NAV, the ledger held exactly one
+# distinct anchor, and the nightly appended 0 rows every single run while
+# reporting success.
+#
+# MF_TODAY pins it when reproducibility matters (selftests, backfills, replaying
+# a historical anchor). Absent, it is the real date, normalized to midnight so a
+# run's anchor never depends on the hour it started.
+_TODAY_OVERRIDE = os.environ.get("MF_TODAY", "").strip()
+TODAY = (pd.Timestamp(_TODAY_OVERRIDE) if _TODAY_OVERRIDE else pd.Timestamp.now()).normalize()
+if _TODAY_OVERRIDE:
+    LOGGER.warning("TODAY pinned to %s via MF_TODAY — live runs must NOT set this, "
+                   "a frozen anchor stops the prediction ledger growing.", TODAY.date())
 
 
 # ==============================================================================

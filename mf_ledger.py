@@ -627,8 +627,12 @@ def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict
     this_model = next((r.get("model_id") for r in current_rows if r.get("model_id")), None)
     previous = _previous_run_rows(all_rows, run_id, model_id=this_model)
     return dict(
+        # last_anchor is what tells you the pipeline is still tracking time.
+        # first_anchor never moves once the ledger is seeded, so it can only ever
+        # answer "when did this start", never "is this still alive".
         ledger=dict(rows_total=stats["rows_total"], rows_appended_this_run=rows_appended,
-                   first_anchor=stats["first_anchor"], path=str(predictions_path)),
+                   first_anchor=stats["first_anchor"], last_anchor=stats["last_anchor"],
+                   path=str(predictions_path)),
         realized_ic=realized_summary(realizations_path, predictions_path),
         psi=psi,
         rank_stability=rank_stability(current_rows, previous),
