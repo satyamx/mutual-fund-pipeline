@@ -275,22 +275,33 @@ def build_row(amfi_code: str, cohort_signal: Optional[dict], *, run_id: str,
 # ==============================================================================
 # rank_stability — a model-behavior QA proxy, NOT a skill/outcome metric
 # ==============================================================================
-def _previous_run_rows(all_rows: List[dict], current_run_id: str) -> List[dict]:
-    other_runs = sorted({r["run_id"] for r in all_rows if r["run_id"] != current_run_id})
+def _previous_run_rows(all_rows: List[dict], current_run_id: str,
+                       model_id: Optional[str] = None) -> List[dict]:
+    """The newest run OTHER than this one, optionally restricted to one model.
+
+    Restricting matters: this feeds rank_stability, which reports run-to-run
+    consistency. Without it, the run before a model rollout is the PREVIOUS
+    model's, so an intended model change is graded as pipeline instability.
+    """
+    rows = [r for r in all_rows if model_id is None or r.get("model_id") == model_id]
+    other_runs = sorted({r["run_id"] for r in rows if r["run_id"] != current_run_id})
     if not other_runs:
         return []
     prev_run_id = other_runs[-1]
-    return [r for r in all_rows if r["run_id"] == prev_run_id]
+    return [r for r in rows if r["run_id"] == prev_run_id]
 
 
 def rank_stability(current_rows: List[dict], previous_rows: List[dict]) -> Dict[str, Any]:
     note = "model-stability QA (run-to-run consistency) — not a skill metric"
     if not previous_rows:
         return dict(status="FIRST_RUN", spearman=None, n_common=0, prev_run_id=None, note=note)
-    prev_by_key = {(r["amfi_code"], r["target"]): r["probability"] for r in previous_rows}
+    # model_id is in the key so a probability is never compared against one from a
+    # different model — that would grade an intended model change as instability.
+    prev_by_key = {(r["amfi_code"], r["target"], r.get("model_id")): r["probability"]
+                   for r in previous_rows}
     cur, prev = [], []
     for r in current_rows:
-        key = (r["amfi_code"], r["target"])
+        key = (r["amfi_code"], r["target"], r.get("model_id"))
         if key in prev_by_key:
             cur.append(r["probability"])
             prev.append(prev_by_key[key])
@@ -468,14 +479,28 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
 
     predictions = load_predictions(predictions_path)
-    already = {k for k in (_dedupe_key_of(r, DEDUPE_KEY) for r in read_jsonl(realizations_path))
-               if k is not None}
+    # Realization rows written before model_id joined DEDUPE_KEY have no such
+    # field, so keying them strictly would drop them from `already` and realize
+    # every one of them a second time. Match those on the legacy 3-tuple as well.
+    _legacy = ("amfi_code", "target", "anchor")
+    already, already_legacy = set(), set()
+    for r in read_jsonl(realizations_path):
+        k = _dedupe_key_of(r, DEDUPE_KEY)
+        if k is not None:
+            already.add(k)
+        else:
+            lk = _dedupe_key_of(r, _legacy)
+            if lk is not None:
+                already_legacy.add(lk)
 
     new_rows: List[dict] = []
     n_pending = 0
     for row in predictions:
         key = _dedupe_key_of(row, DEDUPE_KEY)
         if key is not None and key in already:
+            continue
+        legacy_key = _dedupe_key_of(row, _legacy)
+        if legacy_key is not None and legacy_key in already_legacy:
             continue
         if today < pd.Timestamp(row["anchor"]) + MATURITY:
             n_pending += 1
@@ -488,10 +513,34 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
                n_matured_this_run=len(new_rows), n_newly_realized=n_appended)
 
 
+def current_model_id(predictions_path: Path = PREDICTIONS_PATH) -> Optional[str]:
+    """The model_id of the most recent prediction run, or None on an empty ledger.
+
+    Outcome reporting is scoped to ONE model. The ledger deliberately holds
+    several series for the same fund and anchor (that is why model_id is in
+    DEDUPE_KEY), so anything that pools them reports an accuracy figure
+    describing no model that exists.
+    """
+    rows = load_predictions(predictions_path)
+    if not rows:
+        return None
+    latest = max(rows, key=lambda r: str(r.get("run_id") or ""))
+    return latest.get("model_id")
+
+
 def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
-                     predictions_path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
+                     predictions_path: Path = PREDICTIONS_PATH,
+                     model_id: Optional[str] = None) -> Dict[str, Any]:
+    """`model_id` scopes every count and the IC to one model; None means "the
+    model behind the newest predictions". Pooling models here would average two
+    different questions — each row froze its own cohort_codes, so even
+    y_realized can differ between models for the same fund and anchor."""
     preds = load_predictions(predictions_path)
-    rows = read_jsonl(realizations_path)
+    model_id = model_id or current_model_id(predictions_path)
+    if model_id is not None:
+        preds = [r for r in preds if r.get("model_id") == model_id]
+    rows = [r for r in read_jsonl(realizations_path)
+            if model_id is None or r.get("model_id") == model_id]
     realized = [r for r in rows if r["status"] == "REALIZED"]
     dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
     thin = sum(1 for r in rows if r["status"] == "THIN_AT_REALIZATION")
@@ -513,7 +562,7 @@ def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
     return dict(status=status, value=value, n_matured=len(rows), n_realized=len(realized),
                n_dead_or_gap=dead, n_thin_at_realization=thin,
                effective_n=round(len(realized) / 30) if realized else 0,
-               earliest_maturity=earliest_maturity)
+               earliest_maturity=earliest_maturity, model_id=model_id)
 
 
 # ==============================================================================
@@ -529,7 +578,10 @@ def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict
     would find nothing on an ordinary no-op rerun and starve rank_stability."""
     all_rows = load_predictions(predictions_path)
     stats = ledger_stats(predictions_path)
-    previous = _previous_run_rows(all_rows, run_id)
+    # Scope the comparison to the model this run actually scored with, so the
+    # previous run of a DIFFERENT model is never mistaken for a previous run.
+    this_model = next((r.get("model_id") for r in current_rows if r.get("model_id")), None)
+    previous = _previous_run_rows(all_rows, run_id, model_id=this_model)
     return dict(
         ledger=dict(rows_total=stats["rows_total"], rows_appended_this_run=rows_appended,
                    first_anchor=stats["first_anchor"], path=str(predictions_path)),
@@ -610,6 +662,52 @@ def _selftest() -> None:
         assert len(got) == 2 and {r["model_id"] for r in got} == {
             "phase_b_v1_cohort", "phase_b_v2_cohort"}, got
         print("[selftest] two models may log the same fund+anchor, and only re-runs dedupe — PASS")
+
+        # ---- outcome reporting is scoped to ONE model ------------------------
+        # Pooling model_ids would compute one lift/IC over a mixture of models,
+        # describing none of them — and would trip MIN_MATURED_FOR_IC early.
+        assert current_model_id(two_model_path) == "phase_b_v2_cohort", \
+            "FAIL: current_model_id must follow the newest run, not the first row"
+        scoped = tmpdir / "scoped_real.jsonl"
+        with open(scoped, "w", encoding="utf-8") as fh:
+            for mid, yreal in (("phase_b_v1_cohort", True), ("phase_b_v2_cohort", False)):
+                fh.write(json.dumps(dict(
+                    schema_version=SCHEMA_VERSION, amfi_code="A", target="cohort_q1",
+                    anchor="2020-01-31", model_id=mid, status="REALIZED",
+                    y_realized=yreal, probability=0.4, cohort_percentile=0.9,
+                    own_r_fwd=0.1, n_peer_r_fwd=9)) + "\n")
+        summ = realized_summary(scoped, two_model_path)
+        assert summ["model_id"] == "phase_b_v2_cohort" and summ["n_realized"] == 1, \
+            f"FAIL: realized_summary must scope to one model, got {summ}"
+        assert realized_summary(scoped, two_model_path,
+                                model_id="phase_b_v1_cohort")["n_realized"] == 1
+        print("[selftest] realized_summary scopes to one model_id, never pools — PASS")
+
+        # ---- rank_stability compares runs, not models ------------------------
+        v1_run = [dict(v1, run_id="r1")]
+        v2_run = [dict(v2, run_id="r2")]
+        prev = _previous_run_rows(v1_run + v2_run, "r2", model_id="phase_b_v2_cohort")
+        assert prev == [], \
+            "FAIL: the previous run of a DIFFERENT model must not count as a previous run"
+        assert rank_stability(v2_run, prev)["status"] == "FIRST_RUN", \
+            "FAIL: a model's first run must report FIRST_RUN, not a cross-model comparison"
+        print("[selftest] rank_stability never compares across model_id — PASS")
+
+        # ---- legacy realization rows are not realized twice ------------------
+        legacy_real = tmpdir / "legacy_real.jsonl"
+        with open(legacy_real, "w", encoding="utf-8") as fh:      # pre-model_id schema
+            fh.write(json.dumps(dict(amfi_code="A", target="cohort_q1",
+                                     anchor="2020-01-31", status="REALIZED",
+                                     y_realized=True, probability=0.4,
+                                     cohort_percentile=0.9)) + "\n")
+        res = realize_matured_predictions(
+            today=pd.Timestamp("2099-01-01"), predictions_path=two_model_path,
+            realizations_path=legacy_real, manifest=pd.DataFrame(),
+            nav_panel={})
+        assert res["n_matured_this_run"] == 0, (
+            "FAIL: a pre-model_id realization row must still count as already "
+            f"realized, got {res}")
+        print("[selftest] legacy realization rows are matched, not re-realized — PASS")
 
         # ---- torn-tail recovery ---------------------------------------------
         with open(pred_path, "a", encoding="utf-8") as fh:

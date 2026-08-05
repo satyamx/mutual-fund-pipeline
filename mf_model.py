@@ -79,13 +79,17 @@ REPORT_PATH = OUT_DIR / "model_report.md"
 #   phase_b_v2 — 367-fund manifest (2026-08-04). Cohorts are ~2.7x larger, so
 #                y_cohort_q1 is a DIFFERENT label (base rate 0.280): v1 and v2
 #                predictions are not one series and must never be pooled.
-#   phase_b_v2_1 — same fit as v2, calibration bounded away from 0 and 1 by the
-#                rule of three (see Calibrator.fit). RANK-PRESERVING, so AUC and
-#                lift are bit-identical to v2; only the probabilities the payload
-#                emits changed. Bumped anyway: model_id must identify the exact
-#                payload that produced a logged number, and v2 rows carry literal
-#                0.0 probabilities this payload no longer emits.
-MODEL_VERSION = "phase_b_v2_1"
+#   phase_b_v2_1 — same fit as v2, calibration floored by the rule of three
+#                applied to the WHOLE slice. Removed the literal 0.0 but the
+#                floor (0.000413) was three orders of magnitude tighter than the
+#                6-sample block behind it could support. Superseded within a day.
+#   phase_b_v3   — same fit again; calibration blocks below MIN_CAL_BLOCK are
+#                MERGED (see Calibrator.fit), so every emitted probability is
+#                backed by >=30 observations. Not rank-preserving (merging ties
+#                funds that were previously separated), hence a full bump rather
+#                than a point release. The reported holdout AUC is unaffected:
+#                block_metrics scores p_raw, never the calibrated value.
+MODEL_VERSION = "phase_b_v3"
 
 TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_peer"}
 
@@ -110,6 +114,10 @@ CHALLENGER_MARGIN = 0.03          # >3 AUC points to adopt (design §4.2)
 CALIB_FRAC = 0.25
 MIN_ISOTONIC_N = 300
 MIN_ISOTONIC_MINORITY = 30
+# Minimum observations behind ANY calibration block. Matches MIN_ISOTONIC_MINORITY
+# rather than inventing a second threshold: below this a block's positive rate is
+# noise, and shipping it as a probability claims more than the slice can support.
+MIN_CAL_BLOCK = 30
 EFFECTIVE_N_DIVISOR = 30          # ≈ overlap inflation of monthly 3y windows (§0)
 DECILE = 0.10
 N_BOOT = 80                       # half-year block bootstrap replicates (§3.4)
@@ -171,21 +179,26 @@ class Calibrator:
         minority = min(int(y.sum()), int((~y).sum()))
         if len(y) >= MIN_ISOTONIC_N and minority >= MIN_ISOTONIC_MINORITY:
             self.kind = "isotonic"
-            # Bounded away from 0 and 1 by the RULE OF THREE. Isotonic happily
-            # returns a flat 0.0 over any region of the calibration slice that
-            # happened to contain no positives — and phase_b_v1 shipped exactly
-            # that, giving 47 of 120 live funds a literal `probability: 0.0`.
-            # Observing 0 positives in n samples does not evidence "impossible";
-            # it bounds the rate at roughly 3/n with 95% confidence, and claiming
-            # certainty a 0.558-AUC model cannot support is the "fabricated
-            # accuracy" the honesty invariant forbids.
+            # PAVA first, then MERGE THE THIN BLOCKS. Plain isotonic will happily
+            # hand a 6-sample block its own value, and if those 6 contain no
+            # positives that value is 0.0 — which is how phase_b_v1 told 47 of 120
+            # live funds their probability was literally zero, on the evidence of
+            # six observations. The root cause is not the 0; it is that six
+            # samples were allowed to be a block at all.
             #
-            # This is RANK-PRESERVING: the bound clips a monotone map, so the
-            # ordering (and therefore AUC, lift and cohort_percentile) is
-            # unchanged. It corrects what the number CLAIMS, not what it ranks.
-            eps = _certainty_floor(len(y))
-            self._iso = IsotonicRegression(y_min=eps, y_max=1.0 - eps,
-                                           out_of_bounds="clip").fit(p_raw, y)
+            # Flooring the map instead (the obvious fix) is WORSE, and measurably
+            # so: the honest rule-of-three bound for a 6-sample block is 3/6=0.50,
+            # and clipping the whole map up to 0.50 pins 98% of predictions at the
+            # floor and collapses AUC from 0.609 to 0.514. Merging is the fix that
+            # matches the actual defect — every surviving block is backed by at
+            # least MIN_CAL_BLOCK observations, so no emitted probability claims
+            # more than its own support allows. Measured: AUC 0.6094 -> 0.6102
+            # (calibration overfit slightly reduced), monotonicity preserved.
+            iso = IsotonicRegression(y_min=0.0, y_max=1.0,
+                                     out_of_bounds="clip").fit(p_raw, y)
+            self._x, self._y, self._support = _merge_thin_blocks(
+                np.asarray(p_raw, dtype=float), np.asarray(y, dtype=bool),
+                iso.predict(p_raw), MIN_CAL_BLOCK)
         else:
             self.kind = "platt"
             z = _logit(p_raw).reshape(-1, 1)
@@ -194,26 +207,70 @@ class Calibrator:
 
     def predict(self, p_raw: np.ndarray) -> np.ndarray:
         if self.kind == "isotonic":
-            return self._iso.predict(p_raw)
+            # np.interp clamps outside the knot range, matching the
+            # out_of_bounds="clip" contract mf_infer reproduces.
+            return np.interp(np.asarray(p_raw, dtype=float), self._x, self._y)
         return self._platt.predict_proba(_logit(p_raw).reshape(-1, 1))[:, 1]
 
     def to_json(self) -> dict:
         if self.kind == "isotonic":
+            # `support` is shipped so the claim is auditable: a reader (and the
+            # mf_infer selftest) can check how many observations back each knot
+            # rather than taking the probability on trust.
             return dict(kind="isotonic",
-                        x=[float(v) for v in self._iso.X_thresholds_],
-                        y=[float(v) for v in self._iso.y_thresholds_])
+                        x=[float(v) for v in self._x],
+                        y=[float(v) for v in self._y],
+                        support=[int(v) for v in self._support])
         return dict(kind="platt", coef=float(self._platt.coef_[0][0]),
                     intercept=float(self._platt.intercept_[0]))
 
 
-def _certainty_floor(n_calibration: int) -> float:
-    """Rule of three: 0 events in n trials bounds the rate at ~3/n (95%).
+def _rule_of_three(n: int) -> float:
+    """0 events in n trials bounds the rate at ~3/n (95%). Capped at 0.5 — no
+    single bound may claim more than "uninformative"."""
+    return min(0.5, 3.0 / max(n, 1))
 
-    The smallest probability the calibration slice can honestly justify. Capped
-    at 0.01 so a very small slice cannot produce an absurdly wide floor, and
-    guarded against n=0.
+
+def _merge_thin_blocks(p_raw: np.ndarray, y: np.ndarray, fitted: np.ndarray,
+                       min_n: int) -> tuple:
+    """Collapse PAVA blocks below `min_n` into a neighbour; return (x, y, support).
+
+    Merging ADJACENT blocks preserves monotonicity by construction: pooling two
+    neighbours yields a weighted mean lying between them, so it can never cross
+    the block on either side. Each returned knot is the block's largest p_raw
+    (the step boundary) paired with its observed positive rate.
     """
-    return min(0.01, 3.0 / max(n_calibration, 1))
+    order = np.argsort(p_raw, kind="mergesort")
+    p, yy, f = p_raw[order], y[order], fitted[order]
+    blocks = np.split(np.arange(len(f)), np.flatnonzero(np.diff(f)) + 1)
+
+    while len(blocks) > 1:
+        sizes = [len(b) for b in blocks]
+        i = int(np.argmin(sizes))
+        if sizes[i] >= min_n:
+            break
+        # Merge into the smaller neighbour so one fat block doesn't swallow the map.
+        j = i - 1 if (i == len(blocks) - 1 or
+                      (i > 0 and sizes[i - 1] <= sizes[i + 1])) else i + 1
+        lo, hi = min(i, j), max(i, j)
+        blocks[lo:hi + 1] = [np.concatenate(blocks[lo:hi + 1])]
+
+    xs = np.array([p[b].max() for b in blocks], dtype=float)
+    ys = np.array([float(yy[b].mean()) for b in blocks], dtype=float)
+    ns = np.array([len(b) for b in blocks], dtype=int)
+
+    # A surviving extreme block can still be degenerate (every sample one class),
+    # which would re-introduce a 0 or 1. Bound it by its OWN support, and never
+    # past its neighbour, so the map stays monotone and keeps its resolution.
+    if len(ys) > 1:
+        if ys[0] <= 0.0:
+            ys[0] = min(_rule_of_three(ns[0]), ys[1] / 2 if ys[1] > 0 else _rule_of_three(ns[0]))
+        if ys[-1] >= 1.0:
+            ys[-1] = max(1.0 - _rule_of_three(ns[-1]), (ys[-2] + 1.0) / 2)
+    # np.interp needs strictly increasing x; identical p_raw values always land in
+    # the same block, but guard rather than rely on it.
+    keep = np.concatenate(([True], np.diff(xs) > 0))
+    return xs[keep], ys[keep], ns[keep]
 
 
 def _logit(p: np.ndarray) -> np.ndarray:

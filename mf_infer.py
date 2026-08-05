@@ -58,8 +58,16 @@ def _logit(p: np.ndarray) -> np.ndarray:
 
 
 def _apply_calibration(p_raw: np.ndarray, cal: Dict[str, Any]) -> np.ndarray:
-    """Reproduce sklearn IsotonicRegression(out_of_bounds='clip') via np.interp
-    (which already clamps to the endpoint y-values), or the Platt sigmoid."""
+    """Apply the shipped calibration map via np.interp (which already clamps to
+    the endpoint y-values, matching out_of_bounds='clip'), or the Platt sigmoid.
+
+    `kind="isotonic"` is the map's provenance, not its exact shape: since
+    phase_b_v3 the knots are PAVA blocks with thin ones merged (mf_model.
+    _merge_thin_blocks), so the map is monotone piecewise-linear rather than
+    sklearn's raw step function. That is deliberate — the step version collapsed
+    23,646 scored rows onto 53 distinct probabilities, discarding the model's own
+    ordering inside each step, and the merged map preserves it (23,058 distinct)
+    while guaranteeing every knot is backed by >= MIN_CAL_BLOCK observations."""
     if cal["kind"] == "isotonic":
         return np.interp(p_raw, np.asarray(cal["x"], dtype=float),
                          np.asarray(cal["y"], dtype=float))
@@ -158,6 +166,8 @@ def _selftest() -> None:
     # an isotonic map with a flat 0.0 region and gave 47 of 120 live funds a
     # literal `probability: 0.0`. Any future regeneration that reintroduces a 0
     # or 1 endpoint fails here rather than reaching the app.
+    checked = 0
+    worst_min, worst_support = 1.0, None
     for tname in inf.targets:
         cal = inf.artifact["models"][tname]["calibration"]
         if cal.get("kind") != "isotonic":
@@ -166,8 +176,26 @@ def _selftest() -> None:
         assert min(ys) > 0.0 and max(ys) < 1.0, (
             f"FAIL: {tname} calibration claims certainty (min={min(ys)}, max={max(ys)}) — "
             "a 0 or 1 probability asserts more than this model can support")
-    print(f"[selftest] shipped calibration is bounded away from 0 and 1 "
-          f"(min={min(float(v) for v in inf.artifact['models'][DEFAULT_TARGET]['calibration']['y']):.6f}) — PASS")
+        # Removing the 0 is not enough — the number that replaces it has to be
+        # backed by real observations, which is what `support` records.
+        support = cal.get("support")
+        assert support, f"FAIL: {tname} calibration ships no per-knot support counts"
+        assert min(support) >= M.MIN_CAL_BLOCK, (
+            f"FAIL: {tname} has a calibration block of {min(support)} observations "
+            f"(< MIN_CAL_BLOCK={M.MIN_CAL_BLOCK}) — its probability claims more "
+            "than its own support allows")
+        checked += 1
+        if min(ys) < worst_min:
+            worst_min, worst_support = min(ys), min(support)
+    # Every isotonic target must have been reachable; a Platt-only artifact is
+    # legitimate, so report that rather than indexing a 'y' key it does not have.
+    if checked:
+        print(f"[selftest] shipped calibration bounded away from 0 and 1 "
+              f"(min={worst_min:.6f}, every block >= {M.MIN_CAL_BLOCK} obs, "
+              f"thinnest={worst_support}) — PASS")
+    else:
+        print("[selftest] shipped calibration is Platt on every target — "
+              "asymptotic, cannot emit 0 or 1 — PASS")
     print(f"[selftest] PASS — numpy inference reproduces sklearn (max|Δp|={max_err:.2e})")
 
 

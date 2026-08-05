@@ -5,7 +5,11 @@ holds the regenerable research outputs and stays gitignored).
 
 - **`model_artifact_cohort.json`** (17 KB) — the full inference payload for the
   `cohort_q1` elastic-net: coefficients, feature order, scaler statistics, imputation
-  medians, calibration, and a `version` string. Read by `mf_infer.CohortInferencer`
+  medians, calibration, and a `version` string. Since `phase_b_v3` the calibration map's knots are PAVA blocks with thin ones
+merged, each carrying a `support` count of at least `mf_model.MIN_CAL_BLOCK`
+observations — so no emitted probability claims more than its own evidence
+allows, and `mf_infer --selftest` fails the artifact if one does.
+Read by `mf_infer.CohortInferencer`
   with numpy alone, no sklearn. `mf_infer.COHORT_ARTIFACT_PATH` is the **single**
   definition of this path; `mf_model.py` imports it rather than declaring a second
   literal, because a drift there would mean the trainer writes a model the inference

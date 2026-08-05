@@ -205,7 +205,16 @@ def outcome_metrics(realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
     if base["status"] != "OK":
         return out  # PENDING/INSUFFICIENT — no fabricated lift
 
-    rows = [r for r in mf_ledger.read_jsonl(realizations_path) if r["status"] == "REALIZED"]
+    # Scoped to ONE model, matching realized_summary above. The ledger holds a
+    # separate series per model_id for the same fund and anchor, so an unscoped
+    # read would compute one lift over a mixture of models — a number describing
+    # none of them, and exactly the laundered composite the honesty invariant bars.
+    model_id = base.get("model_id")
+    rows = [r for r in mf_ledger.read_jsonl(realizations_path)
+            if r["status"] == "REALIZED"
+            and (model_id is None or r.get("model_id") == model_id)]
+    if not rows:
+        return out
     y = np.array([float(r["y_realized"]) for r in rows])
     pctl = np.array([float(r["cohort_percentile"]) for r in rows])
     prob = np.array([float(r["probability"]) for r in rows])
