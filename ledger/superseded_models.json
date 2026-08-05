@@ -1,0 +1,14 @@
+{
+  "phase_b_v2_cohort": {
+    "superseded_at": "2026-08-05",
+    "superseded_by": "phase_b_v3_cohort",
+    "reason": "Shipped an isotonic calibration with a flat 0.0 region: 27 of its 348 predictions asserted a literal zero probability, which no 0.558-AUC model can support. Live for roughly one hour. Its 348 rows stay in predictions.jsonl as the record of what was actually emitted, but they are not graded - realizing them in 2029 would pool a payload nobody relied on with the one that was.",
+    "rows_retained": 348
+  },
+  "phase_b_v2_1_cohort": {
+    "superseded_at": "2026-08-05",
+    "superseded_by": "phase_b_v3_cohort",
+    "reason": "First attempt at the calibration fix. Removed the literal 0.0 but floored the map using the rule of three over the whole 7268-row calibration slice (eps=0.000413), when the flattened region held only 6 samples with zero positives - a bound of 3/6=0.50. The emitted number was three orders of magnitude tighter than its own evidence, so it is the same overclaim in a quieter form. Live for roughly two hours.",
+    "rows_retained": 348
+  }
+}

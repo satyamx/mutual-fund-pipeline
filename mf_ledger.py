@@ -79,6 +79,13 @@ SCHEMA_VERSION = 1
 LEDGER_DIR = Path(__file__).parent / "ledger"
 PREDICTIONS_PATH = LEDGER_DIR / "predictions.jsonl"
 REALIZATIONS_PATH = LEDGER_DIR / "realizations.jsonl"
+# Hand-maintained DECLARATION, not a derived file: which model_ids are retired.
+# The predictions file is append-only precisely so a prediction can never be
+# rewritten or deleted, which means "this payload was live for twenty minutes and
+# should not be graded in 2029" cannot be expressed by editing it. It is expressed
+# here instead: the rows stay exactly as written, and readers skip the models named
+# in this file. Removing an entry un-retires the model, losing nothing.
+SUPERSEDED_PATH = LEDGER_DIR / "superseded_models.json"
 # Git-tracked alongside the shipped model (see mf_infer.MODEL_DIR): this is the
 # empirical training-time decile distribution the live PSI drift check compares
 # against, so it is only meaningful paired with the exact model it was built from.
@@ -470,10 +477,11 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
                                 predictions_path: Path = PREDICTIONS_PATH,
                                 realizations_path: Path = REALIZATIONS_PATH,
                                 manifest: Optional[pd.DataFrame] = None,
-                                nav_panel: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Any]:
+                                nav_panel: Optional[Dict[str, pd.Series]] = None,
+                                superseded_path: Path = SUPERSEDED_PATH) -> Dict[str, Any]:
     """Offline job — run periodically (e.g. monthly cron), NOT from the live
-    batch path. Idempotent: already-realized (amfi_code, target, anchor) rows
-    are skipped."""
+    batch path. Idempotent: already-realized rows are skipped, and so are
+    predictions from any model named in `superseded_path`."""
     today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
     manifest = manifest if manifest is not None else load_manifest()
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
@@ -493,9 +501,17 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
             if lk is not None:
                 already_legacy.add(lk)
 
+    retired = load_superseded(superseded_path)
     new_rows: List[dict] = []
-    n_pending = 0
+    n_pending = n_superseded = 0
     for row in predictions:
+        # A retired payload's predictions stay in the file as a record of what was
+        # actually emitted, but they are never graded: realizing a model that was
+        # live for twenty minutes would put its outcomes in the same pool as the
+        # model people actually relied on.
+        if row.get("model_id") in retired:
+            n_superseded += 1
+            continue
         key = _dedupe_key_of(row, DEDUPE_KEY)
         if key is not None and key in already:
             continue
@@ -506,37 +522,65 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
             n_pending += 1
             continue
         new_rows.append(_realize_one(row, nav_panel))
+    if n_superseded:
+        LOGGER.info("Skipped %d prediction(s) from superseded model(s): %s",
+                    n_superseded, ", ".join(sorted(retired)))
 
     n_appended = append_predictions(new_rows, path=realizations_path,
                                     dedupe_key=DEDUPE_KEY)
     return dict(n_predictions=len(predictions), n_pending=n_pending,
-               n_matured_this_run=len(new_rows), n_newly_realized=n_appended)
+               n_matured_this_run=len(new_rows), n_newly_realized=n_appended,
+               n_superseded_skipped=n_superseded)
 
 
-def current_model_id(predictions_path: Path = PREDICTIONS_PATH) -> Optional[str]:
-    """The model_id of the most recent prediction run, or None on an empty ledger.
+def load_superseded(path: Path = SUPERSEDED_PATH) -> Dict[str, dict]:
+    """`{model_id: {superseded_at, superseded_by, reason}}`. Absent file = none.
+
+    A malformed file degrades to "nothing is superseded" rather than raising:
+    the failure mode of a bad edit here should be that retired models are graded
+    again (visible, recoverable), never that a batch run dies.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        LOGGER.warning("Unreadable %s (%s) — treating no model as superseded.", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        LOGGER.warning("%s is not an object — treating no model as superseded.", path)
+        return {}
+    return {str(k): (v if isinstance(v, dict) else {}) for k, v in data.items()}
+
+
+def current_model_id(predictions_path: Path = PREDICTIONS_PATH,
+                     superseded_path: Path = SUPERSEDED_PATH) -> Optional[str]:
+    """The model_id of the most recent NON-superseded prediction run.
 
     Outcome reporting is scoped to ONE model. The ledger deliberately holds
     several series for the same fund and anchor (that is why model_id is in
     DEDUPE_KEY), so anything that pools them reports an accuracy figure
-    describing no model that exists.
+    describing no model that exists. A retired model must not be that one.
     """
     rows = load_predictions(predictions_path)
-    if not rows:
+    retired = load_superseded(superseded_path)
+    live = [r for r in rows if r.get("model_id") not in retired]
+    if not live:
         return None
-    latest = max(rows, key=lambda r: str(r.get("run_id") or ""))
+    latest = max(live, key=lambda r: str(r.get("run_id") or ""))
     return latest.get("model_id")
 
 
 def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
                      predictions_path: Path = PREDICTIONS_PATH,
-                     model_id: Optional[str] = None) -> Dict[str, Any]:
+                     model_id: Optional[str] = None,
+                     superseded_path: Path = SUPERSEDED_PATH) -> Dict[str, Any]:
     """`model_id` scopes every count and the IC to one model; None means "the
     model behind the newest predictions". Pooling models here would average two
     different questions — each row froze its own cohort_codes, so even
     y_realized can differ between models for the same fund and anchor."""
     preds = load_predictions(predictions_path)
-    model_id = model_id or current_model_id(predictions_path)
+    model_id = model_id or current_model_id(predictions_path, superseded_path)
     if model_id is not None:
         preds = [r for r in preds if r.get("model_id") == model_id]
     rows = [r for r in read_jsonl(realizations_path)
@@ -666,7 +710,10 @@ def _selftest() -> None:
         # ---- outcome reporting is scoped to ONE model ------------------------
         # Pooling model_ids would compute one lift/IC over a mixture of models,
         # describing none of them — and would trip MIN_MATURED_FOR_IC early.
-        assert current_model_id(two_model_path) == "phase_b_v2_cohort", \
+        # `none_sup` keeps this hermetic: without it the assertion reads the REAL
+        # ledger/superseded_models.json and changes meaning as models retire.
+        none_sup = tmpdir / "no_superseded.json"
+        assert current_model_id(two_model_path, none_sup) == "phase_b_v2_cohort", \
             "FAIL: current_model_id must follow the newest run, not the first row"
         scoped = tmpdir / "scoped_real.jsonl"
         with open(scoped, "w", encoding="utf-8") as fh:
@@ -676,7 +723,7 @@ def _selftest() -> None:
                     anchor="2020-01-31", model_id=mid, status="REALIZED",
                     y_realized=yreal, probability=0.4, cohort_percentile=0.9,
                     own_r_fwd=0.1, n_peer_r_fwd=9)) + "\n")
-        summ = realized_summary(scoped, two_model_path)
+        summ = realized_summary(scoped, two_model_path, superseded_path=none_sup)
         assert summ["model_id"] == "phase_b_v2_cohort" and summ["n_realized"] == 1, \
             f"FAIL: realized_summary must scope to one model, got {summ}"
         assert realized_summary(scoped, two_model_path,
@@ -708,6 +755,27 @@ def _selftest() -> None:
             "FAIL: a pre-model_id realization row must still count as already "
             f"realized, got {res}")
         print("[selftest] legacy realization rows are matched, not re-realized — PASS")
+
+        # ---- superseded models: rows retained, never graded -------------------
+        sup_path = tmpdir / "superseded.json"
+        sup_path.write_text(json.dumps(
+            {"phase_b_v2_cohort": {"superseded_by": "phase_b_v3_cohort"}}), encoding="utf-8")
+        assert current_model_id(two_model_path, sup_path) == "phase_b_v1_cohort", \
+            "FAIL: a superseded model must never be the model outcomes are scoped to"
+        empty_real = tmpdir / "no_real.jsonl"
+        res = realize_matured_predictions(
+            today=pd.Timestamp("2099-01-01"), predictions_path=two_model_path,
+            realizations_path=empty_real, manifest=pd.DataFrame(), nav_panel={},
+            superseded_path=sup_path)
+        assert res["n_superseded_skipped"] == 1, f"FAIL: superseded row not skipped: {res}"
+        # ...and the rows themselves are untouched — this is a declaration, not a delete.
+        assert len(load_predictions(two_model_path)) == 2, \
+            "FAIL: superseding must not remove rows from the append-only ledger"
+        # A malformed declaration must degrade to "nothing superseded", never raise.
+        bad = tmpdir / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        assert load_superseded(bad) == {} and load_superseded(tmpdir / "absent.json") == {}
+        print("[selftest] superseded models are skipped for grading, rows retained — PASS")
 
         # ---- torn-tail recovery ---------------------------------------------
         with open(pred_path, "a", encoding="utf-8") as fh:

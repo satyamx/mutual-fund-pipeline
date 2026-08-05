@@ -34,7 +34,7 @@ Module map + data flow: `docs/architecture.md`. Four things the code won't tell 
   - Live scoring: `MasterOrchestrator(live=True).evaluate("<fund name or ISIN>", profile_config={...})`.
 - `mf_cache/` is **gitignored** — fetched data and the Phase-B *research* outputs (features/labels parquets, CPCV results, reports) are generated and never committed. Regenerate as needed.
 - **Three exceptions live outside it, and each is there because it is unbackfillable, not for convenience** — losing any of them cannot be undone by re-running anything:
-  - `ledger/` — predictions are unrealizable once lost; they must survive as repo history.
+  - `ledger/` — predictions are unrealizable once lost; they must survive as repo history. Append-only: a model is retired by naming it in `ledger/superseded_models.json` (readers skip it), **never** by deleting its rows.
   - `overrides/` — the hand-curated universe manifest + category/sector overrides no free source publishes.
   - `benchmarks/` — index series and a partly hand-annotated availability sheet; **no script in this repo rebuilds them**.
   - `model/` — the **shipped** `model_artifact_cohort.json` + its `psi_reference.json`. This is the frozen, holdout-validated payload that actually scores funds, and `mf_ledger` stamps its version as the `model_id` on every prediction. It is versioned rather than generated so a 2029 outcome ties back to the exact model that made the call. **Never retrain it on a schedule** — the holdout AUC (~0.558) belongs to one specific fit; regenerate deliberately via `python mf_model.py --stage cohort` and commit that as a model change, **bumping `mf_model.MODEL_VERSION`** so the ledger can tell the two apart (it stamps that string as `model_id`, and `mf_eval` segments outcomes by it).
