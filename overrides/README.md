@@ -104,7 +104,7 @@ directory, and partial curation is exactly the work worth protecting. The
 leading underscore marks it as a worklist, not an input: nothing in the pipeline
 reads this file.
 
-**Do not fill it from scheme names.** Many names do carry their theme
+**Never AUTO-FILL it from scheme names.** Many names do carry their theme
 ("… Banking and Financial Services Fund"), and it is tempting to script it. The
 sector defines the *peer set* the within-cohort label is computed against, so a
 name-derived guess does not merely mislabel one fund — it fabricates the cohort
@@ -112,5 +112,49 @@ every one of its peers is scored relative to. Reuse an existing sector where one
 genuinely fits; a new one-member sector is below `COHORT_MIN_SIZE` and will fail
 later as `THIN_COHORT` anyway.
 
+> **Amended 2026-08-06.** This rule originally read "do not fill it from scheme
+> names" full stop. That is the right instinct pointed at the wrong step: what
+> corrupts a cohort is a name-derived sector being *applied*, not one being
+> *suggested*. `mf_overrides.py --propose` now reads the names and writes
+> suggestions to `_sector_proposals.csv` — a separate file, never
+> `universe_overrides.csv` — each carrying the token that fired so the call is
+> auditable. A proposal still reaches a score only when a human moves the row
+> across with a real `source_url` and `--validate` passes. The prohibition on
+> auto-application is unchanged and is enforced structurally, not by convention.
+>
+> The distinction is not cosmetic: **the first real run of the proposer was
+> wrong about 24 funds** — a bare `services` pattern swallowed every "Banking and
+> Financial Services" fund, proposing 1 of 25. A regex over fund names is exactly
+> as fallible as this section assumed. It is useful because a human reviews it.
+
 As of 2026-08-05: **205 rows**, all blank, and they are the entire gap between the
 367 funds shipping today and the 572-fund ceiling.
+
+## `_sector_proposals.csv` (generated — review surface, NOT an input)
+
+```
+amfi_code,category,proposed_sector,matched_on,needs_human,reason,note
+```
+
+Written by `mf_overrides.py --propose --out overrides/_sector_proposals.csv`.
+Nothing in the pipeline reads it; `mf_universe`/`mf_live_score` still see only
+`universe_overrides.csv`, so an unreviewed proposal cannot change a single score.
+
+As of 2026-08-06, over the 205 blocked funds: **142 proposed, 63 left for a human.**
+Every proposed sector already exists in the manifest — the proposer refuses to mint a
+new one, since creating a cohort is a product decision rather than a regex's call.
+
+`matched_on` is the token that fired, so a wrong proposal is diagnosable rather than
+mysterious. `reason` explains every blank, and the blanks are the interesting part:
+
+| left blank | why |
+|---|---|
+| Innovation, Momentum, Quality, Multi-Factor, Minimum Variance, Quantamental | names a **strategy or factor**, not a sector |
+| Sector Rotation | rotates *across* sectors — any single sector is wrong by construction |
+| Ethical / Shariah | a religious-law screen, **not** the ESG sector |
+| International, Japan, Taiwan, US, Asian, Global | non-domestic mandate; a global sleeve does not belong in a domestic cohort even when it names a sector |
+| Services, Conglomerate, Rural, Recently-Listed-IPO | real themes with **no existing sector** to join |
+
+Those last four are the live product question: each would need a **new** sector, and
+a new sector is only viable at `COHORT_MIN_SIZE` (4) or more members. Services (4) and
+Conglomerate (3) are near the line; Rural (2) is not.
