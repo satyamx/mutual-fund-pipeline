@@ -2,7 +2,7 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-08-06 (end of session): MF repo HEAD = `b54bd44` on branch `claude/what-next-4tomhs`, pushed. NOT yet merged to `master` — `master` is still at `544be59`, and the nightly CI runs from `master`, so none of this session's five commits are live in CI until that merge happens.** Baseline for the notes below: `544be59`+, in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only). `overrides/_sector_worklist.csv` is git-tracked (205 blank rows — blocker #2), and `overrides/_sector_proposals.csv` now sits beside it with 142 suggestions awaiting review.
+**As of 2026-08-07: MF repo HEAD = `74b5978` on `master`, pushed and in sync. `claude/what-next-4tomhs` IS merged (merge commit `74b5978`, 2026-08-06 23:22 UTC) — the five commits below are now on the branch CI runs from.** Baseline for the notes below: `544be59`+, in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only). `overrides/_sector_worklist.csv` is git-tracked (205 blank rows — blocker #2), and `overrides/_sector_proposals.csv` now sits beside it with 142 suggestions awaiting review.
 
 **The clock fix is confirmed working in CI.** Scheduled run `31049875759` (2026-08-05 21:43Z, on `544be59`) was green; the ledger stands at **1,512 rows** with anchors `2026-08-04` ×342 and `2026-08-05` ×6 alongside the historical `2026-07-13` ×1,164. That run itself appended 0 rows and committed nothing — correct, since NAV had not advanced since the 18:52 dispatch three hours earlier. Zero-appended is only alarming if it repeats *across days*, which is exactly what `--max-anchor-age-days 7` now fails on.
 
@@ -117,8 +117,18 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 - **`mf_cache/managers.csv`** (blocker #5) — scaffold now built (`mf_managers.py`), data still hand-sourced from AMC factsheets/SIDs. Start with `--template`.
 - **`mf_cache/disclosures/`** (blocker #6) — monthly per-AMC portfolio XLSX. Code proven on mock data; inert on every real fund until files land.
 
-### And one thing that IS mechanical
-**Merge `claude/what-next-4tomhs` into `master`.** The nightly runs from `master`, so this session's five commits — including the Release-publishing step — are **not live in CI** until then.
+### ✅ The one mechanical item — done
+~~Merge `claude/what-next-4tomhs` into `master`.~~ Merged at `74b5978`, 2026-08-06 23:22 UTC. The five commits, including the Release-publishing step, are now on the branch CI runs from.
+
+### ✅ The Release step is proven against real `gh` — run `31131128530` (2026-08-06 23:26–23:52 UTC)
+`40d9cfd` reached `master` at 23:22 on 08-06 and had **never executed in CI**; it was verified only against a locally stubbed `gh`. Manually dispatched to close that gap. All 12 steps green, and the numbers were checked rather than the tick:
+- **367 funds, 0 errors**, `mf_artifact_v1_20260806T235243Z.json.gz`.
+- **Ledger 1,858 rows, 349 appended, newest anchor `2026-08-06`** — the clock is still advancing (see the frozen-clock section; this is the second run to grow the ledger).
+- **Release `latest-artifact` created** at 23:52:46Z with both assets, exercising the create-once branch (every later run takes the `--clobber` path). The published `latest.json` reads `pipeline_sha: 74b5978` — the merge commit — confirming it was the merged code that ran, not a stale cache.
+
+**Still not app-fetchable: the repo is private, so that URL 404s anonymously.** That is D1 and this run does not touch it.
+
+**Minor open watch item.** The cron is `30 20 * * *` and scheduled runs have historically landed ~70 min late (21:38 / 21:43 / 21:47). The 2026-08-06 slot had still not fired ~3 h past its usual landing time, when the manual dispatch superseded it. GitHub drops scheduled runs under load, so one late/missing slot is **not** evidence of breakage — noted only so a *pattern* gets recognised rather than re-derived. The real backstop already exists: `--max-anchor-age-days 7` fails the batch if the anchor falls a week behind, so a genuinely dead schedule surfaces loudly on its own.
 
 > **If D2 is accepted, budget for a retrain.** Widening the manifest redefines `y_cohort_q1` over a different peer set, exactly as 136 → 367 did (AUC 0.578 → 0.558, and the two numbers were never comparable). That means `phase_b_v4`, a fresh once-only holdout committed to in advance, and a `mf_model.MODEL_VERSION` bump so the ledger can tell the fits apart.
 
