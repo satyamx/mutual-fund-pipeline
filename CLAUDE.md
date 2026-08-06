@@ -16,7 +16,10 @@ This is the load-bearing constraint of the whole project:
 - The current user-facing verdict (🟢BUY/🔵HOLD/🔴SELL) is an **explainable RULE over colour-coded metrics + hard compliance gates**, not a weighted black box. Keep it that way.
 
 ## Architecture
-Module map + data flow: `docs/architecture.md`. Four things the code won't tell you:
+Module map + data flow: `docs/architecture.md`. Orientation for a human rather than a
+module map: **`docs/what_this_is.md`** (what this honestly does and does not claim),
+`docs/retrospective.md` (what the build learned), `docs/integration_plan.md` (the app
+handoff). Four things the code won't tell you:
 - `mf_overrides.py` / `overrides/` are **INPUTS ONLY** — never write scores back into them.
 - `mf_sentinel.py`'s `_NEVER_HIGH` structurally bars non-regulatory alert bases from HIGH.
 - `mf_holdings.py` is **never an ML feature** (unbacktestable); it reaches the verdict only via the SEBI single-issuer compliance rule.
