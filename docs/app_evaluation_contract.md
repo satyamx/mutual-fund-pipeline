@@ -22,7 +22,7 @@ predictions mature (~2029 earliest). So:
   the panel appears. Never label this panel "accuracy", "win rate", or "returns".
 - `PENDING` (⏳) means **not-yet-measurable, not bad** — render it distinctly from a
   RED failure. A `PENDING` outcome never colours the overall status.
-- The cohort signal it monitors is itself a **weak** ranking aid (phase_b_v2 holdout AUC ~0.558, lift ~1.10x).
+- The cohort signal it monitors is itself a **weak** ranking aid (`phase_b_v3`, holdout AUC ~0.558, lift ~1.10x — the number is inherited from `phase_b_v2` unchanged, because v3 altered only the calibration map and the holdout scores `p_raw`).
   Do not upsell the panel into a confidence score for a BUY.
 
 ## Schema (`artifact.evaluation`)

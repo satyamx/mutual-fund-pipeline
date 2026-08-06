@@ -16,7 +16,10 @@ This is the load-bearing constraint of the whole project:
 - The current user-facing verdict (🟢BUY/🔵HOLD/🔴SELL) is an **explainable RULE over colour-coded metrics + hard compliance gates**, not a weighted black box. Keep it that way.
 
 ## Architecture
-Module map + data flow: `docs/architecture.md`. Four things the code won't tell you:
+Module map + data flow: `docs/architecture.md`. Orientation for a human rather than a
+module map: **`docs/what_this_is.md`** (what this honestly does and does not claim),
+`docs/retrospective.md` (what the build learned), `docs/integration_plan.md` (the app
+handoff). Four things the code won't tell you:
 - `mf_overrides.py` / `overrides/` are **INPUTS ONLY** — never write scores back into them.
 - `mf_sentinel.py`'s `_NEVER_HIGH` structurally bars non-regulatory alert bases from HIGH.
 - `mf_holdings.py` is **never an ML feature** (unbacktestable); it reaches the verdict only via the SEBI single-issuer compliance rule.
@@ -30,6 +33,8 @@ Module map + data flow: `docs/architecture.md`. Four things the code won't tell 
   - `python mf_model.py --stage cohort` — (re)train + write the cohort model artifacts.
   - `python mf_infer.py --selftest` — verify numpy inference == sklearn (bit-exact).
   - `python mf_features.py --selftest` / `python mf_cv.py --selftest` — anti-lookahead / leakage checks.
+  - `python mf_overrides.py --propose --out overrides/_sector_proposals.csv` — SUGGEST sectors for the blocked funds (review surface; never auto-applied).
+  - `python mf_managers.py --template --out mf_cache/managers_template.csv` — blank skeleton for the hand-sourced manager history; `--validate` a filled one.
   - `python mf_agent_orchestrator.py` — mock demo (interactive profile prompts; pass `profile_config=` in code to skip).
   - Live scoring: `MasterOrchestrator(live=True).evaluate("<fund name or ISIN>", profile_config={...})`.
 - `mf_cache/` is **gitignored** — fetched data and the Phase-B *research* outputs (features/labels parquets, CPCV results, reports) are generated and never committed. Regenerate as needed.

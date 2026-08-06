@@ -32,9 +32,10 @@ are listed as dormant metadata, not executed against data that doesn't exist.
 
 from __future__ import annotations
 
-import os
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
@@ -43,6 +44,9 @@ import pandas as pd
 from mf_pipeline import QuantEngine, ValidationOrchestrator
 from mf_nfo_gate import EligibilityGate, NFOAssessor
 import mf_holdings
+import mf_managers
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # type-only: avoids a module-load cycle with mf_agent_orchestrator
     from mf_agent_orchestrator import FundDossier, ComplianceFinding
@@ -519,26 +523,31 @@ def _manager_alerts(backtest: Dict[str, Any]) -> Tuple[List[Alert], List[str]]:
 
 
 def _load_managers_csv(path: str = "mf_cache/managers.csv") -> Optional[pd.DataFrame]:
-    """Hand-maintained manager<->scheme mapping (no free API publishes fund-manager
+    """Hand-sourced manager<->scheme mapping (no free API publishes fund-manager
     identity — mf_realstore.py:194). Absent by default; cross-fund/tenure rules stay
-    dormant until the user populates it. Columns: manager_name, amfi_code,
-    scheme_name, start_date, end_date, source_url (every row traceable to a real
-    AMC factsheet/SID — never inferred)."""
-    if not os.path.exists(path):
-        return None
-    try:
-        return pd.read_csv(path, parse_dates=["start_date", "end_date"])
-    except Exception:  # noqa: BLE001 — a malformed hand-edited CSV must not crash a run
-        return None
+    dormant until the user populates it.
+
+    Delegates to mf_managers, which validates the file rather than trusting it. The
+    three lines this replaced swallowed EVERY exception into `return None`, so a
+    malformed hand-edited CSV was indistinguishable from an absent one and presented
+    as "dormant" forever. Validation issues are logged here; a broken file yields an
+    EMPTY frame (rules produce nothing) rather than None (rules never ran), and the
+    log line is the only thing that tells the two apart."""
+    rows, issues = mf_managers.load(Path(path))
+    for i in issues:
+        (LOGGER.error if i.severity == mf_managers.SEVERITY_ERROR else LOGGER.warning)(
+            "managers.csv %s", i)
+    return rows
 
 
 def _tenure_alert(managers_df: Optional[pd.DataFrame], dossier: "FundDossier") -> Optional[Alert]:
-    if managers_df is None:
+    # Resolved by latest start_date, NOT by `rows.iloc[-1]` as this once was — that
+    # made the current manager depend on the order a human typed the file, so history
+    # entered oldest-last silently reported a departed manager as the incumbent. Same
+    # defect class as the resolver's `hit.iloc[0]` collision.
+    row = mf_managers.current_manager(managers_df, dossier.scheme_name)
+    if row is None or pd.isna(row.get("start_date")):
         return None
-    rows = managers_df[managers_df["scheme_name"].str.lower() == dossier.scheme_name.lower()]
-    if rows.empty or pd.isna(rows.iloc[-1].get("start_date")):
-        return None
-    row = rows.iloc[-1]
     tenure_days = (pd.Timestamp.today().normalize() - row["start_date"]).days
     if tenure_days < 365:
         return Alert("MANAGER_TENURE_SHORT", AlertSeverity.INFO.value, "manager",
@@ -565,20 +574,12 @@ def _news_alerts(sentiment: Dict[str, Any]) -> List[Alert]:
 # ==============================================================================
 def _manager_prior_funds(managers_df: Optional[pd.DataFrame], manager: str,
                          exclude_scheme: str) -> Dict[str, str]:
-    """Other schemes this manager has run, per the hand-maintained managers.csv —
-    skill attaches to the manager, not this (as-yet-unpriced) scheme code."""
-    if managers_df is None:
-        return {}
-    rows = managers_df[(managers_df["manager_name"].str.lower() == manager.lower()) &
-                       (managers_df["scheme_name"].str.lower() != exclude_scheme.lower())]
-    out: Dict[str, str] = {}
-    for _, row in rows.iterrows():
-        start = row["start_date"].date() if pd.notna(row.get("start_date")) else None
-        if start is None:
-            continue
-        end = row["end_date"].date() if pd.notna(row.get("end_date")) else "present"
-        out[row["scheme_name"]] = f"managed {start}–{end}"
-    return out
+    """Other schemes this manager has run, per the hand-sourced managers.csv —
+    skill attaches to the manager, not this (as-yet-unpriced) scheme code.
+
+    Delegates to mf_managers so the matching is whitespace/case tolerant the same way
+    the tenure lookup is; a name typed with a trailing space used to miss silently."""
+    return mf_managers.prior_funds(managers_df, manager, exclude_scheme)
 
 
 def _nfo(dossier: "FundDossier", gate: EligibilityGate, assessor: NFOAssessor,

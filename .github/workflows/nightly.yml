@@ -123,9 +123,11 @@ jobs:
             echo "push attempt $i failed; retrying"; sleep $((i * 5))
           done
 
-      # mf_cache/ is gitignored, so the app-facing artifact ships as a build artifact.
-      # (For a stable app-fetchable URL, publish it to a GitHub Release instead — see
-      # docs/ci.md.)
+      # mf_cache/ is gitignored, so the app-facing artifact also ships as a build
+      # artifact — auth-gated, but it is the 30-day HISTORY the rolling Release below
+      # deliberately does not keep. if: always() so a run that failed a gate is still
+      # diagnosable; note this uploads every artifact in the restored cache dir, not
+      # just this run's, which is why the Release step selects the newest explicitly.
       - name: Upload the app artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -134,3 +136,83 @@ jobs:
           path: mf_cache/artifacts/*.json.gz
           if-no-files-found: warn
           retention-days: 30
+
+      # THE APP-FACING URL. A build artifact's download link is per-run and auth-gated,
+      # so the app can never fetch one unattended. A Release asset on a rolling tag is a
+      # URL that does not move:
+      #   https://github.com/<owner>/<repo>/releases/download/latest-artifact/mf_artifact_latest.json.gz
+      #
+      # STABLE IS NOT THE SAME AS PUBLIC, and this repo is private: that link 404s for an
+      # anonymous client and only becomes fetchable if the repo goes public (or the asset
+      # is mirrored somewhere public). Publishing here is still right — it is the
+      # canonical store, and it needs no change whichever way that call goes — but the
+      # app integration is NOT unblocked by this step alone. See docs/ci.md.
+      #
+      # Three deliberate choices:
+      #  - NOT `if: always()`. This step runs only if the emit step exited 0, so a batch
+      #    that tripped --max-error-rate or --max-anchor-age-days can never overwrite a
+      #    good artifact at the URL the app trusts. A stale-but-valid artifact beats a
+      #    fresh broken one; the failed run is still inspectable as the build artifact.
+      #  - STABLE ASSET NAME. mf_artifact.py stamps its filename with a timestamp, which
+      #    would move the URL every night. The asset is renamed to a fixed name and the
+      #    real generated_at/model_id live INSIDE the payload, where the app already reads
+      #    them. Selected by mtime (`ls -t`), not by glob order: mf_cache/artifacts/ is
+      #    restored from actions/cache and holds every previous run's output too.
+      #  - `latest.json` SIDECAR so the app can check freshness without pulling the gz.
+      #    Derived from the artifact itself (never hand-maintained) and carries the
+      #    sha256 of the exact asset published beside it.
+      #  - DEFAULT BRANCH ONLY. A workflow_dispatch from a test branch must not be able
+      #    to overwrite the URL the app trusts. success() is spelled out rather than
+      #    left implicit, so the gate is not resting on an Actions subtlety.
+      #
+      # gh is preinstalled on GitHub-hosted runners and authenticates with the built-in
+      # GITHUB_TOKEN — no third-party action and no secret, matching the rest of this
+      # workflow. `contents: write` (declared above) is what permits the release edit.
+      - name: Publish the artifact to the rolling Release
+        if: success() && github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: latest-artifact
+        run: |
+          set -euo pipefail
+          SRC="$(ls -t mf_cache/artifacts/*.json.gz 2>/dev/null | head -1 || true)"
+          if [ -z "${SRC:-}" ]; then
+            echo "::error::no artifact to publish — the emit step wrote nothing"
+            exit 1
+          fi
+          echo "publishing $SRC"
+          mkdir -p dist
+          cp "$SRC" dist/mf_artifact_latest.json.gz
+
+          # The sidecar is READ OUT of the artifact, so it can never disagree with it.
+          python - <<'PY'
+          import gzip, hashlib, json, pathlib
+          asset = pathlib.Path("dist/mf_artifact_latest.json.gz")
+          art = json.loads(gzip.decompress(asset.read_bytes()))
+          cov = art.get("coverage") or {}
+          pathlib.Path("dist/latest.json").write_text(json.dumps({
+              "artifact_version": art.get("artifact_version"),
+              "generated_at":     art.get("generated_at"),
+              "model_id":         art.get("model_id"),
+              "pipeline_sha":     art.get("pipeline_sha"),
+              "n_funds":          cov.get("n_ok"),
+              "n_errors":         cov.get("n_errors"),
+              "asset":            asset.name,
+              "sha256":           hashlib.sha256(asset.read_bytes()).hexdigest(),
+              "size_bytes":       asset.stat().st_size,
+          }, indent=2) + "\n")
+          print(pathlib.Path("dist/latest.json").read_text())
+          PY
+
+          # Create the release once; every later run just replaces the two assets on it.
+          # --clobber is what makes the tag "rolling" — same URL, new bytes.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Latest batch artifact" \
+              --notes "Rolling pointer to the newest nightly batch artifact. Assets are replaced in place, so the download URLs are stable; the payload's own generated_at / model_id identify the run. Per-run history lives in the 30-day build artifacts." \
+              --latest=false
+          fi
+          gh release upload "$TAG" \
+            dist/mf_artifact_latest.json.gz \
+            dist/latest.json \
+            --clobber

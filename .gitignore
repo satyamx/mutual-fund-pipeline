@@ -8,3 +8,13 @@ mf_cache/
 
 # Local tooling
 .claude/
+
+# Secrets. ANTHROPIC_API_KEY is the only key this system takes, and it is read from
+# the environment (mf_datasources.py) — never committed, never defaulted in code.
+# But the setup path literally tells you to "paste key in .env" (mf_datasources.py's
+# health table) and to `export ANTHROPIC_API_KEY=sk-ant-...` (bootstrap.py), and an
+# untracked .env is one `git add -A` away from being a committed one. That was a
+# private-repo footgun; in a PUBLIC repo it is a published key. Ignore it explicitly.
+.env
+.env.*
+!.env.example
