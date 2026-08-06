@@ -2,7 +2,7 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-08-06: MF repo HEAD = `544be59`+, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only). `overrides/_sector_worklist.csv` is now git-tracked (205 blank rows — blocker #2).**
+**As of 2026-08-06 (end of session): MF repo HEAD = `b54bd44` on branch `claude/what-next-4tomhs`, pushed. NOT yet merged to `master` — `master` is still at `544be59`, and the nightly CI runs from `master`, so none of this session's five commits are live in CI until that merge happens.** Baseline for the notes below: `544be59`+, in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`) — the MF repo HAS a remote, and it is also the CI deploy path (GitHub Actions). Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only). `overrides/_sector_worklist.csv` is git-tracked (205 blank rows — blocker #2), and `overrides/_sector_proposals.csv` now sits beside it with 142 suggestions awaiting review.
 
 **The clock fix is confirmed working in CI.** Scheduled run `31049875759` (2026-08-05 21:43Z, on `544be59`) was green; the ledger stands at **1,512 rows** with anchors `2026-08-04` ×342 and `2026-08-05` ×6 alongside the historical `2026-07-13` ×1,164. That run itself appended 0 rows and committed nothing — correct, since NAV had not advanced since the 18:52 dispatch three hours earlier. Zero-appended is only alarming if it repeats *across days*, which is exactly what `--max-anchor-age-days 7` now fails on.
 
@@ -74,7 +74,14 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 - **Rule:** `SELL` if (any critical breach OR any regulatory red_flag OR reds≥3 OR (reds>greens AND screen_score red)); else `BUY` if (greens≥3 AND reds==0 AND screen_score≠red); else `HOLD`.
 - Return adds: `verdict, verdict_color, verdict_caveat, metric_colors`. Thresholds are TUNABLE defaults — revisit once the cohort percentile is wired into the verdict.
 
-## Done this session (MF commits)
+## Done 2026-08-06 (session `claude/what-next-4tomhs`, 5 commits — pushed, NOT merged to `master`)
+- **`40d9cfd` — the batch artifact publishes to a rolling GitHub Release.** Fixed asset name (`mf_artifact_latest.json.gz`) so the URL stops moving nightly, plus a `latest.json` sidecar *derived from the payload* (version / `generated_at` / `model_id` / sha256) so the app can check freshness without downloading. Gated on `success()` **and** `master`: a batch that trips `--max-error-rate` or `--max-anchor-age-days` can never overwrite a good artifact, and a dispatch from a test branch cannot publish. Uses preinstalled `gh` + the built-in token — no third-party action, no new secret. Verified locally against a stubbed `gh` on all three paths (newest-by-mtime selection, no-artifact failure, create-once-then-clobber). **Discovered while documenting it: the repo is private, so the URL is stable but NOT public** — the doc says so plainly rather than shipping the overclaim.
+- **`c4fdd0d` — `.env` ignored before any visibility flip.** Full 58-commit history audit: no credential anywhere, nothing ever committed-then-deleted, the user's email only in commit metadata. The one live footgun was that `.gitignore` had no `.env` rule while the setup path literally says *"paste key in .env"*.
+- **`621c1a5` — sector proposer** (`mf_overrides.py --propose`). 205 blocked → **142 proposed / 63 for a human**. Details and both of its bugs are in blocker #2 below.
+- **`110cbc4` — the capstone docs.** `docs/what_this_is.md`, `docs/retrospective.md`, `docs/integration_plan.md`. The integration schema mapping was written from memory then checked field-by-field against `mf_artifact.py`, which caught three errors before commit: the verdict fields are nested under `signal_a` not top-level, the alerts key is `alerts_b` not `alerts`, and `data_flags` (machine-branchable) is a separate list from `coverage_flags` (human-readable). All 14 documented fields verified to exist.
+- **`b54bd44` — Phase C scaffold** (`mf_managers.py`) + two real defects fixed in the code it replaced. See blocker #5.
+
+## Done in earlier sessions (MF commits)
 - `b44a029` — `build_cohort_artifact` (mf_model.py) writes the FULL cohort inference payload → `mf_cache/phase_b/model_artifact_cohort.json`; NEW `mf_infer.py` scores a live fund with numpy alone (no sklearn). `python mf_infer.py --selftest` proves numpy == sklearn to 2e-14.
 - `31d42a2` — killed the surfaced composite; `RecommendationEngine` returns an honest SCREEN (facts + sub-scores + `[DATA GAP]` flags); `ProfileRiskScorerAgent` now returns a `facts` dict; compliance inflation gone (no numeric compliance score). print_report rewritten.
 - `29a633a` — restored the tri-colour verdict honestly (rule over coloured metrics); fixed a real bug — regulatory red-flag matcher used naive substring ("ban" fired on "bank margins" → spurious SELL), now word-boundary matched.
@@ -95,8 +102,27 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 - **Wired into the app artifact** (`mf_artifact.py`): new top-level **`evaluation{}`** block (status/headline/metrics[]/outcome/disclaimer), computed every batch run via `mf_eval.build_report_from_ledger`. `build_artifact` gained a `realizations_path` param (threaded through, selftest kept hermetic with a tmp path). Artifact CONTRACT docstring + selftest updated (asserts outcome_skill PENDING and that a pending outcome never reddens the panel). **App-side contract documented** in `docs/app_evaluation_contract.md` — schema, the four metrics + thresholds, the mandatory "health ≠ accuracy" disclaimer the UI must show, and suggested rendering. Mirror the UI decisions into Hisaab Kitaab `DECISIONS.md` when integration starts.
 - Hisaab Kitaab `DECISIONS.md`: `f99fa96` (integration contract) + `9885565` (verdict amendment).
 
-## To-do (ordered; #1–#8b and #10 are DONE, and blockers #4 and #11 were resolved on 2026-08-05/04 — do NOT read the header below as live work)
-**The build to-do list is exhausted.** What remains is not a next step in the pipeline; it is a fork, and the four live items are: **(a)** sector curation, blocker #2 — the only thing left that grows the product (205 funds, 367 → 572 ceiling), and it forces a `phase_b_v4` retrain with a fresh once-only holdout because widening redefines `y_cohort_q1` again; **(b)** the app handoff — the artifact now publishes to a rolling GitHub Release, so the URL no longer moves nightly, but **this repo is private and a private repo's release assets are not anonymously fetchable**, so the app still cannot read it; the remaining call is public repo vs. public mirror repo vs. object storage, written up in `docs/ci.md`; **(c)** Phase C, still hard-blocked on hand-sourced `managers.csv` (#5) and `disclosures/` (#6), neither of which any code in this repo can clear; **(d)** the capstone docs.
+## To-do — READ THIS FIRST
+**The numbered list below is a DONE ARCHIVE (#1–#8b, #10). Nothing in it is live work.** As of 2026-08-06 every buildable item in this project is finished. What is left is four decisions and two datasets, and **not one of them can be cleared by writing code** — which is the single most important thing for a new session to understand before it goes looking for something to implement.
+
+### The four open decisions (owner only)
+| # | Decision | Why code can't settle it |
+|---|---|---|
+| **D1** | **Artifact access.** The nightly publishes to a rolling `latest-artifact` Release, so the URL is stable — but **this repo is private and a private repo's release assets are not anonymously fetchable**, so the app still cannot read it. Choose: make the repo public / mirror to a public artifacts repo (costs one PAT secret, the pipeline's first) / object storage. Written up in `docs/ci.md`. | **Blocks the ENTIRE app integration at milestone 0.** A security audit of all 58 commits found no credential anywhere (`c4fdd0d`); the three non-security caveats — commit-metadata email, publishing the hand-curated manifest + ledger, yfinance/NSE redistribution terms on `benchmarks/` — are judgement calls, not findings. |
+| **D2** | **Review the 142 sector proposals** in `overrides/_sector_proposals.csv`, then move accepted rows to `universe_overrides.csv` with a real `source_url`. | Proposals are read off scheme names and are deliberately never auto-applied. The proposer was **wrong about 24 funds** on its first real run. |
+| **D3** | **The 63 remaining blanks** — Services (4), Conglomerate (3), Rural (2) are real themes with **no existing sector to join**, and a new sector is only viable at `COHORT_MIN_SIZE`=4+. | Creating a cohort is a product decision. A regex must not mint one. |
+| **D4** | **Profile-specific verdicts** (`docs/integration_plan.md`, milestone 6): re-deriving a verdict on-device means reimplementing the verdict rule in Dart, where it can drift from the Python. The alternative is shipping facts + colours and letting the app apply the rule. | Settle it **before milestone 2 hardens**. |
+
+### The two datasets nothing here can fetch
+- **`mf_cache/managers.csv`** (blocker #5) — scaffold now built (`mf_managers.py`), data still hand-sourced from AMC factsheets/SIDs. Start with `--template`.
+- **`mf_cache/disclosures/`** (blocker #6) — monthly per-AMC portfolio XLSX. Code proven on mock data; inert on every real fund until files land.
+
+### And one thing that IS mechanical
+**Merge `claude/what-next-4tomhs` into `master`.** The nightly runs from `master`, so this session's five commits — including the Release-publishing step — are **not live in CI** until then.
+
+> **If D2 is accepted, budget for a retrain.** Widening the manifest redefines `y_cohort_q1` over a different peer set, exactly as 136 → 367 did (AUC 0.578 → 0.558, and the two numbers were never comparable). That means `phase_b_v4`, a fresh once-only holdout committed to in advance, and a `mf_model.MODEL_VERSION` bump so the ledger can tell the fits apart.
+
+### Archive of completed build items
 1. ✅ Serialize cohort inference payload (`b44a029`) + wire `cohort_q1` percentile into System A's output (`mf_live_score.py`, this session) — DONE, no longer blocked.
 2. ✅ Kill composite → honest SCREEN + tri-colour verdict (`31d42a2`, `29a633a`).
 3. ✅ **Sentinel alert engine built + wired** (`mf_sentinel.py` new, wired into `MasterOrchestrator`). Typed alert registry (compliance breach=HIGH; factor thresholds e.g. downside_capture>1.15, drawdown-vs-COVID, expense outlier; manager MACS/tenure red flags — each citing evidence values), `NFOAssessor` dossier wired as B's output including manager cross-fund proxy lookup from `mf_cache/managers.csv`. Alert severity thresholds shipped as sensible defaults (documented as tunable constants at the top of `mf_sentinel.py`) — proceeded per user's earlier call, still open to revisit. `FACTOR_MAP` in `mf_pipeline.ScoringEngine` kept (research-only backtest infra), not deleted — see product-shape note above.
@@ -116,7 +142,7 @@ Metric coloring `_band(x, good, bad, higher_better)` → green/red/amber, grey i
 
 **Then:** Phase C (evaluate NFOs JM Multi Asset + TRUSTMF Large & Mid via B's dossier) → Step 3 (manager-proxy dossiers, subsumed into NFOAssessor) → ~~capstone~~ **✅ capstone DONE 2026-08-06**: `docs/what_this_is.md` (layman summary + the four things to be sceptical about), `docs/retrospective.md` (what the build learned — every serious bug here was a *silent success*), `docs/integration_plan.md` (end-to-end app plan, schema mapping verified field-by-field against `mf_artifact.py`, 6 milestones). App integration itself still deferred, and now blocked at milestone 0 on the artifact-access decision.
 
-## Known gaps / blockers (as of `50324ff`)
+## Known gaps / blockers (updated 2026-08-06 at `b54bd44`)
 Ordered by what actually blocks progress, with who can clear it.
 
 1. ✅ **RESOLVED 2026-08-03 — CI runs, is green, and both crons are now ENABLED.** It took three runs and each failure was a different lesson:
