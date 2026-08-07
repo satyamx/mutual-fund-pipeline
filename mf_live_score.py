@@ -79,7 +79,23 @@ STALE_MAX_DAYS = 30
 # the trained sample), because the two demand opposite responses from the caller —
 # one is "never ask again", the other is "refresh and retry".
 _STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE",
-             "OUT_OF_TRAINING_UNIVERSE", "SECTOR_UNRESOLVED")
+             "OUT_OF_TRAINING_UNIVERSE", "SECTOR_UNRESOLVED", "INSUFFICIENT_HISTORY")
+
+# INSUFFICIENT_HISTORY: the fund has under a year of NAV, so `has_1y` is 0 and
+# almost every substantive feature falls back to a training median.
+#
+# The threshold is STRUCTURAL, not a tuned fraction, and it was measured on the
+# phase_b_v4 training rows rather than guessed: rows with has_1y==0 average
+# **76.8%** of their feature vector imputed, against **22.4%** for has_1y==1. There
+# is no comparable gap anywhere else in the vector, which is why this is the cut.
+#
+# Note what this gate does NOT claim. Such rows are perfectly in-distribution — the
+# model was fitted on 1,821 of them (6.6%) and can happily emit a number. The
+# objection is that the number is ~77% training prior: it is a statement about the
+# average fund in the cohort, wearing the costume of a measurement of THIS fund.
+# Under the honesty invariant that is exactly the case where a coverage flag beats
+# a probability, so it is refused rather than surfaced with a caveat nobody reads.
+NO_HISTORY_FEATURE = "has_1y"
 
 # Categories whose cohort is keyed on SECTOR, not on the category alone:
 # PeerProxyResolver._group_key returns ("sector", row["sector"]) for these. The
@@ -360,6 +376,22 @@ def score_live(code: str, *,
               if not (isinstance(target_features.get(c), (int, float))
                       and np.isfinite(target_features.get(c)))]
 
+    # Under a year of NAV -> ~77% of the vector is a training median, so the
+    # "probability" would describe the average cohort member, not this fund. See
+    # NO_HISTORY_FEATURE above for why this cut and not a tuned imputed-fraction.
+    # Checked AFTER the cohort gates so the more specific refusal wins when both
+    # apply, and after `imputed` is built so the flag can report the real cost.
+    _hist = target_features.get(NO_HISTORY_FEATURE)
+    if isinstance(_hist, (int, float)) and np.isfinite(_hist) and float(_hist) == 0.0:
+        return _gap_result("INSUFFICIENT_HISTORY", target, cohort_key=str(cohort_key),
+                           cohort_n=len(cohort_present), universe_n=len(panel),
+                           anchor=str(t.date()), staleness_days=staleness_days,
+                           imputed_features=imputed,
+                           note=f"Under 1 year of NAV ({NO_HISTORY_FEATURE}=0): "
+                                f"{len(imputed)} of {len(inferencer.features)} features fall "
+                                f"back to a training median, so a probability here would "
+                                f"describe the average cohort member, not this fund.")
+
     # Derived from the artifact, never hardcoded: this string reaches the app, and a
     # literal here went stale the moment the model was refitted (v1's 0.578 would
     # have been shipped alongside v2's probabilities).
@@ -459,6 +491,36 @@ def _selftest() -> None:
                     today=T + pd.Timedelta(days=45))
     assert res["status"] == "STALE_NAV", f"FAIL: expected STALE_NAV, got {res['status']}"
     print(f"[selftest] STALE_NAV gate (staleness={res['staleness_days']}d > {STALE_MAX_DAYS}d): PASS")
+
+    # ---- INSUFFICIENT_HISTORY gate -------------------------------------------
+    # Built by truncating the TARGET's NAV to its last ~6 months while leaving every
+    # cohort peer intact, so the cohort stays healthy and this gate is the only one
+    # that can fire — otherwise a passing THIN_COHORT would mask it and the test
+    # would pass for the wrong reason.
+    short = dict(nav_panel)          # shallow: only the target's series is replaced
+    own = short[target_code].dropna()
+    # Window on T, not on the series end: the anchor is min(last_nav, today)≈T, and
+    # truncating relative to the (2026) series end would leave the fund with no NAV
+    # at T at all — which reads as STALE_NAV and would test the wrong gate.
+    own = own[own.index <= T]
+    if len(own) > 200:
+        short[target_code] = own[own.index >= T - pd.Timedelta(days=180)]
+        res = score_live(target_code, manifest=manifest, nav_panel=short, inferencer=inf,
+                         today=T + pd.Timedelta(days=1))
+        assert res["status"] == "INSUFFICIENT_HISTORY", \
+            f"FAIL: expected INSUFFICIENT_HISTORY, got {res['status']}"
+        assert res["probability"] is None, "FAIL: a refused fund must carry no probability"
+        assert res["cohort_n"] >= COHORT_MIN_SIZE, \
+            "FAIL: cohort was thin, so this asserted the wrong gate"
+        # Teeth: the SAME fund on its full history must still score, or the gate is
+        # just rejecting everything and the assertion above proves nothing.
+        ok = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
+                        today=T + pd.Timedelta(days=1))
+        assert ok["status"] == "OK", \
+            f"FAIL: gate has no teeth — full history also refused ({ok['status']})"
+        print(f"[selftest] INSUFFICIENT_HISTORY gate ({len(res['imputed_features'])} features "
+              f"imputed, cohort_n={res['cohort_n']} healthy; same fund on full history "
+              f"still OK): PASS")
 
     res = score_live("NOT-A-REAL-CODE", manifest=manifest, nav_panel=nav_panel,
                     inferencer=inf, today=T)

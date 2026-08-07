@@ -49,7 +49,8 @@ design; extended here with the restored verdict + its default-profile stamp):
                       verdict_branches{score_red{}, score_not_red{}},
                       screen_score_red_below, weight_matrix, utility_score,
                       cohort_status, cohort_q1_prob, cohort_percentile,
-                      cohort_n, signal_context},
+                      cohort_n, signal_context,
+                      n_imputed, imputed_fraction, imputed_features[]},
              alerts_b[], nfo_dossier, data_flags[], lock{type, exit_load_days}
 
 monitoring{} (to-do #6, mf_ledger.py): every OK cohort_signal this run is
@@ -99,6 +100,7 @@ DATA_FLAG_EXPENSE_UNAVAILABLE = "EXPENSE_UNAVAILABLE"
 DATA_FLAG_NOT_IN_UNIVERSE = "NOT_IN_UNIVERSE"
 DATA_FLAG_OUT_OF_TRAINING_UNIVERSE = "OUT_OF_TRAINING_UNIVERSE"
 DATA_FLAG_SECTOR_UNRESOLVED = "SECTOR_UNRESOLVED"
+DATA_FLAG_INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
 DATA_FLAG_STALE_NAV = "STALE_NAV"
 DATA_FLAG_SHORT_HISTORY = "SHORT_HISTORY"
 DATA_FLAG_SECTOR_UNMAPPED = "SECTOR_UNMAPPED"
@@ -128,6 +130,7 @@ _COHORT_STATUS_FLAG = {
     "NOT_IN_UNIVERSE": DATA_FLAG_NOT_IN_UNIVERSE,
     "OUT_OF_TRAINING_UNIVERSE": DATA_FLAG_OUT_OF_TRAINING_UNIVERSE,
     "SECTOR_UNRESOLVED": DATA_FLAG_SECTOR_UNRESOLVED,
+    "INSUFFICIENT_HISTORY": DATA_FLAG_INSUFFICIENT_HISTORY,
 }
 
 
@@ -258,7 +261,19 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             cohort_q1_prob=_finite_or_none(cs["probability"]) if cs else None,
             cohort_percentile=_finite_or_none(cs["cohort_percentile"]) if cs else None,
             cohort_n=cs["cohort_n"] if cs else None,
-            signal_context=_json_safe(cs["signal_context"]) if cs else None),
+            signal_context=_json_safe(cs["signal_context"]) if cs else None,
+            # HOW MUCH OF THIS SCORE IS ACTUALLY ABOUT THIS FUND. score_live has
+            # always computed `imputed_features`, and this module dropped it — so a
+            # fund whose vector was 60% training-median looked identical to a fully
+            # measured one. The INSUFFICIENT_HISTORY gate only refuses the extreme
+            # (under 1y of NAV, ~77% imputed); everything between that and "fully
+            # measured" is a real gradient the app could not previously see.
+            # Shipped as a count + fraction, not just the list, so the UI can grade
+            # confidence without knowing what any individual feature means.
+            n_imputed=len(cs["imputed_features"]) if cs else None,
+            imputed_fraction=(round(len(cs["imputed_features"]) / len(cs["features"]), 4)
+                              if cs and cs.get("features") else None),
+            imputed_features=list(cs["imputed_features"]) if cs else None),
         # Nested payloads this module doesn't enumerate leaf-by-leaf — guarded
         # wholesale so one NaN can't take out the entire batch write. See _json_safe.
         alerts_b=_json_safe([dataclasses.asdict(a) for a in sr.alerts]),

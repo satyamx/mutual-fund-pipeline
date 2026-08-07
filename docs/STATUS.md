@@ -14,21 +14,35 @@ Repo-tracked mirror of the build status, so a `git push` hands off the full pict
 - **Live cohort scoring (`mf_live_score.py` → `score_live()`)** = BUILT + wired into `MasterOrchestrator.evaluate()` this session (to-do #4 + the remainder of #1). Scores the trained `cohort_q1` elastic-net model at ONE anchor (the target fund's own latest NAV date, capped at the orchestrator's frozen `TODAY`) instead of the full 144-anchor training grid — reusing `mf_features.assemble_panel` verbatim over a one-anchor, universe-wide panel (NOT cohort-restricted — see module docstring for why that would silently skew the z-score inputs). Honesty gates: `NOT_IN_UNIVERSE` / `STALE_NAV` (>30d) / `THIN_COHORT` (<4 live cohort peers) always beat a number; `OK` carries `probability` + `cohort_percentile` + `signal_context` (holdout AUC/base rate) + `imputed_features`, always labelled a weak supporting datapoint. Verified via `--selftest`: the live one-anchor panel reproduces `features.parquet` exactly at a historical anchor (feature parity), predictions match the shipped artifact bit-for-bit (prediction parity), and hard-truncating post-anchor NAV data doesn't change the live panel (anti-lookahead on the live code path specifically, on top of `mf_features.py`'s own selftest). Isolated in its own try/except in `evaluate()` — a bug here degrades to a coverage flag, never discards an otherwise-complete evaluation.
 - Honesty invariant: HOLD is the default under thin evidence; a hard compliance breach forces SELL; BUY carries a "manager skill & holdings unverified" caveat; missing data = coverage flag, never a pass. The only OOS-validated signal is the within-cohort `cohort_q1` model — **`phase_b_v4` (2026-08-06): holdout AUC 0.541, lift 1.39x, on an effective n of 135. Weak.** `phase_b_v2`/`v2_1` are retired, see `ledger/superseded_models.json`.
 
-## The 2026-08-06 retrain — `phase_b_v3` → `phase_b_v4` (D2+D3 widening)
+## The 2026-08-06 retrains — `phase_b_v3` → `v4` → `v5`
 
-Manifest **367 → 556** after the 189 curated-sector funds landed. Holdout re-forced
-exactly once, with the outcome committed to in advance.
+Two fits in one session: **v4** after D2+D3 added 189 curated-sector funds (367 → 556),
+then **v5** after the `International/Global` sector added 9 foreign-equity funds
+(556 → 565). Each holdout was forced exactly once, outcome committed to in advance.
 
-| | `phase_b_v3` | `phase_b_v4` |
-|---|---|---|
-| manifest | 367 | **556** |
-| cohort rows | 25,478 | **27,598** |
-| holdout n | 3,332 | **4,048** |
-| **effective n** | — | **135** |
-| base rate | 0.286 | **0.274** |
-| **holdout AUC** | 0.558 | **0.541** |
-| **lift** | 1.10x | **1.39x** |
-| CPCV mean AUC | — | **0.524** (B2 = 0.474, below chance) |
+| | `phase_b_v3` | `phase_b_v4` | `phase_b_v5` |
+|---|---|---|---|
+| manifest | 367 | 556 | **565** |
+| cohort rows | 25,478 | 27,598 | **28,434** |
+| holdout n | 3,332 | 4,048 | **4,132** |
+| **effective n** | — | 135 | **138** |
+| base rate | 0.286 | 0.274 | **0.275** |
+| **holdout AUC** | 0.558 | 0.541 | **0.537** |
+| **lift** | 1.10x | 1.39x | **1.44x** |
+| CPCV mean AUC | — | 0.524 | **0.517** |
+
+**Read the AUC column as noise, not as a decline.** Effective n is ~138 — the
+3y-forward windows overlap heavily, so 4,132 rows are nowhere near 4,132 independent
+observations. At that sample size 0.558 / 0.541 / 0.537 are mutually indistinguishable
+and none is convincingly above chance. The lift column moving the other way (1.10 →
+1.39 → 1.44) makes the same point from the opposite direction: **if these numbers
+tracked real skill they would not disagree about its direction.**
+
+**Process note worth keeping: two forced holdouts in one session was avoidable.**
+Each is individually legitimate — v4 and v5 measure genuinely different populations, so
+reusing a stamp would have been the dishonest option. But batching the foreign-fund
+curation with D2+D3 would have cost ONE holdout instead of two. Curate first, retrain
+once.
 
 **AUC down, lift up — and neither movement should be read as skill changing.** The two
 columns are not comparable, for the same reason v1→v2 wasn't: widening the manifest
@@ -44,14 +58,37 @@ v4 saw the 189 new funds at those anchors and v3 never had them in its manifest.
 clean version needs v3's holdout-*fold* model, which was never persisted. **So there is
 no evidence that v4 is better than v3, only that it covers more funds.**
 
-**What is solid:** with **effective n = 135** (overlapping 3y windows, not 4,048
-independent rows), the gap between 0.541 and 0.558 sits well inside noise, and neither
-is convincingly above chance. CPCV mean 0.524 with one block below chance says the same
-thing. **The retrain bought coverage, not skill.** That was true at v1, v2 and v3, and
-it is true now.
+**What is solid:** the retrains bought **coverage, not skill**. That was true at v1, v2
+and v3, and it is true now.
 
-Calibration guard from v3 holds: min probability **0.211**, every isotonic block ≥ 30
-observations (thinnest 31), numpy inference reproduces sklearn to 4.55e-15.
+Calibration guard from v3 holds at v5: min probability **0.237**, every isotonic block
+≥ 30 observations (thinnest 45), numpy inference reproduces sklearn to 1.28e-15.
+
+## The imputation gate — `INSUFFICIENT_HISTORY` (2026-08-06)
+
+A fund with almost no NAV history used to score `OK` on a probability that was
+overwhelmingly the training prior. The fix is in two halves, and **measurement changed
+what the fix should be** — the original framing ("heavily-imputed inputs are
+out-of-distribution") was wrong:
+
+- **The model was TRAINED on rows with up to 82.5% imputed features**, and 22.5% of its
+  training rows exceed 50%. So a gate calibrated to "beyond what training saw" would sit
+  near 82% and refuse almost nothing. Heavy imputation is not out-of-distribution here.
+- **The cut is structural, not a tuned fraction.** Rows with `has_1y == 0` average
+  **76.8%** of the vector imputed; `has_1y == 1` rows average **22.4%**. There is no
+  comparable gap anywhere else, so `has_1y` is the honest boundary — see
+  `mf_live_score.NO_HISTORY_FEATURE`.
+- **What the gate does NOT claim:** such rows are in-distribution and the model can emit
+  a number. The objection is that the number is ~77% prior — a statement about the
+  average cohort member wearing the costume of a measurement of *this* fund. Under the
+  honesty invariant that is a coverage flag, not a probability.
+
+**The disclosure half was the bigger hole.** `score_live` has always computed
+`imputed_features`, and `mf_artifact` **dropped it entirely** — so a fund whose vector
+was 60% training-median looked identical in the app to a fully measured one. The gate
+only refuses the extreme; everything between it and "fully measured" is a real gradient
+the app could not see. `signal_a` now ships `n_imputed`, `imputed_fraction` and the
+feature list.
 
 ## The 2026-08-05 retrain — `phase_b_v1` → `phase_b_v2` (read this before quoting any AUC)
 The manifest went **136 → 367 funds** and the model was refitted. The headline numbers moved the *wrong* way and that is not a regression:

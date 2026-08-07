@@ -89,7 +89,7 @@ REPORT_PATH = OUT_DIR / "model_report.md"
 #                funds that were previously separated), hence a full bump rather
 #                than a point release. The reported holdout AUC is unaffected:
 #                block_metrics scores p_raw, never the calibrated value.
-MODEL_VERSION = "phase_b_v4"
+MODEL_VERSION = "phase_b_v5"
 
 TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_peer"}
 
