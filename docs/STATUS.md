@@ -12,7 +12,46 @@ Repo-tracked mirror of the build status, so a `git push` hands off the full pict
 - **System A (live, `mf_agent_orchestrator.py` → `RecommendationEngine`)** = the honest SCREEN: raw NAV facts (CAGR/vol/maxDD/Sortino/excess-vs-benchmark) + profile-weighted sub-scores + a **tri-colour 🟢BUY / 🔵HOLD / 🔴SELL verdict**. The verdict is a **transparent RULE over colour-coded metrics + hard compliance gates**, NOT the old below-chance weighted composite (which is deleted). The weighted "screen score" (0–100) is shown only as a banded *supporting datapoint*. Now ALSO carries a `cohort_signal` (see below) as a second, separate supporting datapoint — never folded into the verdict rule.
 - **System B ("Sentinel", `mf_sentinel.py` → `SentinelEngine`)** = BUILT + wired into `MasterOrchestrator.evaluate()`/`print_report()`. Typed compliance/factor/manager ALERTS (INFO/WATCH/HIGH, each with an `AlertBasis` and evidence) + NFO manager-proxy dossier via `NFOAssessor`. Emits alerts/dossiers, never a fund number. `ScoringEngine.FACTOR_MAP` in `mf_pipeline.py` is kept (not deleted) as research-only infra — `mf_factor_backtest.py` still needs it live to regenerate the AUC~0.46 guardrail number Sentinel's `GUARDRAIL_ONLY` alerts cite; the live orchestrator never imports `ScoringEngine`.
 - **Live cohort scoring (`mf_live_score.py` → `score_live()`)** = BUILT + wired into `MasterOrchestrator.evaluate()` this session (to-do #4 + the remainder of #1). Scores the trained `cohort_q1` elastic-net model at ONE anchor (the target fund's own latest NAV date, capped at the orchestrator's frozen `TODAY`) instead of the full 144-anchor training grid — reusing `mf_features.assemble_panel` verbatim over a one-anchor, universe-wide panel (NOT cohort-restricted — see module docstring for why that would silently skew the z-score inputs). Honesty gates: `NOT_IN_UNIVERSE` / `STALE_NAV` (>30d) / `THIN_COHORT` (<4 live cohort peers) always beat a number; `OK` carries `probability` + `cohort_percentile` + `signal_context` (holdout AUC/base rate) + `imputed_features`, always labelled a weak supporting datapoint. Verified via `--selftest`: the live one-anchor panel reproduces `features.parquet` exactly at a historical anchor (feature parity), predictions match the shipped artifact bit-for-bit (prediction parity), and hard-truncating post-anchor NAV data doesn't change the live panel (anti-lookahead on the live code path specifically, on top of `mf_features.py`'s own selftest). Isolated in its own try/except in `evaluate()` — a bug here degrades to a coverage flag, never discards an otherwise-complete evaluation.
-- Honesty invariant: HOLD is the default under thin evidence; a hard compliance breach forces SELL; BUY carries a "manager skill & holdings unverified" caveat; missing data = coverage flag, never a pass. The only OOS-validated signal is the within-cohort `cohort_q1` model — **`phase_b_v3` (2026-08-05): holdout AUC ~0.558, lift ~1.10x, weak**. `phase_b_v2`/`v2_1` are retired, see `ledger/superseded_models.json`.
+- Honesty invariant: HOLD is the default under thin evidence; a hard compliance breach forces SELL; BUY carries a "manager skill & holdings unverified" caveat; missing data = coverage flag, never a pass. The only OOS-validated signal is the within-cohort `cohort_q1` model — **`phase_b_v4` (2026-08-06): holdout AUC 0.541, lift 1.39x, on an effective n of 135. Weak.** `phase_b_v2`/`v2_1` are retired, see `ledger/superseded_models.json`.
+
+## The 2026-08-06 retrain — `phase_b_v3` → `phase_b_v4` (D2+D3 widening)
+
+Manifest **367 → 556** after the 189 curated-sector funds landed. Holdout re-forced
+exactly once, with the outcome committed to in advance.
+
+| | `phase_b_v3` | `phase_b_v4` |
+|---|---|---|
+| manifest | 367 | **556** |
+| cohort rows | 25,478 | **27,598** |
+| holdout n | 3,332 | **4,048** |
+| **effective n** | — | **135** |
+| base rate | 0.286 | **0.274** |
+| **holdout AUC** | 0.558 | **0.541** |
+| **lift** | 1.10x | **1.39x** |
+| CPCV mean AUC | — | **0.524** (B2 = 0.474, below chance) |
+
+**AUC down, lift up — and neither movement should be read as skill changing.** The two
+columns are not comparable, for the same reason v1→v2 wasn't: widening the manifest
+redefines `y_cohort_q1` over a different peer set, so v3's number describes a different
+target on a different population.
+
+**The like-for-like diagnostic that settled v1→v2 is NOT available here, and the
+attempt at one was contaminated — recorded so nobody repeats it.** Scoring both
+artifacts on the identical 4,048 test rows gave v3 AUC 0.5286 / lift 0.96x against v4
+AUC 0.5283 / lift 1.30x. That comparison is invalid: `build_cohort_artifact` fits on
+**all** anchors, so the test rows are in-sample for both — and asymmetrically so, since
+v4 saw the 189 new funds at those anchors and v3 never had them in its manifest. A
+clean version needs v3's holdout-*fold* model, which was never persisted. **So there is
+no evidence that v4 is better than v3, only that it covers more funds.**
+
+**What is solid:** with **effective n = 135** (overlapping 3y windows, not 4,048
+independent rows), the gap between 0.541 and 0.558 sits well inside noise, and neither
+is convincingly above chance. CPCV mean 0.524 with one block below chance says the same
+thing. **The retrain bought coverage, not skill.** That was true at v1, v2 and v3, and
+it is true now.
+
+Calibration guard from v3 holds: min probability **0.211**, every isotonic block ≥ 30
+observations (thinnest 31), numpy inference reproduces sklearn to 4.55e-15.
 
 ## The 2026-08-05 retrain — `phase_b_v1` → `phase_b_v2` (read this before quoting any AUC)
 The manifest went **136 → 367 funds** and the model was refitted. The headline numbers moved the *wrong* way and that is not a regression:
