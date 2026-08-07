@@ -2,7 +2,7 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-08-07: MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** Hisaab Kitaab repo HEAD = `9885565` (clean, still local-only).
+**As of 2026-08-07: MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** **Hisaab Kitaab: `Projects/MoneyManagerApp/Hisaab Kitaab`, HEAD `a33f628`, clean and pushed — it HAS a remote (`github.com/satyamx/money-manager-app`).** Every earlier note here calling it "clean, still local-only" at HEAD `9885565` was **stale and wrong** (verified 2026-08-07): `9885565` is the `DECISIONS.md` verdict-amendment commit, never the repo head. Check `git -C "<path>" status -sb` before repeating either claim — this is the same trap as the long-standing "the MF repo has no remote" note that cost two sessions.
 
 **Every decision D1–D5 is now closed** (see the table below). Manifest **565 funds**, shipped model **`phase_b_v5`**, `overrides/universe_overrides.csv` **198 curated rows**, and **8 funds** remain without a viable cohort. The repository is **PUBLIC** and the batch artifact is anonymously fetchable.
 
