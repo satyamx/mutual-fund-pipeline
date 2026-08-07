@@ -940,7 +940,13 @@ class ProfileRiskScorerAgent:
         self.v._record("agentC", "utility_scored", True,
                        f"{dossier.scheme_name} U={utility} weights={ {k: round(v,2) for k,v in weights.items()} }")
         return dict(utility_score=utility, sub_scores={k: round(v, 3) for k, v in subs.items()},
-                    weight_matrix={k: round(v, 3) for k, v in weights.items()}, facts=facts,
+                    # 6dp, NOT 3dp: the app recomputes utility from these weights and
+                    # compares it against a HARD cutoff (SCREEN_SCORE_RED). At 3dp the
+                    # worst-case recomputation error is ~0.3 on a 0-100 scale, enough to
+                    # land a fund near the cutoff on the opposite verdict branch from the
+                    # one Python would pick. At 6dp the weights' contribution is ~3e-4 and
+                    # the residual is dominated by sub_scores' own 3dp rounding (~0.05).
+                    weight_matrix={k: round(v, 6) for k, v in weights.items()}, facts=facts,
                     risk_flags=flags, beta=None if not np.isfinite(beta) else round(beta, 2))
 
 

@@ -555,9 +555,13 @@ def _selftest() -> None:
                 if all(v is not None for v in sa["sub_scores"].values()):
                     recomputed = 100.0 * sum(sa["weight_matrix"][k] * sa["sub_scores"][k]
                                              for k in sa["sub_scores"])
-                    # weight_matrix/sub_scores are rounded for transport (3dp), so this
-                    # is a tolerance on ROUNDING, not on agreement.
-                    assert abs(recomputed - sa["utility_score"]) < 0.5, (
+                    # Tolerance is on ROUNDING, not on agreement. With weight_matrix at
+                    # 6dp the residual is sub_scores' 3dp (~0.05) plus utility's own 1dp
+                    # (~0.05), so 0.15 is ~3x the worst case. It was 0.5 while weights
+                    # shipped at 3dp — deliberately tightened, because a loose tolerance
+                    # here would hide exactly the drift near SCREEN_SCORE_RED that the
+                    # precision bump exists to prevent.
+                    assert abs(recomputed - sa["utility_score"]) < 0.15, (
                         f"FAIL: utility formula does not reproduce on {rec['scheme_name']}: "
                         f"recomputed={recomputed:.3f} shipped={sa['utility_score']}")
                     # Weights are a normalised distribution — a Dart port that forgets

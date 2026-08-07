@@ -76,17 +76,39 @@ final b = u < signalA.screenScoreRedBelow ? 'score_red' : 'score_not_red';
 final verdict = signalA.verdictBranches[b];             // verdict + color + caveat
 ```
 
+**The null case is not optional.** A NEWBORN/YOUNG fund has `null` `sub_scores` and a
+`null` `utility_score` (Agent C runs with no eligibility gate, so its scores are
+genuinely undefined, not zero). Dart arithmetic on `null` throws, and coercing to 0
+would fabricate a utility of 0 — below the cutoff, so it would manufacture a
+`score_red` verdict out of missing data, which is a direct honesty-invariant breach.
+
+> **If `utility_score` is null, or ANY `sub_scores` value is null: do not
+> personalise. Render the shipped `signal_a.verdict` with its default-profile
+> disclaimer.** Python degrades the same way — a NaN utility bands as "blue", never
+> "red" — so this fallback matches server behaviour rather than inventing a rule.
+
 **Verify the port on every record rather than trusting it.** When
 `verdict_basis.is_default_profile` is true, `utilityWeights` applied to
 `verdict_basis.profile` must reproduce the shipped `weight_matrix`, and the formula
-must reproduce `utility_score`. If either disagrees, the Dart port has drifted from
-the Python — fail loudly or fall back to the shipped `signal_a.verdict`; do not show a
-number you cannot reproduce. `mf_artifact.py --selftest` asserts both server-side.
+must reproduce `utility_score` **to within ±0.15**. If either disagrees, the Dart port
+has drifted from the Python — fail loudly or fall back to the shipped
+`signal_a.verdict`; do not show a number you cannot reproduce. `mf_artifact.py
+--selftest` asserts both server-side at the same tolerance.
 
-Two things this does **not** change: the weights are a normalised distribution (a port
-that drops the final `/total` silently rescales every utility), and the cutoff is a
-tunable default with no out-of-sample validation — personalising which side of it a
-fund lands on does not make the verdict more correct.
+That tolerance is rounding, not slack: `sub_scores` ship at 3dp and `utility_score` at
+1dp, which bounds the residual near 0.1. `weight_matrix` deliberately ships at **6dp**
+for this reason — at 3dp the error reached ~0.3, enough to put a fund near the cutoff
+on the wrong branch.
+
+Three things this does **not** change:
+
+- The weights are a **normalised distribution** — a port that drops the final `/total`
+  silently rescales every utility.
+- **A fund within ~0.1 of the cutoff is genuinely ambiguous.** The comparison is a hard
+  threshold against a rounded number; don't present a borderline verdict as more
+  precise than it is.
+- The cutoff is a tunable default with **no out-of-sample validation**. Personalising
+  which side of it a fund lands on does not make the verdict more correct.
 
 ### Two cohort statuses that mean opposite things
 

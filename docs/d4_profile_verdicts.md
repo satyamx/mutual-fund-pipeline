@@ -130,3 +130,36 @@ Two caveats worth stating rather than discovering later:
 
 **Settle this before `docs/integration_plan.md` step 3 (Drift load) hardens**, because
 the answer determines whether the app stores one verdict per fund or the two-branch pair.
+
+## Post-implementation review outcomes (2026-08-06)
+
+Three things the code review surfaced that the design above did not anticipate. The
+first two are fixed; the third is an open decision.
+
+1. **Rounding vs a hard cutoff — fixed.** `weight_matrix` originally shipped at 3dp
+   like `sub_scores`. Recomputing `100·Σ w·s` from 3dp weights carries a worst-case
+   error of ~0.3 on a 0–100 scale, and the branch selection is a *hard* comparison
+   against 45.0 — so a fund near the cutoff could recompute onto the opposite branch
+   from the one Python picked. `weight_matrix` now ships at **6dp**, dropping the
+   weights' contribution to ~3e-4 and leaving a residual near 0.1 dominated by
+   `sub_scores`' own 3dp. The selftest tolerance was tightened 0.5 → **0.15** to match;
+   a loose tolerance would have hidden precisely the drift the fix prevents.
+   **A fund within ~0.1 of the cutoff remains genuinely ambiguous** — that is inherent
+   to thresholding a rounded number, and the app is told not to present such a verdict
+   as more precise than it is.
+
+2. **The null case — fixed in the contract.** A NEWBORN/YOUNG fund has `null`
+   `sub_scores` and `utility_score`. Dart arithmetic on null throws, and coercing to 0
+   would fabricate a utility *below* the cutoff — manufacturing a `score_red` verdict
+   out of missing data, a direct honesty-invariant breach. `docs/integration_plan.md`
+   now requires the app to fall back to the shipped verdict instead, which is what
+   Python already does (NaN bands "blue", never "red").
+
+3. **A negative `growth` weight is reachable — OPEN (D5 in `docs/STATUS.md`).**
+   `conservative` + `liquidity=high` + `horizon < 4` yields `growth = -0.03`: a fund
+   with better realised growth scores lower. Pre-existing in `utility_weights`, but
+   **this design is what exposes it** — the batch only ever computed the default
+   profile's weights, so no non-default vector existed in production until the app
+   started deriving them. The perverse case is the risk-averse short-horizon investor
+   the personalisation feature is for. Not fixed here: deciding what a negative factor
+   weight should mean is a scoring-semantics call, not a code fix.
