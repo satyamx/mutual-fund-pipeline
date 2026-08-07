@@ -155,11 +155,21 @@ first two are fixed; the third is an open decision.
    now requires the app to fall back to the shipped verdict instead, which is what
    Python already does (NaN bands "blue", never "red").
 
-3. **A negative `growth` weight is reachable — OPEN (D5 in `docs/STATUS.md`).**
-   `conservative` + `liquidity=high` + `horizon < 4` yields `growth = -0.03`: a fund
-   with better realised growth scores lower. Pre-existing in `utility_weights`, but
-   **this design is what exposes it** — the batch only ever computed the default
-   profile's weights, so no non-default vector existed in production until the app
-   started deriving them. The perverse case is the risk-averse short-horizon investor
-   the personalisation feature is for. Not fixed here: deciding what a negative factor
-   weight should mean is a scoring-semantics call, not a code fix.
+3. **A negative `growth` weight was reachable — FIXED (D5).** `conservative` +
+   `liquidity=high` + `horizon < 4` yielded `growth = -0.03`: a fund with better
+   realised growth scored lower. Pre-existing in `utility_weights`, but **this design
+   is what exposed it** — the batch only ever computed the default profile's weights,
+   so no non-default vector existed in production until the app started deriving them,
+   and the perverse case is precisely the risk-averse short-horizon investor the
+   personalisation feature is for.
+
+   Resolved by **flooring each weight at 0 before normalising**: a factor may become
+   irrelevant to a profile, but must never actively penalise. The order matters — a
+   negative term left in place shrinks `total` and silently inflates every other
+   weight, so clamping after the division would fix the sign and keep the distortion.
+
+   Verified by enumeration rather than assumed: **exactly one combination changes**,
+   the **default profile is bit-identical** (so no verdict in the shipped artifact
+   moves), and all 90 sampled profiles are non-negative and sum to 1.0. Locked by a new
+   `mf_artifact --selftest` block, because the batch itself exercises a single profile
+   and could never have caught this.

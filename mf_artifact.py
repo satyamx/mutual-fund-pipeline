@@ -580,6 +580,32 @@ def _selftest() -> None:
               f"records; the branch choice SWINGS the verdict on {n_branch_differ} of "
               f"them{' (so the selection assert is structural only on this batch)' if not n_branch_differ else ''} — PASS")
 
+        # ---- D5: no profile may produce a NEGATIVE factor weight -------------------
+        # Pure (no data), so it belongs with the contract it protects: the app derives
+        # these weights for the REAL user, and a negative one would mean a fund with
+        # BETTER realised growth scores LOWER. The batch only ever exercises the
+        # DEFAULT profile, so nothing above would catch this — it needs enumeration.
+        # Found for real on conservative + liquidity=high + horizon<4 (growth -0.03).
+        from mf_agent_orchestrator import LiquidityNeed, ProfileRiskScorerAgent, RiskAppetite
+        from mf_pipeline import ValidationOrchestrator
+        _wa = ProfileRiskScorerAgent(ValidationOrchestrator())
+        _n_profiles = 0
+        for _r in RiskAppetite:
+            for _l in LiquidityNeed:
+                for _h in (0.3, 0.5, 2.0, 3.9, 4.0, 6.9, 7.0, 7.5, 20.0, 40.0):
+                    _w = _wa.utility_weights(
+                        InvestorProfile(horizon_years=_h, liquidity_need=_l, risk_appetite=_r))
+                    _n_profiles += 1
+                    _neg = {k: v for k, v in _w.items() if v < 0}
+                    assert not _neg, (
+                        f"FAIL: negative factor weight for risk={_r.value} "
+                        f"liquidity={_l.value} horizon={_h}: {_neg}")
+                    assert abs(sum(_w.values()) - 1.0) < 1e-9, (
+                        f"FAIL: weights not a distribution for risk={_r.value} "
+                        f"liquidity={_l.value} horizon={_h}: total={sum(_w.values())}")
+        print(f"[selftest] D5: {_n_profiles} profile combinations — no negative factor "
+              f"weight, every weight vector sums to 1.0 — PASS")
+
         # ---- Every mf_live_score refusal reaches the app as its OWN flag ----------
         # Phase 2 added two statuses that this module silently dropped, and mapped a
         # third onto a flag meaning the OPPOSITE thing. These asserts are what stop

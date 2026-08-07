@@ -870,6 +870,19 @@ class ProfileRiskScorerAgent:
             # locked-in capital: exit friction is not a selection criterion until
             # horizon end — keep a token residual for the terminal liquidation
             w["liquidity"] -= 0.04; w["growth"] += 0.04
+        # D5 (2026-08-06): floor at 0 BEFORE normalising. The modifiers above stack
+        # subtractively, and three can hit the same factor — conservative (-0.15) +
+        # horizon<4 (-0.12) + liquidity=high (-0.16) off a 0.40 base leaves growth at
+        # -0.03. A NEGATIVE weight means a fund with BETTER realised growth scores
+        # LOWER, which no investor profile is meant to express: a factor may become
+        # irrelevant to a profile, but it must never actively penalise. Clamping before
+        # the division also keeps the result a real distribution — a negative term
+        # would otherwise shrink `total` and silently inflate every other weight.
+        # Exactly ONE combination is affected — conservative + liquidity=high +
+        # horizon<4 — and every other profile stays bit-identical, since max(v, 0.0)
+        # is the identity on them and `total` was already 1.0. Verified by enumeration,
+        # including that the DEFAULT profile is unchanged, so no shipped verdict moves.
+        w = {k: max(v, 0.0) for k, v in w.items()}
         total = sum(w.values())
         return {k: v / total for k, v in w.items()}
 
