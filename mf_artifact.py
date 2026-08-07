@@ -86,6 +86,7 @@ import pandas as pd
 
 import mf_eval
 import mf_ledger
+import mf_live_score          # STATUSES_WITH_IMPUTATION — imported, never restated
 from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator
 from mf_datasources import CACHE
 from mf_labels import load_manifest
@@ -215,6 +216,10 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
     sr = result["sentinel"]
     cs = result.get("cohort_signal")
     f = rec["facts"]
+    # Imported, not restated: if this pair and score_live's ever diverged, a
+    # never-scored fund would ship an imputation count of 0 and read as measured.
+    _measured = bool(cs) and cs.get("status") in mf_live_score.STATUSES_WITH_IMPUTATION
+    _inf_feats = cs.get("n_features") if cs else None
 
     return dict(
         amfi_code=d.amfi_code or None,
@@ -270,10 +275,16 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             # measured" is a real gradient the app could not previously see.
             # Shipped as a count + fraction, not just the list, so the UI can grade
             # confidence without knowing what any individual feature means.
-            n_imputed=len(cs["imputed_features"]) if cs else None,
-            imputed_fraction=(round(len(cs["imputed_features"]) / len(cs["features"]), 4)
-                              if cs and cs.get("features") else None),
-            imputed_features=list(cs["imputed_features"]) if cs else None),
+            # NULL, never 0, unless imputation was actually measured. Every other
+            # gap result carries the `imputed_features=[]` default, so a naive
+            # len() would ship `n_imputed: 0` — the exact value a PERFECTLY
+            # MEASURED fund ships — for a fund that was never scored at all. An app
+            # grading confidence on this field would then show maximum confidence
+            # for a NOT_IN_UNIVERSE record, inverting the point of the field.
+            n_imputed=(len(cs["imputed_features"]) if _measured else None),
+            imputed_fraction=(round(len(cs["imputed_features"]) / _inf_feats, 4)
+                              if _measured and _inf_feats else None),
+            imputed_features=(list(cs["imputed_features"]) if _measured else None)),
         # Nested payloads this module doesn't enumerate leaf-by-leaf — guarded
         # wholesale so one NaN can't take out the entire batch write. See _json_safe.
         alerts_b=_json_safe([dataclasses.asdict(a) for a in sr.alerts]),
@@ -353,6 +364,12 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
             1 for r in records if DATA_FLAG_OUT_OF_TRAINING_UNIVERSE in r["data_flags"]),
         n_sector_unresolved=sum(
             1 for r in records if DATA_FLAG_SECTOR_UNRESOLVED in r["data_flags"]),
+        # Counted like every sibling refusal, not folded into a total: AMFI keeps
+        # listing new funds (154490 appeared mid-session on 2026-08-06), so the
+        # sub-1y population grows on its own. Without a counter here that drift is
+        # invisible in the artifact AND to mf_eval, which grades from coverage{}.
+        n_insufficient_history=sum(
+            1 for r in records if DATA_FLAG_INSUFFICIENT_HISTORY in r["data_flags"]),
         n_expense_available=sum(1 for r in records if r["facts"]["expense"] is not None),
     )
     # App-facing MODEL-HEALTH panel: the raw monitoring{}/coverage{} signals graded

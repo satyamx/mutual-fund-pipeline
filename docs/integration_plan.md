@@ -62,6 +62,8 @@ is **`alerts_b`** (System B), not `alerts`.
 | `signal_a.verdict_branches{score_red, score_not_red}` | the personalised verdict | The two possible verdicts. Pick with the formula below. **Do not reimplement the verdict rule** — that is the whole point of shipping both. |
 | `signal_a.screen_score_red_below` | the cutoff | Read it; **never hardcode 45 in Dart**. If the threshold is retuned server-side, a hardcoded copy silently diverges. |
 | `signal_a.weight_matrix`, `.utility_score` | drift self-check | The **default-profile** values. Use them to verify your ported weight function on every record (see below), not to score the user. |
+| `signal_a.n_imputed`, `.imputed_fraction`, `.imputed_features[]` | how much of the score is real | **`null` means "not measured", NOT "nothing imputed"** — a refused fund never had imputation computed. Only ever compare these when `cohort_status == "OK"`. A fund at `imputed_fraction` 0.6 is mostly training-median; grade confidence down, don't render it beside a 0.05 fund as equivalent. |
+| `signal_a.cohort_status == "INSUFFICIENT_HISTORY"` | under 1y of NAV | A permanent-for-now refusal: ~77% of the vector would be training median, so no probability is emitted. Distinct from `THIN_COHORT` (the *cohort* is too small) — this one is about *this fund's* history. It resolves itself as the fund ages. |
 
 ### Personalising the verdict (D4 option C — `docs/d4_profile_verdicts.md`)
 

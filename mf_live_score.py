@@ -97,6 +97,28 @@ _STATUSES = ("OK", "THIN_COHORT", "STALE_NAV", "NOT_IN_UNIVERSE",
 # a probability, so it is refused rather than surfaced with a caveat nobody reads.
 NO_HISTORY_FEATURE = "has_1y"
 
+# Statuses for which the imputation counts were ACTUALLY measured. Every other
+# gap result carries the `imputed_features=[]` default, and an empty list is
+# indistinguishable from "we checked and nothing was imputed" — so a consumer
+# reporting a count must know which of the two it is holding, or it will render a
+# never-scored fund as fully measured. mf_artifact imports this rather than
+# restating the pair.
+STATUSES_WITH_IMPUTATION = ("OK", "INSUFFICIENT_HISTORY")
+
+
+def _no_history(features: Dict[str, Any]) -> bool:
+    """True when the fund has under a year of NAV (`has_1y` == 0).
+
+    Fails CLOSED on a missing/non-finite flag: an unreadable history indicator is
+    exactly the situation the gate exists for, so it must not be treated as "has
+    history". (`has_1y` is 0/1 across all 32,654 training rows today, so this is a
+    guard against future drift rather than a live case.)
+    """
+    v = features.get(NO_HISTORY_FEATURE)
+    if not (isinstance(v, (int, float)) and np.isfinite(v)):
+        return True
+    return float(v) == 0.0
+
 # Categories whose cohort is keyed on SECTOR, not on the category alone:
 # PeerProxyResolver._group_key returns ("sector", row["sector"]) for these. The
 # manifest's 52 sector values are HAND-CURATED and AMFI's NAVAll carries no sector
@@ -115,7 +137,7 @@ def _gap_result(status: str, target: str, **extra: Any) -> Dict[str, Any]:
     out = dict(status=status, target=target, probability=None, cohort_percentile=None,
               cohort_key=None, cohort_n=0, universe_n=0, anchor=None, staleness_days=None,
               signal_context=None, imputed_features=[], cohort_codes=[], features=None,
-              note=None)
+              n_features=None, note=None)
     out.update(extra)
     return out
 
@@ -367,9 +389,6 @@ def score_live(code: str, *,
 
     meta_cols = ["amfi_code", "anchor"]
     cohort_panel = panel[panel["amfi_code"].isin(cohort_present)].set_index("amfi_code")
-    probs = {c: inferencer.predict(row.drop(meta_cols[1:]).to_dict(), target)
-            for c, row in cohort_panel.iterrows()}
-    cohort_percentile = float(pd.Series(probs).rank(pct=True)[code])
 
     target_features = cohort_panel.loc[code].drop(meta_cols[1:]).to_dict()
     imputed = [c for c in inferencer.features
@@ -379,18 +398,38 @@ def score_live(code: str, *,
     # Under a year of NAV -> ~77% of the vector is a training median, so the
     # "probability" would describe the average cohort member, not this fund. See
     # NO_HISTORY_FEATURE above for why this cut and not a tuned imputed-fraction.
-    # Checked AFTER the cohort gates so the more specific refusal wins when both
-    # apply, and after `imputed` is built so the flag can report the real cost.
-    _hist = target_features.get(NO_HISTORY_FEATURE)
-    if isinstance(_hist, (int, float)) and np.isfinite(_hist) and float(_hist) == 0.0:
+    if _no_history(target_features):
         return _gap_result("INSUFFICIENT_HISTORY", target, cohort_key=str(cohort_key),
                            cohort_n=len(cohort_present), universe_n=len(panel),
                            anchor=str(t.date()), staleness_days=staleness_days,
-                           imputed_features=imputed,
+                           imputed_features=imputed, n_features=len(inferencer.features),
                            note=f"Under 1 year of NAV ({NO_HISTORY_FEATURE}=0): "
                                 f"{len(imputed)} of {len(inferencer.features)} features fall "
                                 f"back to a training median, so a probability here would "
                                 f"describe the average cohort member, not this fund.")
+
+    # RANK ONLY AGAINST PEERS WE WOULD PUBLISH. A sub-1y peer's probability is ~77%
+    # training prior, so leaving it in the ranking would let numbers this function
+    # refuses to emit for their own fund still set everyone else's percentile — the
+    # gate above would suppress the symptom and keep the cause. Excluding them also
+    # matches TRAINING, where mf_labels only quantiles funds carrying a valid R_fwd
+    # rather than every cohort member.
+    scoreable = [c for c in cohort_panel.index
+                 if not _no_history(cohort_panel.loc[c].drop(meta_cols[1:]).to_dict())]
+    if len(scoreable) < COHORT_MIN_SIZE:
+        return _gap_result("THIN_COHORT", target, cohort_key=str(cohort_key),
+                           cohort_n=len(scoreable), universe_n=len(panel),
+                           anchor=str(t.date()), staleness_days=staleness_days,
+                           note=f"Only {len(scoreable)} of {len(cohort_present)} cohort peers "
+                                f"have >=1y of NAV (< {COHORT_MIN_SIZE}) — ranking against "
+                                f"peers whose own scores are mostly prior would make the "
+                                f"percentile look more discriminating than it is.")
+
+    ranked = cohort_panel.loc[scoreable]
+    probs = {c: inferencer.predict(row.drop(meta_cols[1:]).to_dict(), target)
+            for c, row in ranked.iterrows()}
+    cohort_percentile = float(pd.Series(probs).rank(pct=True)[code])
+    cohort_present = scoreable          # what the percentile was ACTUALLY ranked over
 
     # Derived from the artifact, never hardcoded: this string reaches the app, and a
     # literal here went stale the moment the model was refitted (v1's 0.578 would
@@ -406,7 +445,7 @@ def score_live(code: str, *,
                cohort_n=len(cohort_present), universe_n=len(panel),
                anchor=str(t.date()), staleness_days=staleness_days,
                signal_context=ctx,
-               imputed_features=imputed,
+               imputed_features=imputed, n_features=len(inferencer.features),
                # Frozen for the prediction ledger (mf_ledger.py): cohorts reshuffle
                # over time (manifest edits, closures), so realizing this prediction
                # years from now must rank against THIS exact peer set, not whichever
@@ -440,13 +479,35 @@ def _selftest() -> None:
     stored = feats[feats["anchor"] == T]
     live_sorted = live_panel.sort_values("amfi_code").reset_index(drop=True)
     stored_sorted = stored[live_sorted.columns].sort_values("amfi_code").reset_index(drop=True)
-    same = live_sorted.drop(columns=["amfi_code", "anchor"]).round(12).equals(
-        stored_sorted.drop(columns=["amfi_code", "anchor"]).round(12))
-    if not same:
-        bad = [c for c in live_sorted.columns if c not in ("amfi_code", "anchor")
-              and not live_sorted[c].round(12).equals(stored_sorted[c].round(12))]
-        raise AssertionError(f"FAIL: live panel diverges from features.parquet at {bad}")
-    print(f"[selftest] Test A (feature parity @ {T.date()}, n={len(codes_T)}): PASS")
+    # TOLERANCE, not exact equality — and only HERE. This test compares two
+    # DIFFERENT computation paths (a one-anchor live panel vs the full 144-anchor
+    # training grid), which accumulate in different orders, so last-bit agreement was
+    # never guaranteed. The old `.round(12).equals()` demanded exactly that and
+    # passed only by luck: it started failing on `z_excess_1y` after the v5 rebuild
+    # with a real divergence of 1.8e-15 and ZERO values off by more than 1e-12 —
+    # a rounding-boundary straddle, not a feature regression.
+    #
+    # 1e-12 is still ~3 orders tighter than any real drift (the insertion test
+    # measures genuine contamination at 6.5e-02). The same-path replays — Test C's
+    # post-anchor truncation and the insertion z-parity check — keep EXACT equality,
+    # because there the identical code runs twice and any difference is a real bug.
+    lcmp = live_sorted.drop(columns=["amfi_code", "anchor"])
+    scmp = stored_sorted.drop(columns=["amfi_code", "anchor"])
+    assert list(lcmp.columns) == list(scmp.columns), "FAIL: column set diverged"
+    delta = (lcmp.to_numpy(float) - scmp.to_numpy(float))
+    both_nan = np.isnan(lcmp.to_numpy(float)) & np.isnan(scmp.to_numpy(float))
+    delta = np.where(both_nan, 0.0, delta)
+    if not np.all(np.abs(delta) <= 1e-12):
+        worst = np.nanmax(np.abs(delta))
+        bad = [c for i, c in enumerate(lcmp.columns)
+               if not np.all(np.abs(delta[:, i]) <= 1e-12)]
+        raise AssertionError(
+            f"FAIL: live panel diverges from features.parquet at {bad} (max |Δ|={worst:.3e})")
+    # NaN must line up too, or a silently-imputed column would pass on its zeros.
+    assert (np.isnan(lcmp.to_numpy(float)) == np.isnan(scmp.to_numpy(float))).all(), \
+        "FAIL: live panel and stored panel disagree on WHICH values are missing"
+    print(f"[selftest] Test A (feature parity @ {T.date()}, n={len(codes_T)}, "
+          f"max |Δ|={np.nanmax(np.abs(delta)):.2e}): PASS")
 
     # ---- Test B: prediction parity through the shipped artifact --------------
     inf = load_default()
@@ -503,24 +564,49 @@ def _selftest() -> None:
     # truncating relative to the (2026) series end would leave the fund with no NAV
     # at T at all — which reads as STALE_NAV and would test the wrong gate.
     own = own[own.index <= T]
-    if len(own) > 200:
-        short[target_code] = own[own.index >= T - pd.Timedelta(days=180)]
-        res = score_live(target_code, manifest=manifest, nav_panel=short, inferencer=inf,
-                         today=T + pd.Timedelta(days=1))
-        assert res["status"] == "INSUFFICIENT_HISTORY", \
-            f"FAIL: expected INSUFFICIENT_HISTORY, got {res['status']}"
-        assert res["probability"] is None, "FAIL: a refused fund must carry no probability"
-        assert res["cohort_n"] >= COHORT_MIN_SIZE, \
-            "FAIL: cohort was thin, so this asserted the wrong gate"
-        # Teeth: the SAME fund on its full history must still score, or the gate is
-        # just rejecting everything and the assertion above proves nothing.
-        ok = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
-                        today=T + pd.Timedelta(days=1))
-        assert ok["status"] == "OK", \
-            f"FAIL: gate has no teeth — full history also refused ({ok['status']})"
-        print(f"[selftest] INSUFFICIENT_HISTORY gate ({len(res['imputed_features'])} features "
-              f"imputed, cohort_n={res['cohort_n']} healthy; same fund on full history "
-              f"still OK): PASS")
+    # ASSERT the precondition, never `if` it. As a conditional this whole block
+    # silently vanished when the target had a short history, and the suite still
+    # printed its "honesty gates fire correctly" banner — the vacuous-pass failure
+    # this project has already caught twice.
+    assert len(own) > 200, (
+        f"FAIL: selftest precondition — target {target_code} has only {len(own)} NAV "
+        f"points at/before {T.date()}, so the INSUFFICIENT_HISTORY gate cannot be "
+        f"exercised. Pick a longer-history target rather than skipping the test.")
+    short[target_code] = own[own.index >= T - pd.Timedelta(days=180)]
+    res = score_live(target_code, manifest=manifest, nav_panel=short, inferencer=inf,
+                     today=T + pd.Timedelta(days=1))
+    assert res["status"] == "INSUFFICIENT_HISTORY", \
+        f"FAIL: expected INSUFFICIENT_HISTORY, got {res['status']}"
+    assert res["probability"] is None, "FAIL: a refused fund must carry no probability"
+    assert res["cohort_n"] >= COHORT_MIN_SIZE, \
+        "FAIL: cohort was thin, so this asserted the wrong gate"
+    # Teeth: the SAME fund on its full history must still score, or the gate is
+    # just rejecting everything and the assertion above proves nothing.
+    ok = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf,
+                    today=T + pd.Timedelta(days=1))
+    assert ok["status"] == "OK", \
+        f"FAIL: gate has no teeth — full history also refused ({ok['status']})"
+    # The peer-exclusion half: a sub-1y peer must not set anyone else's percentile.
+    # Truncating ONE peer has to leave the target OK (cohort still healthy) while
+    # changing what it was ranked against — proving the exclusion actually bites.
+    peer = next(c for c in ok["cohort_codes"] if c != target_code)
+    short2 = dict(nav_panel)
+    pown = short2[peer].dropna()
+    pown = pown[pown.index <= T]
+    short2[peer] = pown[pown.index >= T - pd.Timedelta(days=180)]
+    res2 = score_live(target_code, manifest=manifest, nav_panel=short2, inferencer=inf,
+                      today=T + pd.Timedelta(days=1))
+    assert res2["status"] == "OK", f"FAIL: target should still score, got {res2['status']}"
+    assert peer not in res2["cohort_codes"], \
+        "FAIL: a sub-1y peer is still in the ranked cohort — its ~77%-prior score is " \
+        "setting this fund's percentile, which is exactly what the gate must prevent"
+    assert res2["cohort_n"] == ok["cohort_n"] - 1, \
+        f"FAIL: cohort_n must report what was actually ranked over " \
+        f"({res2['cohort_n']} vs {ok['cohort_n']}-1)"
+    print(f"[selftest] INSUFFICIENT_HISTORY gate ({len(res['imputed_features'])} features "
+          f"imputed, cohort_n={res['cohort_n']} healthy; same fund on full history still "
+          f"OK; a sub-1y PEER is dropped from the ranking {ok['cohort_n']}->"
+          f"{res2['cohort_n']}): PASS")
 
     res = score_live("NOT-A-REAL-CODE", manifest=manifest, nav_panel=nav_panel,
                     inferencer=inf, today=T)

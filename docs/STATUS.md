@@ -88,7 +88,40 @@ out-of-distribution") was wrong:
 was 60% training-median looked identical in the app to a fully measured one. The gate
 only refuses the extreme; everything between it and "fully measured" is a real gradient
 the app could not see. `signal_a` now ships `n_imputed`, `imputed_fraction` and the
-feature list.
+feature list — **null, never 0, when imputation was not measured** (see below).
+
+### Code review of that change found six issues; two defeated its own purpose
+- **`n_imputed` was 0 for every refused fund** — the same value a perfectly measured
+  fund ships, because `_gap_result` defaults `imputed_features=[]`. An app grading
+  confidence on it would have rendered *maximum* confidence for a `NOT_IN_UNIVERSE`
+  record that was never scored. Now gated on `mf_live_score.STATUSES_WITH_IMPUTATION`,
+  which `mf_artifact` **imports rather than restates**.
+- **The refused fund still ranked its peers.** The gate sat after `probs`/
+  `cohort_percentile` were computed over the whole cohort, so a sub-1y peer's
+  ~77%-prior score still set everyone else's percentile — suppressing the symptom and
+  keeping the cause. Ranking now runs over peers that pass the same history gate, which
+  also **matches training** (`mf_labels` quantiles only funds with a valid `R_fwd`, not
+  every cohort member). If that drops the cohort under `COHORT_MIN_SIZE` it becomes
+  `THIN_COHORT`, and `cohort_n` reports what was *actually* ranked over.
+- Plus: no `n_insufficient_history` counter in `coverage{}` (every sibling refusal has
+  one, and `mf_eval` grades from `coverage`); the gate's selftest was inside an
+  `if len(own) > 200:` that could **silently skip** while the suite still printed PASS;
+  the `MODEL_VERSION` provenance changelog stopped at v3 while the constant said v5; and
+  the new fields were missing from `integration_plan.md`'s app schema table.
+
+### A pre-existing brittle test that the v5 rebuild exposed
+`mf_live_score --selftest` Test A began failing on `z_excess_1y` — **and this was missed
+because the retrain was verified with `mf_infer`/`mf_artifact` selftests but not this
+one**, which is the test that proves live scoring reproduces training features.
+
+It was not a feature regression: measured divergence is **1.8e-15 with zero values off
+by more than 1e-12**. Test A compares two *different* computation paths (a one-anchor
+live panel vs the 144-anchor training grid) that accumulate in different orders, so the
+old `.round(12).equals()` demanded last-bit equality it was never entitled to and passed
+only by luck. It now asserts `|Δ| <= 1e-12` **and** that both panels agree on which
+values are missing. **Same-path replays keep EXACT equality** — Test C's post-anchor
+truncation and the insertion z-parity check run identical code twice, so any difference
+there is a real bug.
 
 ## The 2026-08-05 retrain — `phase_b_v1` → `phase_b_v2` (read this before quoting any AUC)
 The manifest went **136 → 367 funds** and the model was refitted. The headline numbers moved the *wrong* way and that is not a regression:

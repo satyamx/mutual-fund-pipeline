@@ -89,6 +89,21 @@ REPORT_PATH = OUT_DIR / "model_report.md"
 #                funds that were previously separated), hence a full bump rather
 #                than a point release. The reported holdout AUC is unaffected:
 #                block_metrics scores p_raw, never the calibrated value.
+#   phase_b_v4   — 556-fund manifest (2026-08-06). The D2+D3 curation added 189
+#                Sectoral/Thematic funds with hand-reviewed sectors, including five
+#                NEW cohorts (Innovation, Momentum, Services, Special/Opportunities,
+#                Ethical). Thematic cohorts grew several-fold (Banking 5 -> 30), so
+#                y_cohort_q1 is again a DIFFERENT label: do not pool with v3.
+#                Holdout AUC 0.541 / lift 1.39x on 4,048 rows (effective n 135).
+#   phase_b_v5   — 565-fund manifest (2026-08-06), adds the International/Global
+#                cohort (9 foreign-equity funds, all with >=1082 obs). Scoring them
+#                on v4 coefficients would have applied a fit that never saw their
+#                population, so the retrain was required, not optional. Holdout AUC
+#                0.537 / lift 1.44x on 4,132 rows (effective n 138).
+#                READ v3/v4/v5 AS ONE NOISE BAND, NOT A TREND: at eff-n ~135 the
+#                AUCs (0.558/0.541/0.537) and the lifts (1.10x/1.39x/1.44x) move in
+#                OPPOSITE directions, which is what noise looks like. See
+#                docs/STATUS.md for the full comparison and why it is not a decline.
 MODEL_VERSION = "phase_b_v5"
 
 TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_peer"}
