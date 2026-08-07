@@ -56,6 +56,29 @@ defined against. Adding a sourced row here resolves exactly one fund.
 This is the binding constraint on coverage: **256 of the 569** canonical scoreable
 schemes are Sectoral/Thematic.
 
+### ⚠️ `sector` here means PEER GROUP, not industry sector (D2, 2026-08-06)
+
+142 reviewed rows were accepted on 2026-08-06, and **41 of them carry a label that is
+not an industry at all**: `Business Cycle` (17), `Quant` (10), `ESG` (8), `MNC` (4),
+`PSU` (2). A quant fund holds across every sector; a business-cycle fund rotates
+between them by design; MNC and PSU describe *ownership*, not industry.
+
+This was a deliberate decision, not an oversight, and it follows the manifest's own
+prior curation — all five labels already existed there by hand. It is defensible
+because the cohort is a **peer group**: ranking quant funds against quant funds is a
+better-posed "top quartile" than pooling them with unrelated thematics, and the
+grouping is applied identically at train and serve time, so nothing is laundered.
+
+**The consequence to remember:** for those five cohorts, `sector_mom_12m`,
+`sector_rel_strength` and `sector_vol_1y` are **aggregates over a basket of peer
+funds, not a sector index**. Do not read them as industry exposure. Every other
+`sector` value in this file is a genuine industry.
+
+Rows were accepted from `_sector_proposals.csv` after a fund-by-fund review; the
+`source_url` is AMFI's NAVAll, which is genuinely where the scheme names the
+proposals were read from come from. No sector was invented, and every accepted
+label already existed in the manifest — **nothing here mints a new cohort.**
+
 ### Rules enforced by `mf_overrides.validate()`
 
 | Check | Severity | Why |
