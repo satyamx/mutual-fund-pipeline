@@ -55,27 +55,24 @@ https://github.com/satyamx/mutual-fund-pipeline/releases/download/latest-artifac
 https://github.com/satyamx/mutual-fund-pipeline/releases/download/latest-artifact/latest.json
 ```
 
-> ### ⚠️ This URL is STABLE but not yet PUBLIC — one decision still stands between it and the app
-> **This repository is private**, and a private repo's release assets are not
-> anonymously downloadable. Those `releases/download/...` links 404 without
-> credentials; unauthenticated fetching only starts working the moment the repo goes
-> public. Fetching one today means an authenticated API call
-> (`GET /repos/:owner/:repo/releases/assets/:id` with `Accept: application/octet-stream`),
-> which is fine for a developer or a server but **not** for the Flutter app — a token
-> shipped inside a mobile binary is extractable, so that is not a route to take.
+> ### ✅ RESOLVED 2026-08-06 — the repo is PUBLIC and these URLs are live
+> The owner took **option 1** below. Both links now serve anonymously, verified by
+> unauthenticated `curl`: `latest.json` returns **HTTP 200** with the real payload
+> (`pipeline_sha 74b5978`, 367 funds, 0 errors). No code change was needed — the
+> publishing step was always correct; only the visibility was in the way.
 >
-> The publishing step is correct either way and needs no change; what is undecided is
-> where the app reads from. Three honest options:
-> 1. **Make this repo public.** The URLs above go live as-is, zero code change. It also
->    publishes the code, the prediction ledger, and the hand-curated manifest.
-> 2. **Mirror to a small public artifacts repo.** Keep this one private; CI pushes the
->    release to e.g. `mutual-fund-artifacts` using a PAT held as an Actions secret. The
->    token stays server-side. Costs one secret — the first this pipeline would have.
-> 3. **Publish to object storage** (R2/S3/Pages) instead of Releases. Most control, most
->    moving parts, and a bill.
+> **What going public also publishes**, stated plainly because it is not reversible in
+> any practical sense (clones, forks and caches persist): the full source, the
+> prediction ledger, the hand-curated universe manifest, and `benchmarks/`. See the
+> security note in `docs/STATUS.md` — no credential was ever committed, but the
+> committer email on the pre-flip history is now public, and the `benchmarks/`
+> redistribution question stops being hypothetical.
 >
-> Until one is chosen, treat the Release as the canonical artifact **store** and the app
-> integration as still blocked on this single call.
+> The two options not taken, kept so they are not re-derived:
+> 2. **Mirror to a small public artifacts repo** — keeps this one private; CI pushes the
+>    release to e.g. `mutual-fund-artifacts` using a PAT held as an Actions secret. Costs
+>    one secret, which would have been this pipeline's first.
+> 3. **Publish to object storage** (R2/S3/Pages) — most control, most moving parts, a bill.
 
 The asset name is fixed on purpose — `mf_artifact.py` timestamps its output filename,
 which would move the URL every night, so the run identity lives *inside* the payload

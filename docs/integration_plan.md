@@ -9,14 +9,17 @@ own specs and are not repeated here:
 - **The model-health panel** — `docs/app_evaluation_contract.md`, the `evaluation{}`
   block and the disclaimer the UI must show.
 
-## Status: one decision blocks everything
+## Status: unblocked — the artifact is publicly fetchable
 
 The nightly publishes to a rolling `latest-artifact` GitHub Release, so the URL no
-longer moves. **But this repository is private, and a private repo's release assets
-are not anonymously downloadable** — the app cannot fetch it, and shipping a token
-inside a mobile binary is not an option. Until this is resolved (make the repo public,
-mirror to a public artifacts repo, or move to object storage — see `docs/ci.md`),
-every step below is blocked at step 1. Nothing else about the integration is unknown.
+longer moves, and **as of 2026-08-06 the repository is public, so that URL serves
+anonymously** — verified by unauthenticated `curl` returning HTTP 200 with the real
+payload. The decision that used to block step 1 is settled (option 1 in `docs/ci.md`);
+no token ships in the app, which was the constraint that ruled out the alternatives.
+
+**Step 1 is now buildable.** The remaining open call is D4 below (milestone 6): whether
+the app re-derives a profile-specific verdict in Dart — where it can drift from the
+Python — or renders the shipped facts + colours. Settle it before step 3 hardens.
 
 ## Sequence
 
