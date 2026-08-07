@@ -42,8 +42,10 @@ amfi_code,category,sector,source_url,note
 152789,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,Bank of India Business Cycle Fund - Direct Plan - Growth
 152796,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Business Cycle Fund - Direct Plan- Growth
 152878,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,Bandhan Business Cycle Fund - Direct Plan - Growth
+153076,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,Shriram Multi Sector Rotation Fund - Direct Plan Growth Option
 153121,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,DSP Business Cycle Fund - Direct - Growth
 153291,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,Invesco India Business Cycle Fund - Direct Plan - Growth
+154082,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,JioBlackRock Sector Rotation Fund - Direct Plan - Growth Option
 154157,,Business Cycle,https://www.amfiindia.com/spages/NAVAll.txt,ITI Business Cycle Fund- Direct Plan- Growth
 119705,,Commodities/Natural Resources,https://www.amfiindia.com/spages/NAVAll.txt,SBI COMMA Fund - DIRECT PLAN - Growth
 147372,,ESG,https://www.amfiindia.com/spages/NAVAll.txt,QUANTUM ESG BEST IN CLASS STRATEGY FUND - DIRECT PLAN - GROWTH OPTION
@@ -54,9 +56,14 @@ amfi_code,category,sector,source_url,note
 148637,,ESG,https://www.amfiindia.com/spages/NAVAll.txt,Aditya Birla Sun Life ESG Integration Strategy Fund-Direct Plan-Growth
 148751,,ESG,https://www.amfiindia.com/spages/NAVAll.txt,Invesco India ESG Integration Strategy Fund - Direct Plan - Growth
 152962,,ESG,https://www.amfiindia.com/spages/NAVAll.txt,WhiteOak Capital ESG Best-In-Class Strategy Fund Direct Plan Growth
+154195,,ESG,https://www.amfiindia.com/spages/NAVAll.txt,Baroda BNP Paribas Best-in-Class Strategy Fund - Direct - Growth Option
 152728,,Energy/Power,https://www.amfiindia.com/spages/NAVAll.txt,ICICI PRUDENTIAL ENERGY OPPORTUNITIES FUND - Direct Plan - Growth
 153225,,Energy/Power,https://www.amfiindia.com/spages/NAVAll.txt,Baroda BNP Paribas Energy Opportunities Fund - Direct Plan - Growth Option
 153447,,Energy/Power,https://www.amfiindia.com/spages/NAVAll.txt,Kotak Energy Opportunities Fund-Direct-Growth
+118876,,Ethical,https://www.amfiindia.com/spages/NAVAll.txt,Taurus Ethical Fund - Direct Plan - Growth
+119172,,Ethical,https://www.amfiindia.com/spages/NAVAll.txt,Tata Ethical Fund -Direct Plan- Growth Option
+153094,,Ethical,https://www.amfiindia.com/spages/NAVAll.txt,Quantum Ethical Fund - Direct Plan Growth Option
+153895,,Ethical,https://www.amfiindia.com/spages/NAVAll.txt,THE WEALTH COMPANY ETHICAL FUND DIRECT GROWTH
 118722,,FMCG/Consumption,https://www.amfiindia.com/spages/NAVAll.txt,Nippon India Consumption Fund - Direct Plan Growth Plan - Bonus
 120575,,FMCG/Consumption,https://www.amfiindia.com/spages/NAVAll.txt,SBI CONSUMPTION OPPORTUNITIES FUND - DIRECT PLAN - GROWTH
 120587,,FMCG/Consumption,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential FMCG Fund - Direct Plan -  Growth
@@ -104,6 +111,18 @@ amfi_code,category,sector,source_url,note
 151040,,Infrastructure,https://www.amfiindia.com/spages/NAVAll.txt,HSBC Infrastructure Fund - Direct Growth
 153484,,Infrastructure,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Infrastructure Fund-Direct-Growth
 153983,,Infrastructure,https://www.amfiindia.com/spages/NAVAll.txt,Mirae Asset Infrastructure Fund - Direct Plan - Growth
+148634,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Axis Innovation Fund - Direct Plan - Growth Option
+151580,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential Innovation Fund - Direct Plan - Growth
+151905,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Union Innovation & Opportunities Fund - Direct Plan - Growth Option
+152033,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Nippon India Innovation Fund-Direct Plan-Growth Option
+152087,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,UTI Innovation Fund - Direct Plan - Growth Option
+152470,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Baroda BNP Paribas Innovation Fund Direct plan - Growth Option
+152607,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Bandhan Innovation Fund - Direct Plan - Growth
+152776,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,SBI Innovative Opportunities Fund - Direct Plan - Growth
+153055,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Tata India Innovation Fund- Direct Growth
+153258,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Innovation Opportunities Fund - Direct Plan- Growth
+153620,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,HDFC INNOVATION FUND - DIRECT PLAN - GROWTH OPTION
+154121,,Innovation,https://www.amfiindia.com/spages/NAVAll.txt,Mahindra Manulife Innovation Opportunities Fund - Direct - Growth
 147346,,MNC,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential MNC Fund - Direct Plan - Growth Option
 151458,,MNC,https://www.amfiindia.com/spages/NAVAll.txt,HDFC MNC Fund - Growth Option - Direct Plan
 152910,,MNC,https://www.amfiindia.com/spages/NAVAll.txt,Kotak MNC Fund-Direct Plan-Growth
@@ -116,6 +135,15 @@ amfi_code,category,sector,source_url,note
 152756,,Manufacturing,https://www.amfiindia.com/spages/NAVAll.txt,Invesco India Manufacturing Fund - Direct Plan - Growth
 152760,,Manufacturing,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Manufacturing Fund - Direct Plan- Growth
 152920,,Manufacturing,https://www.amfiindia.com/spages/NAVAll.txt,LIC MF Manufacturing Fund-Direct Plan-Growth
+151753,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Samco Active Momentum Fund - Direct Plan - Growth Option
+152189,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,quant Momentum Fund - Growth Option - Direct Plan
+153083,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Axis Momentum Fund - Direct Plan - Growth Option
+153109,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Union Active Momentum Fund - Direct Plan - Growth Option
+153274,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Nippon India Active Momentum Fund-Direct Plan - Growth Option
+153364,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Active Momentum Fund- Direct-Growth
+153684,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential Active Momentum Fund - Direct Plan - Growth
+153753,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,Kotak Active Momentum Fund - Direct Plan - Growth option
+154451,,Momentum,https://www.amfiindia.com/spages/NAVAll.txt,NJ Momentum Fund - Direct Growth
 150539,,PSU,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential PSU Equity Fund - Direct Plan - Growth
 152415,,PSU,https://www.amfiindia.com/spages/NAVAll.txt,quant PSU Fund - Growth Option - Direct Plan
 118758,,Pharma/Healthcare,https://www.amfiindia.com/spages/NAVAll.txt,Nippon India Pharma Fund - Direct Plan Growth Plan - Bonus Option
@@ -132,12 +160,31 @@ amfi_code,category,sector,source_url,note
 153604,,Pharma/Healthcare,https://www.amfiindia.com/spages/NAVAll.txt,Baroda BNP Paribas Health and Wellness Fund Direct Growth
 153972,,Pharma/Healthcare,https://www.amfiindia.com/spages/NAVAll.txt,Bandhan Healthcare Fund - Direct Plan - Growth
 118770,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Nippon India Quant Fund - Direct Plan Growth Plan - Bonus Option
+146643,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,SBI Equity Minimum Variance Fund - Direct Plan - Growth
 147864,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Tata Quant Fund-Direct Plan-Growth
 148600,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential Quant Fund Direct Plan Growth
+148925,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,quant Quantamental Fund - Growth Option - Direct Plan
 148993,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Axis Quant Fund - Direct Plan - Growth
 149318,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,360 ONE QUANT FUND DIRECT GROWTH
 151881,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Kotak Quant Fund - Direct Plan - Growth Option
 152684,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Aditya Birla Sun Life Quant Fund - Direct Growth
 152694,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Quant Fund - Direct - Growth
+153070,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential Equity Minimum Variance Fund - Direct Plan - Growth
 153154,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,SBI Quant Fund- Direct Plan- Growth
+153189,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,WhiteOak Capital Quality Equity Fund Direct Plan Growth
 153204,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,UTI Quant Fund - Direct Plan - Growth Option
+153458,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,ICICI Prudential Quality Fund - Direct Plan - Growth
+153669,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Sundaram Multi-Factor Fund - Direct - Growth
+153722,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Bandhan Multi-Factor Fund - Direct Plan - Growth
+153942,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,Franklin India Multi-Factor Fund- Direct- Growth
+154177,,Quant,https://www.amfiindia.com/spages/NAVAll.txt,SBI Quality Fund - Direct Plan - Growth
+144835,,Services,https://www.amfiindia.com/spages/NAVAll.txt,Sundaram Services Fund Direct Plan - Growth
+153558,,Services,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Services Fund - Direct Plan - Growth
+153624,,Services,https://www.amfiindia.com/spages/NAVAll.txt,Axis Services Opportunities Fund - Direct Plan - Growth Option
+154149,,Services,https://www.amfiindia.com/spages/NAVAll.txt,Kotak Services Fund - Direct - Growth
+154490,,Services,https://www.amfiindia.com/spages/NAVAll.txt,Baroda BNP Paribas Services Fund - Direct Growth Option
+148539,,Special/Opportunities,https://www.amfiindia.com/spages/NAVAll.txt,Aditya Birla Sun Life Special Opportunities Fund-Direct-Growth
+152586,,Special/Opportunities,https://www.amfiindia.com/spages/NAVAll.txt,Samco Special Opportunities Fund - Direct Plan - Growth
+152644,,Special/Opportunities,https://www.amfiindia.com/spages/NAVAll.txt,WhiteOak Capital Special Opportunities Fund - Direct Growth
+152702,,Special/Opportunities,https://www.amfiindia.com/spages/NAVAll.txt,Kotak Special Opportunities Fund - Direct Plan - Growth Option
+153749,,Special/Opportunities,https://www.amfiindia.com/spages/NAVAll.txt,Motilal Oswal Special Opportunities Fund - Direct - Growth

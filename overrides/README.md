@@ -76,8 +76,38 @@ funds, not a sector index**. Do not read them as industry exposure. Every other
 
 Rows were accepted from `_sector_proposals.csv` after a fund-by-fund review; the
 `source_url` is AMFI's NAVAll, which is genuinely where the scheme names the
-proposals were read from come from. No sector was invented, and every accepted
-label already existed in the manifest — **nothing here mints a new cohort.**
+proposals were read from come from. No sector was invented, and every D2 label
+already existed in the manifest — that batch minted no cohort.
+
+### Five NEW cohorts, created deliberately (D3, 2026-08-06)
+
+D3 added 47 more rows (189 total) and **does** mint cohorts, applying the same
+peer-group reading: **Innovation (12), Momentum (9), Services (5),
+Special/Opportunities (5), Ethical (4)** — each at or above `COHORT_MIN_SIZE`=4.
+Sub-minimum groups were folded into a natural parent rather than left as
+one-member cohorts: Multi-Factor + Quality + Minimum Variance + Quantamental →
+`Quant`; Sector Rotation → `Business Cycle`; Best-in-Class Strategy → `ESG` (SEBI's
+own naming for that ESG sub-category).
+
+`Ethical` is kept **separate from `ESG` on purpose** — Tata and Taurus Ethical are
+Shariah-compliant, which is a different screen from an ESG mandate, and merging
+them would assert a peer relationship that does not exist.
+
+> **`--validate` reports 35 WARNs on these rows, and that is correct.** They are
+> exactly the 35 whose sector has no manifest member yet (12+9+5+5+4). **Those funds
+> are `THIN_COHORT` and NOT scoreable until a retrain widens the manifest** —
+> insertion scoring draws cohort peers from the manifest, and a brand-new sector has
+> none. The WARN clears itself once they are in.
+
+### What is deliberately still refused
+
+**9 foreign-equity funds** (US Bluechip, Taiwan, Japan, Asian, International, Global
+Commodity) have **no sector row and must not get one.** Their gap is not a missing
+sector — the model was fitted on Indian equity, so making them scoreable would claim
+the holdout AUC transfers to a population it never saw. `SECTOR_UNRESOLVED` already
+refuses them; the correct end state is `OUT_OF_TRAINING_UNIVERSE`, which is a code
+change in `mf_universe`, not a curation row. Plus 8 with genuinely no viable cohort:
+Conglomerate (3), Rural (2), and three singletons.
 
 ### Rules enforced by `mf_overrides.validate()`
 
