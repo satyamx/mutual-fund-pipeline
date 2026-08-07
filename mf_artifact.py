@@ -23,6 +23,16 @@ underneath are profile-agnostic (see mf-architecture-decisions memory: "profile
 weighting moves client-side") — only the verdict/colours are profile-specific,
 and only a default one is baked in here.
 
+D4 OPTION C (2026-08-06, docs/d4_profile_verdicts.md): the default verdict above
+is no longer the app's only option. The investor profile reaches the verdict rule
+through EXACTLY ONE term — `utility < screen_score_red_below` — so each fund has
+exactly two possible verdicts, and BOTH ship in `verdict_branches`. The app
+personalises by recomputing only the weighted utility from its own profile and
+picking a branch; the verdict RULE never leaves Python, so it cannot drift into a
+Dart reimplementation. `weight_matrix`/`utility_score` are the DEFAULT-profile
+values, shipped so a ported weight function can be VERIFIED against them on every
+record instead of trusted.
+
 CONTRACT (see mf-architecture-decisions memory for the original 2026-07-16
 design; extended here with the restored verdict + its default-profile stamp):
   top-level: artifact_version, generated_at, pipeline_sha, model_id,
@@ -35,9 +45,11 @@ design; extended here with the restored verdict + its default-profile stamp):
   per-fund:  amfi_code, isin, scheme_name, category, sector, eligibility,
              facts{cagr, vol, max_dd, sortino, benchmark, expense},
              signal_a{sub_scores, verdict, verdict_color, verdict_caveat,
-                      metric_colors, verdict_basis, cohort_status,
-                      cohort_q1_prob, cohort_percentile, cohort_n,
-                      signal_context},
+                      metric_colors, verdict_basis,
+                      verdict_branches{score_red{}, score_not_red{}},
+                      screen_score_red_below, weight_matrix, utility_score,
+                      cohort_status, cohort_q1_prob, cohort_percentile,
+                      cohort_n, signal_context},
              alerts_b[], nfo_dossier, data_flags[], lock{type, exit_load_days}
 
 monitoring{} (to-do #6, mf_ledger.py): every OK cohort_signal this run is
@@ -222,6 +234,22 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             verdict_caveat=rec["verdict_caveat"], metric_colors=rec["metric_colors"],
             verdict_basis=dict(is_default_profile=is_default_profile,
                                profile=profile.model_dump(mode="json")),
+            # --- D4 option C: everything the app needs to re-derive the verdict for
+            # the REAL user's profile without reimplementing the verdict rule.
+            # The profile enters the rule through one term only (utility < the cutoff
+            # below), so both possible verdicts are precomputed here and the app picks:
+            #     u = 100 * Σ weights(userProfile)[k] * sub_scores[k]
+            #     verdict = verdict_branches[u < screen_score_red_below ? "score_red"
+            #                                                          : "score_not_red"]
+            # weight_matrix + utility_score are the DEFAULT-profile values, shipped so
+            # a ported weight function can be checked against them on every record
+            # rather than trusted. See docs/d4_profile_verdicts.md.
+            verdict_branches=rec["verdict_branches"],
+            screen_score_red_below=rec["screen_score_red_below"],
+            weight_matrix={k: _finite_or_none(v) for k, v in ps["weight_matrix"].items()},
+            # NaN for a NEWBORN/YOUNG fund, same as the sub_scores it is built from:
+            # utility is their weighted sum, so one NaN sub-score propagates here.
+            utility_score=_finite_or_none(rec["profile_fit_score"]),
             # The exact mf_live_score status — OK, or WHICH refusal. data_flags[]
             # below carries only the coarse enum subset, so this is the app's
             # stable source of truth for *why* cohort_q1_prob is null, and the
@@ -474,6 +502,7 @@ def _selftest() -> None:
         required_top = {"amfi_code", "isin", "scheme_name", "category", "sector", "eligibility",
                         "facts", "signal_a", "alerts_b", "nfo_dossier", "coverage_flags",
                         "data_flags", "lock"}
+        n_branch_differ = 0     # how many funds the branch choice actually SWINGS
         for rec in artifact["funds"]:
             assert required_top <= rec.keys(), f"FAIL: missing keys in {rec['scheme_name']}"
             assert isinstance(rec["coverage_flags"], list)
@@ -495,10 +524,57 @@ def _selftest() -> None:
             assert "cohort_status" in rec["signal_a"]
             if rec["signal_a"]["cohort_q1_prob"] is None:
                 assert rec["signal_a"]["cohort_status"] != "OK"
+
+            # ---- D4 option C: the app's re-derivation must be exactly reproducible.
+            sa = rec["signal_a"]
+            assert {"verdict_branches", "screen_score_red_below",
+                    "weight_matrix", "utility_score"} <= sa.keys(), \
+                f"FAIL: D4 fields missing in {rec['scheme_name']}"
+            br = sa["verdict_branches"]
+            assert set(br) == {"score_red", "score_not_red"}
+            for b in br.values():
+                assert {"verdict", "verdict_color", "verdict_caveat"} == b.keys()
+            if br["score_red"]["verdict"] != br["score_not_red"]["verdict"]:
+                n_branch_differ += 1
+            # THE load-bearing invariant. The app picks a branch by comparing the
+            # utility it recomputed against the shipped cutoff; if the branch that
+            # rule selects were not the verdict Python actually issued, every
+            # personalised verdict would be subtly wrong AND the default-profile
+            # verdict shown beside it would disagree with itself.
+            if sa["utility_score"] is not None:
+                picked = br["score_red" if sa["utility_score"] < sa["screen_score_red_below"]
+                            else "score_not_red"]
+                assert picked["verdict"] == sa["verdict"], (
+                    f"FAIL: branch/verdict disagree on {rec['scheme_name']}: "
+                    f"utility={sa['utility_score']} picked={picked['verdict']} "
+                    f"shipped={sa['verdict']}")
+                assert picked["verdict_caveat"] == sa["verdict_caveat"]
+                # And the recomputation FORMULA itself — this is the exact arithmetic
+                # a Dart port will run, so if `100 * Σ w·s` does not reproduce the
+                # shipped utility, the documented client-side formula is wrong.
+                if all(v is not None for v in sa["sub_scores"].values()):
+                    recomputed = 100.0 * sum(sa["weight_matrix"][k] * sa["sub_scores"][k]
+                                             for k in sa["sub_scores"])
+                    # weight_matrix/sub_scores are rounded for transport (3dp), so this
+                    # is a tolerance on ROUNDING, not on agreement.
+                    assert abs(recomputed - sa["utility_score"]) < 0.5, (
+                        f"FAIL: utility formula does not reproduce on {rec['scheme_name']}: "
+                        f"recomputed={recomputed:.3f} shipped={sa['utility_score']}")
+                    # Weights are a normalised distribution — a Dart port that forgets
+                    # the final /total would silently scale every utility.
+                    assert abs(sum(sa["weight_matrix"].values()) - 1.0) < 1e-6
         print(f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
               f"lock always null, verdict_basis stamped default-profile, "
               f"expense gap flagged not guessed, sub_scores NaN-safe, "
               f"cohort_status always present — PASS")
+        # Say plainly how much the branch/verdict assertion above actually proved on
+        # THIS batch. Where both branches agree the assertion still holds but cannot
+        # discriminate, and a vacuous pass reported as a real one is worse than no
+        # test at all — so report the discriminating count instead of implying it.
+        print(f"[selftest] D4 branch pair: verdict formula reproduces and branch "
+              f"selection matches the shipped verdict on {len(artifact['funds'])} "
+              f"records; the branch choice SWINGS the verdict on {n_branch_differ} of "
+              f"them{' (so the selection assert is structural only on this batch)' if not n_branch_differ else ''} — PASS")
 
         # ---- Every mf_live_score refusal reaches the app as its OWN flag ----------
         # Phase 2 added two statuses that this module silently dropped, and mapped a

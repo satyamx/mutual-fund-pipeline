@@ -59,6 +59,34 @@ is **`alerts_b`** (System B), not `alerts`.
 | `eligibility` | NFO/newborn gating | A young fund's factor rules are dormant; don't render dormancy as a pass. |
 | `nfo_dossier` | new-fund detail | Present for NFOs; null otherwise. |
 | `evaluation{}` (top level) | model-health panel | Per `app_evaluation_contract.md`. `PENDING` ≠ bad. |
+| `signal_a.verdict_branches{score_red, score_not_red}` | the personalised verdict | The two possible verdicts. Pick with the formula below. **Do not reimplement the verdict rule** — that is the whole point of shipping both. |
+| `signal_a.screen_score_red_below` | the cutoff | Read it; **never hardcode 45 in Dart**. If the threshold is retuned server-side, a hardcoded copy silently diverges. |
+| `signal_a.weight_matrix`, `.utility_score` | drift self-check | The **default-profile** values. Use them to verify your ported weight function on every record (see below), not to score the user. |
+
+### Personalising the verdict (D4 option C — `docs/d4_profile_verdicts.md`)
+
+The investor profile reaches the verdict rule through exactly one term, so the app
+needs to port **only the weight function**, not the rule:
+
+```dart
+final w = utilityWeights(userProfile);                  // ~20 lines, ported from
+                                                        // ProfileRiskScorerAgent.utility_weights
+final u = 100 * sum(w[k] * signalA.subScores[k]);       // sub_scores are profile-agnostic
+final b = u < signalA.screenScoreRedBelow ? 'score_red' : 'score_not_red';
+final verdict = signalA.verdictBranches[b];             // verdict + color + caveat
+```
+
+**Verify the port on every record rather than trusting it.** When
+`verdict_basis.is_default_profile` is true, `utilityWeights` applied to
+`verdict_basis.profile` must reproduce the shipped `weight_matrix`, and the formula
+must reproduce `utility_score`. If either disagrees, the Dart port has drifted from
+the Python — fail loudly or fall back to the shipped `signal_a.verdict`; do not show a
+number you cannot reproduce. `mf_artifact.py --selftest` asserts both server-side.
+
+Two things this does **not** change: the weights are a normalised distribution (a port
+that drops the final `/total` silently rescales every utility), and the cutoff is a
+tunable default with no out-of-sample validation — personalising which side of it a
+fund lands on does not make the verdict more correct.
 
 ### Two cohort statuses that mean opposite things
 

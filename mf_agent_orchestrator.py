@@ -988,6 +988,17 @@ class NewsSentimentResearcherAgent:
 # ==============================================================================
 # 5. RECOMMENDATION ENGINE + MASTER ORCHESTRATOR
 # ==============================================================================
+# Screen-score bands (tunable defaults, NOT validated out-of-sample — see the
+# caveat in docs/d4_profile_verdicts.md). SCREEN_SCORE_RED is the ONLY one the
+# verdict rule reads, and only as `utility < RED`; SCREEN_SCORE_GREEN colours the
+# metric for display and never reaches the verdict. Named rather than inlined
+# because the app applies the same cutoff when it re-derives a profile-specific
+# verdict, and a hardcoded 45 in Dart is exactly the drift that document exists to
+# prevent — so it ships in the artifact instead of being copied.
+SCREEN_SCORE_GREEN = 65.0
+SCREEN_SCORE_RED = 45.0
+
+
 class RecommendationEngine:
     """Fuses A/B/C/D outputs into an institutional Buy/Sell/Hold with rationale."""
 
@@ -1096,25 +1107,47 @@ class RecommendationEngine:
                                        else "green")
         # supporting weighted screen score (profile-weighted sub-scores) → a banded
         # datapoint, honestly labelled a screening aid (measured below chance alone).
-        score_band = "green" if utility >= 65 else ("red" if utility < 45 else "blue")
+        score_band = ("green" if utility >= SCREEN_SCORE_GREEN
+                      else ("red" if utility < SCREEN_SCORE_RED else "blue"))
         metric_colors["screen_score"] = score_band
 
         core = ["cagr", "excess_cagr_3y", "sortino_3y", "max_dd_3y", "consistency"]
         greens = sum(metric_colors[k] == "green" for k in core)
         reds = sum(metric_colors[k] == "red" for k in core)
         critical_breach = bool(critical) or bool(sentiment["red_flags"])
-        if critical_breach or reds >= 3 or (reds > greens and score_band == "red"):
-            verdict, verdict_color = "SELL / AVOID", "red"
-        elif greens >= 3 and reds == 0 and score_band != "red":
-            verdict, verdict_color = "BUY", "green"
-        else:
-            verdict, verdict_color = "HOLD / WATCH", "blue"
-        # BUY on the quant screen alone (holdings never on free data) carries its
-        # caveat visibly — the user chose "BUY allowed, caveat shown".
-        verdict_caveat = ""
-        if verdict == "BUY" and not is_passive and macs is None:
-            verdict_caveat = ("screen-favourable on NAV facts only — manager skill & "
-                              "holdings NOT verified; not a prediction of outperformance")
+
+        # The investor profile reaches this rule through EXACTLY ONE term —
+        # score_band — and only ever as "is it red", i.e. utility < SCREEN_SCORE_RED.
+        # (The green threshold is display-only and never appears below.) Everything
+        # else here is profile-invariant: critical_breach is upstream compliance +
+        # regulatory red flags, and greens/reds count metrics computed from NAV and
+        # holdings alone. So with those fixed, the verdict is a function of ONE
+        # boolean and a fund has exactly TWO possible verdicts.
+        #
+        # That is why this is a helper rather than a straight-line block: both
+        # branches are precomputed and shipped, so the app can personalise the
+        # verdict by recomputing only `utility` from its own profile weights,
+        # WITHOUT reimplementing this rule. Because the shipped verdict comes from
+        # the same helper, it is one of the two branches by construction — they
+        # cannot drift apart. Full rationale: docs/d4_profile_verdicts.md.
+        def _verdict(score_is_red: bool) -> tuple[str, str, str]:
+            if critical_breach or reds >= 3 or (reds > greens and score_is_red):
+                v, c = "SELL / AVOID", "red"
+            elif greens >= 3 and reds == 0 and not score_is_red:
+                v, c = "BUY", "green"
+            else:
+                v, c = "HOLD / WATCH", "blue"
+            # BUY on the quant screen alone (holdings never on free data) carries its
+            # caveat visibly — the user chose "BUY allowed, caveat shown".
+            cav = ("screen-favourable on NAV facts only — manager skill & "
+                   "holdings NOT verified; not a prediction of outperformance"
+                   if v == "BUY" and not is_passive and macs is None else "")
+            return v, c, cav
+
+        verdict, verdict_color, verdict_caveat = _verdict(score_band == "red")
+        _keys = ("verdict", "verdict_color", "verdict_caveat")
+        verdict_branches = {"score_red": dict(zip(_keys, _verdict(True))),
+                            "score_not_red": dict(zip(_keys, _verdict(False)))}
 
         # Confidence must reflect the DATA ACTUALLY ON DISK, not an adapter's
         # self-declared intent. A mocked run must never report high confidence.
@@ -1136,6 +1169,9 @@ class RecommendationEngine:
                        f"screen={utility} greens={greens} reds={reds}")
         return dict(
             verdict=verdict, verdict_color=verdict_color, verdict_caveat=verdict_caveat,
+            # Both possible verdicts + the cutoff that selects between them, so the
+            # app personalises by recomputing `utility` alone (docs/d4_profile_verdicts.md).
+            verdict_branches=verdict_branches, screen_score_red_below=SCREEN_SCORE_RED,
             metric_colors=metric_colors,
             kind="screen-based recommendation (transparent rule over the metrics below; "
                  "NAV-only data, manager skill unverified)",

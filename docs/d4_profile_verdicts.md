@@ -1,10 +1,15 @@
 # D4 — profile-specific verdicts: where the rule should live
 
-**Status: open decision, but much smaller than it was written up as.** This document
-exists because the framing in `docs/STATUS.md` ("re-deriving a verdict on-device means
-reimplementing the verdict rule in Dart, where it can drift from the Python") turns out
-to overstate the problem. Reading `RecommendationEngine.run` closes most of the question
-before any trade-off has to be made.
+**Status: DECIDED and IMPLEMENTED (2026-08-06) — option C.** The owner chose C; the
+server side ships. `RecommendationEngine.run` now emits `verdict_branches` +
+`screen_score_red_below`, and `mf_artifact.py` ships those alongside `weight_matrix`
+and `utility_score`. What remains is the app-side port of `utilityWeights` — the client
+contract and its self-check are in `docs/integration_plan.md`.
+
+This document exists because the framing in `docs/STATUS.md` ("re-deriving a verdict
+on-device means reimplementing the verdict rule in Dart, where it can drift from the
+Python") turned out to overstate the problem. Reading `RecommendationEngine.run` closed
+most of the question before any trade-off had to be made.
 
 Everything below was verified against the code, not recalled. The relevant sources are
 `mf_agent_orchestrator.py` (`ProfileRiskScorerAgent.utility_weights`, ~L847; `.run`, ~L876;
