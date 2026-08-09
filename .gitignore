@@ -18,3 +18,12 @@ mf_cache/
 .env
 .env.*
 !.env.example
+
+# Raw SMS dumps — same class of secret as .env above, and this repo is PUBLIC.
+# The Hisaab Kitaab SMS parser work runs in a worktree under this directory, so
+# a dump or its derived templates can land here by accident even though the
+# feature belongs to the other repo. The live copy is kept outside every git
+# repo; these are the second line of defence.
+sms-*.xml
+sms_backup*.xml
+templates.txt
