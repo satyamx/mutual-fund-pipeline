@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 
 import numpy as np
@@ -53,8 +52,12 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 from mf_cv import (
-    BLOCKS, CAUSAL_TEST_END, CAUSAL_TEST_START, CAUSAL_TRAIN_END, MODEL_START,
-    causal_holdout, cpcv_folds,
+    CAUSAL_TEST_END,
+    CAUSAL_TEST_START,
+    CAUSAL_TRAIN_END,
+    MODEL_START,
+    causal_holdout,
+    cpcv_folds,
 )
 from mf_datasources import CACHE
 from mf_labels import COHORT_MIN_SIZE
@@ -111,21 +114,19 @@ TARGETS = {"or_hybrid": "y", "excess_hybrid": "condA", "excess_peer": "condA_pee
 # Fixed a-priori configs (see module docstring) + pre-registered sensitivity grid.
 PRIMARY_ENET = dict(C=0.1, l1_ratio=0.5)
 ENET_SENSITIVITY = [
-    dict(C=0.03, l1_ratio=0.5), dict(C=1.0, l1_ratio=0.5),
-    dict(C=0.1, l1_ratio=0.2), dict(C=0.1, l1_ratio=0.8),
+    dict(C=0.03, l1_ratio=0.5),
+    dict(C=1.0, l1_ratio=0.5),
+    dict(C=0.1, l1_ratio=0.2),
+    dict(C=0.1, l1_ratio=0.8),
 ]
-PRIMARY_HGBT = dict(learning_rate=0.06, max_leaf_nodes=15, max_iter=300,
-                    min_samples_leaf=40, l2_regularization=1.0)
+PRIMARY_HGBT = dict(learning_rate=0.06, max_leaf_nodes=15, max_iter=300, min_samples_leaf=40, l2_regularization=1.0)
 HGBT_SENSITIVITY = [
-    dict(learning_rate=0.1, max_leaf_nodes=15, max_iter=300,
-         min_samples_leaf=40, l2_regularization=1.0),
-    dict(learning_rate=0.06, max_leaf_nodes=7, max_iter=300,
-         min_samples_leaf=40, l2_regularization=1.0),
-    dict(learning_rate=0.06, max_leaf_nodes=31, max_iter=300,
-         min_samples_leaf=40, l2_regularization=1.0),
+    dict(learning_rate=0.1, max_leaf_nodes=15, max_iter=300, min_samples_leaf=40, l2_regularization=1.0),
+    dict(learning_rate=0.06, max_leaf_nodes=7, max_iter=300, min_samples_leaf=40, l2_regularization=1.0),
+    dict(learning_rate=0.06, max_leaf_nodes=31, max_iter=300, min_samples_leaf=40, l2_regularization=1.0),
 ]
 
-CHALLENGER_MARGIN = 0.03          # >3 AUC points to adopt (design §4.2)
+CHALLENGER_MARGIN = 0.03  # >3 AUC points to adopt (design §4.2)
 CALIB_FRAC = 0.25
 MIN_ISOTONIC_N = 300
 MIN_ISOTONIC_MINORITY = 30
@@ -133,9 +134,9 @@ MIN_ISOTONIC_MINORITY = 30
 # rather than inventing a second threshold: below this a block's positive rate is
 # noise, and shipping it as a probability claims more than the slice can support.
 MIN_CAL_BLOCK = 30
-EFFECTIVE_N_DIVISOR = 30          # ≈ overlap inflation of monthly 3y windows (§0)
+EFFECTIVE_N_DIVISOR = 30  # ≈ overlap inflation of monthly 3y windows (§0)
 DECILE = 0.10
-N_BOOT = 80                       # half-year block bootstrap replicates (§3.4)
+N_BOOT = 80  # half-year block bootstrap replicates (§3.4)
 
 META_COLS = ("amfi_code", "anchor")
 
@@ -175,14 +176,23 @@ class Preprocessor:
 # ==============================================================================
 def fit_enet(X: np.ndarray, y: np.ndarray, cfg: dict) -> LogisticRegression:
     return LogisticRegression(
-        penalty="elasticnet", solver="saga", C=cfg["C"], l1_ratio=cfg["l1_ratio"],
-        class_weight="balanced", max_iter=4000, tol=1e-4, random_state=0,
+        penalty="elasticnet",
+        solver="saga",
+        C=cfg["C"],
+        l1_ratio=cfg["l1_ratio"],
+        class_weight="balanced",
+        max_iter=4000,
+        tol=1e-4,
+        random_state=0,
     ).fit(X, y)
 
 
 def fit_hgbt(X: np.ndarray, y: np.ndarray, cfg: dict) -> HistGradientBoostingClassifier:
     return HistGradientBoostingClassifier(
-        **cfg, class_weight="balanced", early_stopping=False, random_state=0,
+        **cfg,
+        class_weight="balanced",
+        early_stopping=False,
+        random_state=0,
     ).fit(X, y)
 
 
@@ -209,11 +219,10 @@ class Calibrator:
             # least MIN_CAL_BLOCK observations, so no emitted probability claims
             # more than its own support allows. Measured: AUC 0.6094 -> 0.6102
             # (calibration overfit slightly reduced), monotonicity preserved.
-            iso = IsotonicRegression(y_min=0.0, y_max=1.0,
-                                     out_of_bounds="clip").fit(p_raw, y)
+            iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(p_raw, y)
             self._x, self._y, self._support = _merge_thin_blocks(
-                np.asarray(p_raw, dtype=float), np.asarray(y, dtype=bool),
-                iso.predict(p_raw), MIN_CAL_BLOCK)
+                np.asarray(p_raw, dtype=float), np.asarray(y, dtype=bool), iso.predict(p_raw), MIN_CAL_BLOCK
+            )
         else:
             self.kind = "platt"
             z = _logit(p_raw).reshape(-1, 1)
@@ -232,12 +241,13 @@ class Calibrator:
             # `support` is shipped so the claim is auditable: a reader (and the
             # mf_infer selftest) can check how many observations back each knot
             # rather than taking the probability on trust.
-            return dict(kind="isotonic",
-                        x=[float(v) for v in self._x],
-                        y=[float(v) for v in self._y],
-                        support=[int(v) for v in self._support])
-        return dict(kind="platt", coef=float(self._platt.coef_[0][0]),
-                    intercept=float(self._platt.intercept_[0]))
+            return dict(
+                kind="isotonic",
+                x=[float(v) for v in self._x],
+                y=[float(v) for v in self._y],
+                support=[int(v) for v in self._support],
+            )
+        return dict(kind="platt", coef=float(self._platt.coef_[0][0]), intercept=float(self._platt.intercept_[0]))
 
 
 def _rule_of_three(n: int) -> float:
@@ -246,8 +256,7 @@ def _rule_of_three(n: int) -> float:
     return min(0.5, 3.0 / max(n, 1))
 
 
-def _merge_thin_blocks(p_raw: np.ndarray, y: np.ndarray, fitted: np.ndarray,
-                       min_n: int) -> tuple:
+def _merge_thin_blocks(p_raw: np.ndarray, y: np.ndarray, fitted: np.ndarray, min_n: int) -> tuple:
     """Collapse PAVA blocks below `min_n` into a neighbour; return (x, y, support).
 
     Merging ADJACENT blocks preserves monotonicity by construction: pooling two
@@ -265,10 +274,9 @@ def _merge_thin_blocks(p_raw: np.ndarray, y: np.ndarray, fitted: np.ndarray,
         if sizes[i] >= min_n:
             break
         # Merge into the smaller neighbour so one fat block doesn't swallow the map.
-        j = i - 1 if (i == len(blocks) - 1 or
-                      (i > 0 and sizes[i - 1] <= sizes[i + 1])) else i + 1
+        j = i - 1 if (i == len(blocks) - 1 or (i > 0 and sizes[i - 1] <= sizes[i + 1])) else i + 1
         lo, hi = min(i, j), max(i, j)
-        blocks[lo:hi + 1] = [np.concatenate(blocks[lo:hi + 1])]
+        blocks[lo : hi + 1] = [np.concatenate(blocks[lo : hi + 1])]
 
     xs = np.array([p[b].max() for b in blocks], dtype=float)
     ys = np.array([float(yy[b].mean()) for b in blocks], dtype=float)
@@ -293,8 +301,7 @@ def _logit(p: np.ndarray) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
-def calib_split(anchors: np.ndarray, train_mask: np.ndarray,
-                frac: float = CALIB_FRAC) -> tuple[np.ndarray, np.ndarray]:
+def calib_split(anchors: np.ndarray, train_mask: np.ndarray, frac: float = CALIB_FRAC) -> tuple[np.ndarray, np.ndarray]:
     """Last `frac` of the fold's training ANCHORS (by date) become the
     calibration slice; the model fits on the earlier anchors."""
     ta = np.unique(anchors[train_mask])
@@ -313,8 +320,7 @@ def pooled_auc(y: np.ndarray, p: np.ndarray) -> float:
     return float(roc_auc_score(y, p))
 
 
-def within_anchor_rank_auc(anchors: np.ndarray, y: np.ndarray,
-                           p: np.ndarray) -> tuple[float, int]:
+def within_anchor_rank_auc(anchors: np.ndarray, y: np.ndarray, p: np.ndarray) -> tuple[float, int]:
     """AUC inside each monthly cohort, averaged — the fund-selection metric,
     immune to regime base-rate drift."""
     aucs = []
@@ -343,7 +349,9 @@ def decile_stats(anchors: np.ndarray, y: np.ndarray, p: np.ndarray) -> dict:
     return dict(
         top_decile_precision=top_hits / top_n if top_n else float("nan"),
         bottom_decile_neg_capture=bot_neg / total_neg if total_neg else float("nan"),
-        n_top=top_n, n_bottom=bot_n, total_negatives=total_neg,
+        n_top=top_n,
+        n_bottom=bot_n,
+        total_negatives=total_neg,
     )
 
 
@@ -353,13 +361,13 @@ def reliability_table(y: np.ndarray, p: np.ndarray, bins: int = 10) -> list[dict
     for lo, hi in zip(edges[:-1], edges[1:]):
         m = (p >= lo) & (p < hi if hi < 1.0 else p <= hi)
         if m.sum():
-            out.append(dict(bin=f"{lo:.1f}-{hi:.1f}", n=int(m.sum()),
-                            mean_p=float(p[m].mean()), frac_pos=float(y[m].mean())))
+            out.append(
+                dict(bin=f"{lo:.1f}-{hi:.1f}", n=int(m.sum()), mean_p=float(p[m].mean()), frac_pos=float(y[m].mean()))
+            )
     return out
 
 
-def block_metrics(anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray,
-                  p_cal: np.ndarray) -> dict:
+def block_metrics(anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray, p_cal: np.ndarray) -> dict:
     base = float(y.mean())
     rank, n_cohorts = within_anchor_rank_auc(anchors, y, p_raw)
     dec = decile_stats(anchors, y, p_raw)
@@ -368,22 +376,34 @@ def block_metrics(anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray,
     recall = float((p_cal[pos] >= 0.5).mean()) if pos.any() else float("nan")
     brier = float(np.mean((p_cal - y) ** 2))
     return dict(
-        n=int(len(y)), effective_n=round(len(y) / EFFECTIVE_N_DIVISOR),
-        base_rate=base, negatives=int((~pos).sum()),
-        pooled_auc=pooled_auc(y, p_raw), rank_auc=rank, rank_auc_cohorts=n_cohorts,
-        top_decile_precision=dec["top_decile_precision"], lift_over_base=lift,
+        n=int(len(y)),
+        effective_n=round(len(y) / EFFECTIVE_N_DIVISOR),
+        base_rate=base,
+        negatives=int((~pos).sum()),
+        pooled_auc=pooled_auc(y, p_raw),
+        rank_auc=rank,
+        rank_auc_cohorts=n_cohorts,
+        top_decile_precision=dec["top_decile_precision"],
+        lift_over_base=lift,
         recall_at_05=recall,
         bottom_decile_neg_capture=dec["bottom_decile_neg_capture"],
-        total_negatives=dec["total_negatives"], brier=brier,
+        total_negatives=dec["total_negatives"],
+        brier=brier,
     )
 
 
 # ==============================================================================
 # Single-fold runner (shared by CPCV and holdout)
 # ==============================================================================
-def run_fold(df: pd.DataFrame, feature_cols: list[str], target_col: str,
-             train_mask: np.ndarray, test_mask: np.ndarray,
-             kind: str, cfg: dict) -> tuple[dict, pd.DataFrame, object, object]:
+def run_fold(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    train_mask: np.ndarray,
+    test_mask: np.ndarray,
+    kind: str,
+    cfg: dict,
+) -> tuple[dict, pd.DataFrame, object, object]:
     anchors = df["anchor"].to_numpy()
     y = df[target_col].to_numpy(dtype=bool)
     fit_mask, calib_mask = calib_split(anchors, train_mask)
@@ -420,14 +440,18 @@ def run_fold(df: pd.DataFrame, feature_cols: list[str], target_col: str,
     metrics["n_train_fit"] = int(fit_mask.sum())
     metrics["n_train_calib"] = int(calib_mask.sum())
 
-    preds = pd.DataFrame(dict(
-        amfi_code=df.loc[test_mask, "amfi_code"].to_numpy(),
-        anchor=anchors[test_mask], y=y[test_mask],
-        condA=df.loc[test_mask, "condA"].to_numpy(),
-        condB=df.loc[test_mask, "condB"].to_numpy(),
-        condA_peer=df.loc[test_mask, "condA_peer"].to_numpy(),
-        p_raw=p_test_raw, p_cal=p_test_cal,
-    ))
+    preds = pd.DataFrame(
+        dict(
+            amfi_code=df.loc[test_mask, "amfi_code"].to_numpy(),
+            anchor=anchors[test_mask],
+            y=y[test_mask],
+            condA=df.loc[test_mask, "condA"].to_numpy(),
+            condB=df.loc[test_mask, "condB"].to_numpy(),
+            condA_peer=df.loc[test_mask, "condA_peer"].to_numpy(),
+            p_raw=p_test_raw,
+            p_cal=p_test_cal,
+        )
+    )
     return metrics, preds, model, pre
 
 
@@ -442,25 +466,24 @@ def run_cpcv(df: pd.DataFrame, feature_cols: list[str]) -> dict:
     for tname, tcol in TARGETS.items():
         results["targets"][tname] = {"enet": {}}
         for block, train, test in cpcv_folds(anchors):
-            m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test,
-                                      "enet", PRIMARY_ENET)
+            m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, "enet", PRIMARY_ENET)
             results["targets"][tname]["enet"][block] = m
             preds["target"], preds["model"], preds["block"] = tname, "enet", block
             all_preds.append(preds)
-            print(f"[cpcv] {tname:14s} enet {block}: pooled_auc={m['pooled_auc']:.3f} "
-                  f"rank_auc={m['rank_auc']:.3f} neg_capture="
-                  f"{m['bottom_decile_neg_capture']:.3f} (n={m['n']}, neg={m['negatives']})")
+            print(
+                f"[cpcv] {tname:14s} enet {block}: pooled_auc={m['pooled_auc']:.3f} "
+                f"rank_auc={m['rank_auc']:.3f} neg_capture="
+                f"{m['bottom_decile_neg_capture']:.3f} (n={m['n']}, neg={m['negatives']})"
+            )
 
     # challenger on the confirmed deliverable target only
     results["targets"]["or_hybrid"]["hgbt"] = {}
     for block, train, test in cpcv_folds(anchors):
-        m, preds, _, _ = run_fold(df, feature_cols, "y", train, test,
-                                  "hgbt", PRIMARY_HGBT)
+        m, preds, _, _ = run_fold(df, feature_cols, "y", train, test, "hgbt", PRIMARY_HGBT)
         results["targets"]["or_hybrid"]["hgbt"][block] = m
         preds["target"], preds["model"], preds["block"] = "or_hybrid", "hgbt", block
         all_preds.append(preds)
-        print(f"[cpcv] or_hybrid      hgbt {block}: pooled_auc={m['pooled_auc']:.3f} "
-              f"rank_auc={m['rank_auc']:.3f}")
+        print(f"[cpcv] or_hybrid      hgbt {block}: pooled_auc={m['pooled_auc']:.3f} rank_auc={m['rank_auc']:.3f}")
 
     # pre-registered sensitivity grid (no selection — reported, not chosen from)
     for kind, grid in (("enet", ENET_SENSITIVITY), ("hgbt", HGBT_SENSITIVITY)):
@@ -472,8 +495,8 @@ def run_cpcv(df: pd.DataFrame, feature_cols: list[str]) -> dict:
                 aucs.append(m["pooled_auc"])
                 ranks.append(m["rank_auc"])
             results["sensitivity"][key] = dict(
-                mean_pooled_auc=float(np.nanmean(aucs)),
-                mean_rank_auc=float(np.nanmean(ranks)))
+                mean_pooled_auc=float(np.nanmean(aucs)), mean_rank_auc=float(np.nanmean(ranks))
+            )
             print(f"[sens] {key}: mean_auc={np.nanmean(aucs):.3f}")
 
     pd.concat(all_preds, ignore_index=True).to_parquet(OOS_PRED_PATH, index=False)
@@ -486,9 +509,11 @@ def run_cpcv(df: pd.DataFrame, feature_cols: list[str]) -> dict:
 # ==============================================================================
 def run_holdout(df: pd.DataFrame, feature_cols: list[str], force: bool = False) -> dict:
     if HOLDOUT_STAMP.exists() and not force:
-        print("holdout already evaluated — reusing stamped result "
-              f"({HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do this "
-              "to shop for a better number).")
+        print(
+            "holdout already evaluated — reusing stamped result "
+            f"({HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do this "
+            "to shop for a better number)."
+        )
         return json.loads(HOLDOUT_STAMP.read_text(encoding="utf-8"))
 
     train, test = causal_holdout(df["anchor"])
@@ -496,21 +521,24 @@ def run_holdout(df: pd.DataFrame, feature_cols: list[str], force: bool = False) 
         evaluated_at=datetime.now(timezone.utc).isoformat(),
         train_end=str(CAUSAL_TRAIN_END.date()),
         test_span=f"{CAUSAL_TEST_START.date()}..{CAUSAL_TEST_END.date()}",
-        n_train=int(train.sum()), n_test=int(test.sum()), models={},
+        n_train=int(train.sum()),
+        n_test=int(test.sum()),
+        models={},
     )
     all_preds = []
     runs = [(t, TARGETS[t], "enet", PRIMARY_ENET) for t in TARGETS]
     runs.append(("or_hybrid", "y", "hgbt", PRIMARY_HGBT))
     for tname, tcol, kind, cfg in runs:
         m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg)
-        m["reliability"] = reliability_table(
-            preds["y"].to_numpy(dtype=bool), preds["p_cal"].to_numpy())
+        m["reliability"] = reliability_table(preds["y"].to_numpy(dtype=bool), preds["p_cal"].to_numpy())
         out["models"][f"{tname}:{kind}"] = m
         preds["target"], preds["model"], preds["block"] = tname, kind, "HOLDOUT"
         all_preds.append(preds)
-        print(f"[holdout] {tname}:{kind}: pooled_auc={m['pooled_auc']:.3f} "
-              f"rank_auc={m['rank_auc']:.3f} neg_capture="
-              f"{m['bottom_decile_neg_capture']:.3f} (neg={m['negatives']})")
+        print(
+            f"[holdout] {tname}:{kind}: pooled_auc={m['pooled_auc']:.3f} "
+            f"rank_auc={m['rank_auc']:.3f} neg_capture="
+            f"{m['bottom_decile_neg_capture']:.3f} (neg={m['negatives']})"
+        )
 
     pd.concat(all_preds, ignore_index=True).to_parquet(HOLDOUT_PRED_PATH, index=False)
     HOLDOUT_STAMP.write_text(json.dumps(out, indent=1), encoding="utf-8")
@@ -561,10 +589,12 @@ def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
                 results["targets"][tname][kind][block] = m
                 preds["target"], preds["model"], preds["block"] = tname, kind, block
                 all_preds.append(preds)
-                print(f"[cpcv-cohort] {tname:16s} {kind:4s} {block}: "
-                      f"pooled_auc={m['pooled_auc']:.3f} rank_auc={m['rank_auc']:.3f} "
-                      f"base_rate={m['base_rate']:.3f} neg={m['negatives']} "
-                      f"(n={m['n']})")
+                print(
+                    f"[cpcv-cohort] {tname:16s} {kind:4s} {block}: "
+                    f"pooled_auc={m['pooled_auc']:.3f} rank_auc={m['rank_auc']:.3f} "
+                    f"base_rate={m['base_rate']:.3f} neg={m['negatives']} "
+                    f"(n={m['n']})"
+                )
     pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_OOS_PRED_PATH, index=False)
     COHORT_CPCV_RESULTS_PATH.write_text(json.dumps(results, indent=1), encoding="utf-8")
     return results
@@ -572,9 +602,11 @@ def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
 
 def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = False) -> dict:
     if COHORT_HOLDOUT_STAMP.exists() and not force:
-        print("cohort holdout already evaluated — reusing stamped result "
-              f"({COHORT_HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do "
-              "this to shop for a better number).")
+        print(
+            "cohort holdout already evaluated — reusing stamped result "
+            f"({COHORT_HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do "
+            "this to shop for a better number)."
+        )
         return json.loads(COHORT_HOLDOUT_STAMP.read_text(encoding="utf-8"))
 
     train, test = causal_holdout(df["anchor"])
@@ -582,7 +614,9 @@ def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = 
         evaluated_at=datetime.now(timezone.utc).isoformat(),
         train_end=str(CAUSAL_TRAIN_END.date()),
         test_span=f"{CAUSAL_TEST_START.date()}..{CAUSAL_TEST_END.date()}",
-        n_train=int(train.sum()), n_test=int(test.sum()), models={},
+        n_train=int(train.sum()),
+        n_test=int(test.sum()),
+        models={},
     )
     all_preds = []
     for tname, tcol in COHORT_TARGETS.items():
@@ -591,9 +625,11 @@ def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = 
             out["models"][f"{tname}:{kind}"] = m
             preds["target"], preds["model"], preds["block"] = tname, kind, "HOLDOUT"
             all_preds.append(preds)
-            print(f"[holdout-cohort] {tname}:{kind}: pooled_auc={m['pooled_auc']:.3f} "
-                  f"rank_auc={m['rank_auc']:.3f} base_rate={m['base_rate']:.3f} "
-                  f"neg={m['negatives']}")
+            print(
+                f"[holdout-cohort] {tname}:{kind}: pooled_auc={m['pooled_auc']:.3f} "
+                f"rank_auc={m['rank_auc']:.3f} base_rate={m['base_rate']:.3f} "
+                f"neg={m['negatives']}"
+            )
 
     pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_HOLDOUT_PRED_PATH, index=False)
     COHORT_HOLDOUT_STAMP.write_text(json.dumps(out, indent=1), encoding="utf-8")
@@ -641,12 +677,14 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         training_anchor_span=f"{df['anchor'].min().date()}..{df['anchor'].max().date()}",
         features=feature_cols,
         hyperparameters=PRIMARY_ENET,
-        note=("Within-cohort relative targets (top-quartile / top-half vs same "
-              "(anchor, cohort) peers). The ONLY validated edge in this pipeline "
-              "(cohort_q1 holdout AUC ~0.558, lift ~1.10x) — weak, a signal INPUT "
-              "not a standalone verdict. Elastic-net only (HGBT showed no edge on "
-              "these targets). Fitted on all cohort-eligible anchors except the "
-              "last-25% calibration slice."),
+        note=(
+            "Within-cohort relative targets (top-quartile / top-half vs same "
+            "(anchor, cohort) peers). The ONLY validated edge in this pipeline "
+            "(cohort_q1 holdout AUC ~0.558, lift ~1.10x) — weak, a signal INPUT "
+            "not a standalone verdict. Elastic-net only (HGBT showed no edge on "
+            "these targets). Fitted on all cohort-eligible anchors except the "
+            "last-25% calibration slice."
+        ),
         models={},
     )
     all_mask = np.ones(len(df), dtype=bool)
@@ -656,18 +694,15 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         X = df[feature_cols]
         pre = Preprocessor().fit(X[fit_mask])
         model = fit_enet(pre.transform(X[fit_mask]), y[fit_mask], PRIMARY_ENET)
-        cal = Calibrator().fit(
-            model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
+        cal = Calibrator().fit(model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
         artifact["models"][tname] = dict(
             target=tcol,
             base_rate=float(y.mean()),
-            signal_context=dict(holdout_auc=holdout_auc.get(tname),
-                                base_rate=float(y.mean())),
+            signal_context=dict(holdout_auc=holdout_auc.get(tname), base_rate=float(y.mean())),
             imputation_medians={c: float(v) for c, v in pre.median.items()},
             standardize_mean={c: float(v) for c, v in pre.mean.items()},
             standardize_std={c: float(v) for c, v in pre.std.items()},
-            coefficients={c: float(v) for c, v in
-                          zip(feature_cols, model.coef_[0])},
+            coefficients={c: float(v) for c, v in zip(feature_cols, model.coef_[0])},
             intercept=float(model.intercept_[0]),
             calibration=cal.to_json(),
         )
@@ -682,64 +717,84 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
 
     add("# Within-cohort relative targets — second modeling attempt, honest results")
     add("")
-    add(f"Generated {datetime.now(timezone.utc).date()}. Targets: `y_cohort_q1` "
+    add(
+        f"Generated {datetime.now(timezone.utc).date()}. Targets: `y_cohort_q1` "
         "(top quartile of same-cohort peers' 3y-forward return) and "
         "`y_cohort_top_half` (above cohort median), computed per (anchor, cohort) "
         "directly from R_fwd — cohort = PeerProxyResolver grouping (same "
         "`category` for diversified funds; same `sector` for thematic funds with "
         ">=3 members; a pooled small-sector thematic group otherwise). Anchors "
         f"with < {label_stats['min_size']} cohort members with a valid R_fwd are "
-        "excluded rather than guessed.")
+        "excluded rather than guessed."
+    )
     add("")
     add("## Read this first")
     add("")
-    add("- This target removes the regime effect the OR-label suffered from "
+    add(
+        "- This target removes the regime effect the OR-label suffered from "
         "(2017 anchors ~32% positive, 2020 anchors ~99% positive) by construction: "
         "every fund in a cohort at a given anchor faces the same market, so the "
-        "label only reflects RELATIVE standing, not market direction.")
-    add("- Base rates below deviate from the nominal ~25%/~50% guide because "
+        "label only reflects RELATIVE standing, not market direction."
+    )
+    add(
+        "- Base rates below deviate from the nominal ~25%/~50% guide because "
         "small cohorts (n=4-9) cannot split into exact quartiles/halves under a "
         "continuous quantile — this is honest quantization noise, not a labeling "
         "bug (verified: n=5 cohorts, the five 5-fund thematic sectors, run "
-        "40%/40% instead of 25%/50%; see label_stats below).")
-    add("- Headline metric is AUC / rank-AUC / lift over base rate, never raw "
+        "40%/40% instead of 25%/50%; see label_stats below)."
+    )
+    add(
+        "- Headline metric is AUC / rank-AUC / lift over base rate, never raw "
         "accuracy — a coin-flip base rate near 50% makes accuracy especially "
-        "uninformative here.")
-    add("- Leakage check (pre-registered in the task): the peer-relative features "
+        "uninformative here."
+    )
+    add(
+        "- Leakage check (pre-registered in the task): the peer-relative features "
         "(excess_1y, excess_3y, beta_3y, te_3y, ir_3y, upcap_3y, downcap_3y) were "
         "re-verified against mf_features.py source — every one slices its input "
         "series to `.loc[:t]` before use (own NAV and the LOO peer composite "
         "alike), and `mf_features.py --selftest` (bumps all post-t NAVs +/-20% "
         "and asserts bit-identical features) PASSED before this run. No forward "
         "information reaches the feature side; the cohort ranking itself uses "
-        "R_fwd only on the label side, exactly as with the OR-label.")
+        "R_fwd only on the label side, exactly as with the OR-label."
+    )
     add("")
 
     add("## Label base rates")
     add("")
-    add("n_total/n_dropped/n_kept below are counted on the model-ready frame "
+    add(
+        "n_total/n_dropped/n_kept below are counted on the model-ready frame "
         "(labels inner-joined to features.parquet, anchors >= 2014-01-31) — "
         "narrower than the raw label-build population (mf_labels.py reports "
         "13,621 kept / 1,416 dropped over the full 2013-2023 anchor grid before "
-        "the features merge).")
+        "the features merge)."
+    )
     add("")
-    add(f"| target | n_total | n_dropped (cohort<{label_stats['min_size']}) | n_kept | "
-        "base rate (kept) | base rate (causal-holdout span) | negatives (holdout span) |")
+    add(
+        f"| target | n_total | n_dropped (cohort<{label_stats['min_size']}) | n_kept | "
+        "base rate (kept) | base rate (causal-holdout span) | negatives (holdout span) |"
+    )
     add("|---|---|---|---|---|---|---|")
     for tname, tcol in COHORT_TARGETS.items():
         s = label_stats[tname]
-        add(f"| {tname} | {label_stats['n_total']} | {label_stats['n_dropped']} | "
+        add(
+            f"| {tname} | {label_stats['n_total']} | {label_stats['n_dropped']} | "
             f"{label_stats['n_kept']} | {s['base_rate']:.3f} | "
-            f"{s['holdout_base_rate']:.3f} | {s['holdout_negatives']} |")
+            f"{s['holdout_base_rate']:.3f} | {s['holdout_negatives']} |"
+        )
     add("")
-    add(f"(For reference, the prior OR-label causal holdout had only 26 negatives "
-        f"out of 1416 rows — base rate 0.982. Both cohort targets fix that.)")
+    add(
+        "(For reference, the prior OR-label causal holdout had only 26 negatives "
+        "out of 1416 rows — base rate 0.982. Both cohort targets fix that.)"
+    )
     add("")
 
     add("## Causal holdout (evaluated once) — headline")
     add("")
-    add(f"Train anchors <= {holdout['train_end']}; test anchors "
-        f"{holdout['test_span']}; evaluated once at {holdout['evaluated_at'][:10]}.")
+    add(
+        f"Train anchors <= {holdout['train_end']}; test anchors "
+        f"{holdout['test_span']}; evaluated once at {holdout['evaluated_at'][:10]}."
+    )
     add("")
     add(_METRIC_HEADER)
     for tname in COHORT_TARGETS:
@@ -763,8 +818,10 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
             add(_METRIC_HEADER)
             for block, m in blocks.items():
                 add(_metric_row(block, m))
-            add(f"| **mean** | | | | | **{mean_auc:.3f}** | **{mean_rank:.3f}** | "
-                f"**{mean_prec:.3f}** | **{mean_lift:.2f}** | | **{mean_cap:.3f}** | | |")
+            add(
+                f"| **mean** | | | | | **{mean_auc:.3f}** | **{mean_rank:.3f}** | "
+                f"**{mean_prec:.3f}** | **{mean_lift:.2f}** | | **{mean_cap:.3f}** | | |"
+            )
             add("")
 
     add("## Challenger check (HGBT vs elastic-net, CPCV mean pooled AUC)")
@@ -772,10 +829,8 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
     add("| target | enet mean AUC | hgbt mean AUC | margin | verdict |")
     add("|---|---|---|---|---|")
     for tname in COHORT_TARGETS:
-        enet_auc = float(np.nanmean(
-            [m["pooled_auc"] for m in cpcv["targets"][tname]["enet"].values()]))
-        hgbt_auc = float(np.nanmean(
-            [m["pooled_auc"] for m in cpcv["targets"][tname]["hgbt"].values()]))
+        enet_auc = float(np.nanmean([m["pooled_auc"] for m in cpcv["targets"][tname]["enet"].values()]))
+        hgbt_auc = float(np.nanmean([m["pooled_auc"] for m in cpcv["targets"][tname]["hgbt"].values()]))
         margin = hgbt_auc - enet_auc
         verdict = "HGBT beats enet by >3pts" if margin > CHALLENGER_MARGIN else "no material edge"
         add(f"| {tname} | {enet_auc:.3f} | {hgbt_auc:.3f} | {margin:+.3f} | {verdict} |")
@@ -854,10 +909,12 @@ def build_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         training_anchor_span=f"{df['anchor'].min().date()}..{df['anchor'].max().date()}",
         features=feature_cols,
         hyperparameters=PRIMARY_ENET,
-        note=("Live probabilities inherit the 2014-2023 calibration cohorts; "
-              "regime shift after the training span is not calibrated away. "
-              "Model fitted on all anchors except the calibration slice "
-              "(last 25% of anchors)."),
+        note=(
+            "Live probabilities inherit the 2014-2023 calibration cohorts; "
+            "regime shift after the training span is not calibrated away. "
+            "Model fitted on all anchors except the calibration slice "
+            "(last 25% of anchors)."
+        ),
         models={},
     )
     all_mask = np.ones(len(df), dtype=bool)
@@ -867,16 +924,14 @@ def build_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         X = df[feature_cols]
         pre = Preprocessor().fit(X[fit_mask])
         model = fit_enet(pre.transform(X[fit_mask]), y[fit_mask], PRIMARY_ENET)
-        cal = Calibrator().fit(
-            model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
+        cal = Calibrator().fit(model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
         artifact["models"][tname] = dict(
             target=tcol,
             base_rate=float(y.mean()),
             imputation_medians={c: float(v) for c, v in pre.median.items()},
             standardize_mean={c: float(v) for c, v in pre.mean.items()},
             standardize_std={c: float(v) for c, v in pre.std.items()},
-            coefficients={c: float(v) for c, v in
-                          zip(feature_cols, model.coef_[0])},
+            coefficients={c: float(v) for c, v in zip(feature_cols, model.coef_[0])},
             intercept=float(model.intercept_[0]),
             calibration=cal.to_json(),
         )
@@ -895,20 +950,34 @@ def _fmt(v, nd=3):
 
 
 def _metric_row(block: str, m: dict) -> str:
-    return ("| " + " | ".join([
-        block, str(m["n"]), str(m["effective_n"]), _fmt(m["base_rate"]),
-        str(m["negatives"]), _fmt(m["pooled_auc"]),
-        f"{_fmt(m['rank_auc'])} ({m['rank_auc_cohorts']})",
-        _fmt(m["top_decile_precision"]), _fmt(m["lift_over_base"], 2),
-        _fmt(m["recall_at_05"]), _fmt(m["bottom_decile_neg_capture"]),
-        _fmt(m["brier"]), m["calibration_kind"],
-    ]) + " |")
+    return (
+        "| "
+        + " | ".join(
+            [
+                block,
+                str(m["n"]),
+                str(m["effective_n"]),
+                _fmt(m["base_rate"]),
+                str(m["negatives"]),
+                _fmt(m["pooled_auc"]),
+                f"{_fmt(m['rank_auc'])} ({m['rank_auc_cohorts']})",
+                _fmt(m["top_decile_precision"]),
+                _fmt(m["lift_over_base"], 2),
+                _fmt(m["recall_at_05"]),
+                _fmt(m["bottom_decile_neg_capture"]),
+                _fmt(m["brier"]),
+                m["calibration_kind"],
+            ]
+        )
+        + " |"
+    )
 
 
 _METRIC_HEADER = (
     "| block | n | eff. n | base rate | neg | pooled AUC | rank-AUC (cohorts) | "
     "prec@top-dec | lift | recall@0.5 | bottom-dec neg capture | Brier | calib |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+)
 
 
 def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
@@ -930,56 +999,71 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
     add("")
     add("## Read this first")
     add("")
-    add("- Label base rate is **0.846** (OR-label, hybrid benchmark). A constant "
+    add(
+        "- Label base rate is **0.846** (OR-label, hybrid benchmark). A constant "
         "all-positive classifier scores accuracy 0.846 and AUC 0.5 on this label. "
         "**Accuracy is therefore never a headline here.** Positive-class lift is "
         "mathematically capped at 1/0.846 ≈ **1.18×** — the economic value is in "
         "the NEGATIVE class (avoiding the ~15% bad windows) and in within-anchor "
-        "ranking.")
-    add("- Nominal n is ~30× inflated by overlapping 3y windows (adjacent monthly "
-        "labels agree 93.5%). Effective n ≈ n/30 is printed beside every n.")
-    add("- All numbers below are out-of-sample under a 3y purge + 1-month embargo "
+        "ranking."
+    )
+    add(
+        "- Nominal n is ~30× inflated by overlapping 3y windows (adjacent monthly "
+        "labels agree 93.5%). Effective n ≈ n/30 is printed beside every n."
+    )
+    add(
+        "- All numbers below are out-of-sample under a 3y purge + 1-month embargo "
         "(mf_cv.py). In-sample numbers appear only in the quarantined section at "
-        "the end and are NOT evidence.")
-    add("- Survivorship: the 131-fund universe is today's survivors; scores "
-        "generalize to funds like these, not to the full AMFI universe (design §7.1).")
-    add("- Hyperparameters were FIXED a priori (C=0.1, l1_ratio=0.5), not tuned: "
+        "the end and are NOT evidence."
+    )
+    add(
+        "- Survivorship: the 131-fund universe is today's survivors; scores "
+        "generalize to funds like these, not to the full AMFI universe (design §7.1)."
+    )
+    add(
+        "- Hyperparameters were FIXED a priori (C=0.1, l1_ratio=0.5), not tuned: "
         "with a 3y purge radius, per-fold inner tuning would leave near-empty "
         "training sets (design deviation from §4.1, documented in mf_model.py). "
         "The pre-registered sensitivity grid below shows the results are not "
-        "hyperparameter-fragile.")
+        "hyperparameter-fragile."
+    )
     add("")
 
     add("## Headline — strictly-causal holdout (evaluated once)")
     add("")
-    add(f"Train anchors ≤ {holdout['train_end']} (all label windows close by "
+    add(
+        f"Train anchors ≤ {holdout['train_end']} (all label windows close by "
         f"2022-07); test anchors {holdout['test_span']}; evaluated once at "
         f"{holdout['evaluated_at'][:10]}. **Caveat: only {ho['negatives']} negatives "
         f"in the test span — negative-class statistics are weak by construction "
-        "(design §3.2 acknowledged this in advance).**")
+        "(design §3.2 acknowledged this in advance).**"
+    )
     add("")
     add(_METRIC_HEADER)
     add(_metric_row("holdout (enet)", ho))
     add(_metric_row("holdout (hgbt)", ho_gbt))
     add("")
-    for key, label in (("excess_hybrid:enet", "excess-only, hybrid bench"),
-                       ("excess_peer:enet", "excess-only, peer bench")):
+    for key, label in (
+        ("excess_hybrid:enet", "excess-only, hybrid bench"),
+        ("excess_peer:enet", "excess-only, peer bench"),
+    ):
         add(_metric_row(f"holdout ({label})", holdout["models"][key]))
     add("")
 
     add("## CPCV — purged/embargoed, 5 blocks (primary evaluation)")
     add("")
-    add("Training on data after a test block is permitted and labeled as such: it "
+    add(
+        "Training on data after a test block is permitted and labeled as such: it "
         "answers *do these factor weights discriminate in an unseen regime*, not "
-        "*what would live deployment have earned* (design §3.2).")
+        "*what would live deployment have earned* (design §3.2)."
+    )
     add("")
     add("### OR-label (confirmed deliverable), elastic-net logistic — PRIMARY")
     add("")
     add(_METRIC_HEADER)
     for block, m in or_blocks.items():
         add(_metric_row(block, m))
-    add(f"| **mean** | | | | | **{mean_auc:.3f}** | **{mean_rank:.3f}** | | | | "
-        f"**{mean_cap:.3f}** | | |")
+    add(f"| **mean** | | | | | **{mean_auc:.3f}** | **{mean_rank:.3f}** | | | | **{mean_cap:.3f}** | | |")
     add("")
     add("### OR-label, HistGBT challenger")
     add("")
@@ -987,24 +1071,26 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
     for block, m in hgbt_blocks.items():
         add(_metric_row(block, m))
     add("")
-    verdict_adopted = (hgbt_auc - mean_auc > CHALLENGER_MARGIN
-                       and ho_gbt["pooled_auc"] >= ho["pooled_auc"])
-    add(f"**Challenger rule (§4.2):** HGBT mean CPCV AUC {hgbt_auc:.3f} vs logistic "
+    verdict_adopted = hgbt_auc - mean_auc > CHALLENGER_MARGIN and ho_gbt["pooled_auc"] >= ho["pooled_auc"]
+    add(
+        f"**Challenger rule (§4.2):** HGBT mean CPCV AUC {hgbt_auc:.3f} vs logistic "
         f"{mean_auc:.3f} → margin {hgbt_auc - mean_auc:+.3f} "
         f"(needs > +{CHALLENGER_MARGIN:.2f}); holdout {ho_gbt['pooled_auc']:.3f} vs "
         f"{ho['pooled_auc']:.3f}. **Challenger "
-        f"{'ADOPTED' if verdict_adopted else 'NOT adopted — interpretable model stays primary'}.**")
+        f"{'ADOPTED' if verdict_adopted else 'NOT adopted — interpretable model stays primary'}.**"
+    )
     add("")
 
     add("### Excess-only companion (condA) under BOTH benchmark schemes — the O2 range")
     add("")
-    add("71.7% of the hybrid benchmark rests on a PRI+1.3% total-return "
+    add(
+        "71.7% of the hybrid benchmark rests on a PRI+1.3% total-return "
         "approximation; the pure peer-proxy label is the same model with that "
         "approximation removed. The spread between the two rows bounds how much "
-        "the conclusions depend on the benchmark construction.")
+        "the conclusions depend on the benchmark construction."
+    )
     add("")
-    for tname, label in (("excess_hybrid", "condA (hybrid benchmark)"),
-                         ("excess_peer", "condA (pure peer-proxy)")):
+    for tname, label in (("excess_hybrid", "condA (hybrid benchmark)"), ("excess_peer", "condA (pure peer-proxy)")):
         add(f"#### {label}")
         add("")
         add(_METRIC_HEADER)
@@ -1044,27 +1130,29 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
         for t, grp in pp.groupby("anchor"):
             k = max(1, int(np.floor(DECILE * len(grp))))
             g = grp.sort_values("p_raw")
-            rows.append(dict(which="bottom", condA=g.condA[:k].mean(),
-                             condB=g.condB[:k].mean(), y=g.y[:k].mean()))
-            rows.append(dict(which="top", condA=g.condA[-k:].mean(),
-                             condB=g.condB[-k:].mean(), y=g.y[-k:].mean()))
+            rows.append(dict(which="bottom", condA=g.condA[:k].mean(), condB=g.condB[:k].mean(), y=g.y[:k].mean()))
+            rows.append(dict(which="top", condA=g.condA[-k:].mean(), condB=g.condB[-k:].mean(), y=g.y[-k:].mean()))
         leg = pd.DataFrame(rows).groupby("which").mean()
         add("| model decile (within anchor) | P(condA excess) | P(condB absolute) | P(y) |")
         add("|---|---|---|---|")
         for which, r in leg.iterrows():
             add(f"| {which} | {r.condA:.3f} | {r.condB:.3f} | {r.y:.3f} |")
         add("")
-        add("If the top-vs-bottom spread is mostly in condA, the model discriminates "
-            "fund skill; if mostly condB, it is riding the market-regime leg.")
+        add(
+            "If the top-vs-bottom spread is mostly in condA, the model discriminates "
+            "fund skill; if mostly condB, it is riding the market-regime leg."
+        )
     except Exception as e:  # report must still render if preds missing
         add(f"(per-leg table unavailable: {e})")
     add("")
 
     add("## Factor coefficients (standardized) + half-year block-bootstrap sign stability")
     add("")
-    add("Source for the deferred Step-2 ScoringEngine weight review (§4.3). A "
+    add(
+        "Source for the deferred Step-2 ScoringEngine weight review (§4.3). A "
         "factor whose sign is not stable across bootstrap replicates is 'not "
-        "evidenced' regardless of its point estimate (§3.4).")
+        "evidenced' regardless of its point estimate (§3.4)."
+    )
     add("")
     for tname in ("or_hybrid", "excess_hybrid"):
         c = coefs[tname]["coefficients"]
@@ -1095,8 +1183,7 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
     for block, m in or_blocks.items():
         add(f"| {block} | {_fmt(m['in_sample_auc'])} | {_fmt(m['in_sample_accuracy'])} |")
     add("")
-    add("Reminder: predict-all-1 scores 0.846 accuracy; nothing in this table "
-        "demonstrates skill.")
+    add("Reminder: predict-all-1 scores 0.846 accuracy; nothing in this table demonstrates skill.")
     add("")
 
     text = "\n".join(lines) + "\n"
@@ -1108,25 +1195,29 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
 # ==============================================================================
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["cpcv", "coef", "holdout", "artifact",
-                                        "report", "all", "cohort"], default="all")
-    ap.add_argument("--force-holdout", action="store_true",
-                    help="re-evaluate the causal holdout (audit use only)")
+    ap.add_argument(
+        "--stage", choices=["cpcv", "coef", "holdout", "artifact", "report", "all", "cohort"], default="all"
+    )
+    ap.add_argument("--force-holdout", action="store_true", help="re-evaluate the causal holdout (audit use only)")
     args = ap.parse_args()
 
     if args.stage == "cohort":
         df, feature_cols = load_cohort_dataset()
-        print(f"cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
-              f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}")
+        print(
+            f"cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
+            f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}"
+        )
         cpcv = run_cpcv_cohort(df, feature_cols)
         holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout)
         coefs = run_coefficients_cohort(df, feature_cols)
         build_cohort_artifact(df, feature_cols)
         full_df, _ = load_dataset()
         label_stats = dict(
-            min_size=COHORT_MIN_SIZE, n_total=int(len(full_df)),
+            min_size=COHORT_MIN_SIZE,
+            n_total=int(len(full_df)),
             n_dropped=int(full_df["y_cohort_q1"].isna().sum()),
-            n_kept=int(len(df)))
+            n_kept=int(len(df)),
+        )
         holdout_span = (full_df["anchor"] >= CAUSAL_TEST_START) & (full_df["anchor"] <= CAUSAL_TEST_END)
         for tname, tcol in COHORT_TARGETS.items():
             kept = full_df["y_cohort_q1"].notna()
@@ -1135,7 +1226,8 @@ def main() -> None:
             label_stats[tname] = dict(
                 base_rate=float(v.mean()),
                 holdout_base_rate=float(vh.mean()) if len(vh) else float("nan"),
-                holdout_negatives=int((~vh).sum()))
+                holdout_negatives=int((~vh).sum()),
+            )
         write_cohort_report(cpcv, holdout, coefs, label_stats)
         return
 
@@ -1148,8 +1240,10 @@ def main() -> None:
     # ScoringEngine.FACTOR_MAP (see docs/STATUS.md). Only `cohort_q1` (the --stage
     # cohort path above) is validated and shipped.
     df, feature_cols = load_dataset()
-    print(f"dataset: {len(df)} rows, {len(feature_cols)} features, "
-          f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}")
+    print(
+        f"dataset: {len(df)} rows, {len(feature_cols)} features, "
+        f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}"
+    )
 
     if args.stage in ("cpcv", "all"):
         cpcv = run_cpcv(df, feature_cols)

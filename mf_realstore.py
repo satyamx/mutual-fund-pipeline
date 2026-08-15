@@ -32,14 +32,17 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-import numpy as np
 import pandas as pd
 
+from mf_benchmarks import CATEGORY_BENCHMARK, SECTOR_BENCHMARK, load_benchmark_series
 from mf_datasources import (
-    CACHE, AMFIRegistryLive, AnthropicNewsAgent, CapBandAdapter, MFAPIAdapter,
+    CACHE,
+    AMFIRegistryLive,
+    AnthropicNewsAgent,
+    CapBandAdapter,
+    MFAPIAdapter,
     YFinanceAdapter,
 )
-from mf_benchmarks import CATEGORY_BENCHMARK, SECTOR_BENCHMARK, load_benchmark_series
 from mf_labels import MANIFEST_PATH
 
 LOGGER = logging.getLogger("MFOrchestrator.RealStore")
@@ -56,6 +59,7 @@ class AmbiguousFundQuery(LookupError):
     """Raised when a query token-matches more than one manifest fund. Distinct
     from "not found" on purpose: silently answering an ambiguous query with the
     first candidate is what let three funds be scored as the wrong scheme."""
+
 
 # AMFI publishes category as free text inside the NAVAll.txt banner lines, e.g.
 # "Open Ended Schemes(Equity Scheme - Flexi Cap Fund)". Extracted from real,
@@ -92,6 +96,7 @@ def _bucket_from_raw(category_raw: Optional[str]):
     not guessed). Imported lazily to avoid a module-load cycle with the
     orchestrator (which imports RealNAVStore lazily too, inside __init__)."""
     from mf_agent_orchestrator import SEBIBucket
+
     if not category_raw:
         return SEBIBucket.EQUITY
     r = category_raw.upper()
@@ -133,8 +138,7 @@ class RealNAVStore:
     def _load_manifest(path: Path) -> pd.DataFrame:
         if path.exists():
             return pd.read_csv(path, dtype={"amfi_code": str})
-        LOGGER.warning("No universe manifest at %s — resolving purely against live "
-                       "AMFI scheme master.", path)
+        LOGGER.warning("No universe manifest at %s — resolving purely against live AMFI scheme master.", path)
         return pd.DataFrame(columns=["amfi_code", "scheme_name", "amc", "category", "sector"])
 
     # ---------------------------------------------------------------- resolve
@@ -153,19 +157,26 @@ class RealNAVStore:
             name = row["scheme_name"]
             sector = row.get("sector")
             self._resolved[name] = dict(
-                source="manifest", amfi_code=str(row["amfi_code"]), amc=row.get("amc"),
+                source="manifest",
+                amfi_code=str(row["amfi_code"]),
+                amc=row.get("amc"),
                 category=row.get("category"),
-                declared_sector=(sector if isinstance(sector, str) and sector.strip() else None))
+                declared_sector=(sector if isinstance(sector, str) and sector.strip() else None),
+            )
             return name
         amfi_row = self.amfi.resolve(q)
         if amfi_row is None:
             return None
         name = amfi_row["scheme_name"]
         self._resolved[name] = dict(
-            source="amfi_live", amfi_code=str(amfi_row["amfi_code"]), amc=amfi_row.get("amc"),
+            source="amfi_live",
+            amfi_code=str(amfi_row["amfi_code"]),
+            amc=amfi_row.get("amc"),
             category=_category_from_raw(amfi_row.get("category_raw")),
             category_raw=amfi_row.get("category_raw"),
-            declared_sector=None, isin=amfi_row.get("isin"))
+            declared_sector=None,
+            isin=amfi_row.get("isin"),
+        )
         return name
 
     def _manifest_match(self, q: str) -> Optional[pd.Series]:
@@ -204,9 +215,9 @@ class RealNAVStore:
             if len(hit) > 1:
                 raise AmbiguousFundQuery(
                     f"{q!r} matches {len(hit)} manifest funds — "
-                    + "; ".join(f"{r.scheme_name} [{r.amfi_code}]"
-                                for r in hit.head(4).itertuples())
-                    + ". Name the fund exactly or pass its AMFI code.")
+                    + "; ".join(f"{r.scheme_name} [{r.amfi_code}]" for r in hit.head(4).itertuples())
+                    + ". Name the fund exactly or pass its AMFI code."
+                )
         return None if hit.empty else hit.iloc[0]
 
     # ------------------------------------------------------------------ fund
@@ -221,7 +232,8 @@ class RealNAVStore:
         if nav is None or nav.empty:
             raise LookupError(
                 f"No NAV history cached or fetchable for {name!r} (AMFI code {code}). "
-                f"Run: bootstrap.py --funds \"{name}\"")
+                f'Run: bootstrap.py --funds "{name}"'
+            )
         category = info["category"] or "Unknown"
         if category == "Sectoral/Thematic":
             # Both "Sectoral" and "Thematic" carry identical rule parameters in
@@ -230,8 +242,7 @@ class RealNAVStore:
             # collapsing to one umbrella label loses no compliance information.
             category = "Thematic"
         declared_sector = info.get("declared_sector")
-        bench_name = (SECTOR_BENCHMARK.get(declared_sector) if declared_sector
-                     else CATEGORY_BENCHMARK.get(category))
+        bench_name = SECTOR_BENCHMARK.get(declared_sector) if declared_sector else CATEGORY_BENCHMARK.get(category)
         isin = info.get("isin") or (meta or {}).get("isin_growth") or ""
         rec = dict(
             isin=isin,
@@ -240,9 +251,9 @@ class RealNAVStore:
             amc=info.get("amc") or (meta or {}).get("fund_house") or "Unknown",
             manager="NOT AVAILABLE (no free data source publishes fund-manager names)",
             declared_sector=declared_sector,
-            benchmark=bench_name,          # may be None — no real index for this category
-            expense_ratio=float("nan"),    # NOT AVAILABLE — no free TER source
-            aum_cr=float("nan"),           # NOT AVAILABLE — no free AUM source
+            benchmark=bench_name,  # may be None — no real index for this category
+            expense_ratio=float("nan"),  # NOT AVAILABLE — no free TER source
+            aum_cr=float("nan"),  # NOT AVAILABLE — no free AUM source
             nav=nav,
             category_source=info["source"],
         )
@@ -252,6 +263,7 @@ class RealNAVStore:
     # ------------------------------------------------------------- snapshots
     def snapshots(self, name: str) -> Dict[str, Dict[str, Any]]:
         from mf_agent_orchestrator import TODAY
+
         info = self._resolved.get(name) or {}
         code = info.get("amfi_code")
         empty_holdings = pd.DataFrame(columns=self.HOLDINGS_COLUMNS)
@@ -261,9 +273,13 @@ class RealNAVStore:
                 "No manually-supplied holdings-disclosure CSV for %s (code %s) under "
                 "mf_cache/disclosures/<code>_<YYYY-MM>.csv — Manager Alpha score and "
                 "SEBI cap-fidelity checks will report NOT AVAILABLE, not fabricated.",
-                name, code)
-            return {label: dict(as_of=TODAY, holdings=empty_holdings.copy(), available=False)
-                    for label in ("t-5y", "t-3y", "current")}
+                name,
+                code,
+            )
+            return {
+                label: dict(as_of=TODAY, holdings=empty_holdings.copy(), available=False)
+                for label in ("t-5y", "t-3y", "current")
+            }
         return self._build_snapshots_from_files(files, empty_holdings, TODAY)
 
     @staticmethod
@@ -272,21 +288,24 @@ class RealNAVStore:
             return []
         return sorted(DISCLOSURES_DIR.glob(f"{code}_*.csv"))
 
-    def _build_snapshots_from_files(self, files: List[Path], empty_holdings: pd.DataFrame,
-                                    today: pd.Timestamp) -> Dict[str, Dict[str, Any]]:
+    def _build_snapshots_from_files(
+        self, files: List[Path], empty_holdings: pd.DataFrame, today: pd.Timestamp
+    ) -> Dict[str, Dict[str, Any]]:
         parsed = []
         for p in files:
             m = re.match(r"^\d+_(\d{4})-(\d{2})\.csv$", p.name)
             if m:
                 parsed.append((pd.Timestamp(year=int(m.group(1)), month=int(m.group(2)), day=1), p))
         if not parsed:
-            self.log.warning("Disclosure file(s) found but none matched the "
-                             "<code>_<YYYY-MM>.csv naming convention: %s", [p.name for p in files])
-            return {label: dict(as_of=today, holdings=empty_holdings.copy(), available=False)
-                    for label in ("t-5y", "t-3y", "current")}
-        targets = {"t-5y": today - pd.DateOffset(years=5),
-                  "t-3y": today - pd.DateOffset(years=3),
-                  "current": today}
+            self.log.warning(
+                "Disclosure file(s) found but none matched the <code>_<YYYY-MM>.csv naming convention: %s",
+                [p.name for p in files],
+            )
+            return {
+                label: dict(as_of=today, holdings=empty_holdings.copy(), available=False)
+                for label in ("t-5y", "t-3y", "current")
+            }
+        targets = {"t-5y": today - pd.DateOffset(years=5), "t-3y": today - pd.DateOffset(years=3), "current": today}
         out: Dict[str, Dict[str, Any]] = {}
         for label, target in targets.items():
             as_of, path = min(parsed, key=lambda x: abs((x[0] - target).days))
@@ -313,20 +332,23 @@ class RealNAVStore:
         sector = col("sector")
         cap_band = col("cap_band", "cap band", "capband")
         if instrument is None or weight is None:
-            self.log.error("Disclosure CSV %s missing required instrument/weight columns "
-                           "— treating as empty rather than guessing.", path)
+            self.log.error(
+                "Disclosure CSV %s missing required instrument/weight columns "
+                "— treating as empty rather than guessing.",
+                path,
+            )
             return pd.DataFrame(columns=self.HOLDINGS_COLUMNS)
 
         instrument = instrument.astype(str).str.strip()
-        out = pd.DataFrame({
-            "name": instrument,
-            "weight": pd.to_numeric(weight, errors="coerce"),
-            "asset_type": (asset_type.astype(str).str.strip().str.lower()
-                          if asset_type is not None else "equity"),
-            "sector": sector.astype(str).str.strip() if sector is not None else None,
-            "cap_band": (cap_band.astype(str).str.strip().str.lower()
-                        if cap_band is not None else None),
-        })
+        out = pd.DataFrame(
+            {
+                "name": instrument,
+                "weight": pd.to_numeric(weight, errors="coerce"),
+                "asset_type": (asset_type.astype(str).str.strip().str.lower() if asset_type is not None else "equity"),
+                "sector": sector.astype(str).str.strip() if sector is not None else None,
+                "cap_band": (cap_band.astype(str).str.strip().str.lower() if cap_band is not None else None),
+            }
+        )
         out.index = instrument.str.upper()
         out = out.dropna(subset=["weight"])
 
@@ -360,33 +382,39 @@ class RealNAVStore:
     def sector_index(self, sector: str, start, basket=None) -> pd.Series:
         name = SECTOR_BENCHMARK.get(sector)
         if name is None:
-            self.log.warning("No real index mapped for sector %r; sector benchmark "
-                             "unavailable (not synthesized).", sector)
+            self.log.warning(
+                "No real index mapped for sector %r; sector benchmark unavailable (not synthesized).", sector
+            )
             return pd.Series(dtype=float)
         s = load_benchmark_series(name)
         if s is None:
-            self.log.warning("Real index series for %r not present under "
-                             "benchmarks/; sector benchmark unavailable.", name)
+            self.log.warning(
+                "Real index series for %r not present under benchmarks/; sector benchmark unavailable.", name
+            )
             return pd.Series(dtype=float)
-        return s.loc[pd.Timestamp(start):]
+        return s.loc[pd.Timestamp(start) :]
 
     # -------------------------------------------------------------- benchmark
     def benchmark_series(self, benchmark: Optional[str]) -> pd.Series:
         if not benchmark:
-            self.log.warning("No real index mapped for this fund's category — beta/alpha "
-                             "vs benchmark reported unavailable, not compared to a "
-                             "synthetic index.")
+            self.log.warning(
+                "No real index mapped for this fund's category — beta/alpha "
+                "vs benchmark reported unavailable, not compared to a "
+                "synthetic index."
+            )
             return pd.Series(dtype=float)
         s = load_benchmark_series(benchmark)
         if s is None:
-            self.log.warning("Real index series for %r not present under "
-                             "benchmarks/ — benchmark unavailable.", benchmark)
+            self.log.warning(
+                "Real index series for %r not present under benchmarks/ — benchmark unavailable.", benchmark
+            )
             return pd.Series(dtype=float)
         return s
 
     # ------------------------------------------------------------------ news
     def news(self, entities: Sequence[str]) -> List[Dict[str, Any]]:
         from mf_agent_orchestrator import TODAY
+
         if not self.news_agent.health():
             return []  # no ANTHROPIC_API_KEY: neutral, never invented (matches AnthropicNewsAgent)
         amc = entities[0] if entities else ""
@@ -413,12 +441,27 @@ def _selftest() -> None:
     # shape: a full scheme name that is a token-SUBSET of a longer one. Ordered
     # so the wrong answer comes first, which is exactly how iloc[0] picked it.
     rows = [
-        dict(amfi_code="118510", scheme_name="Franklin India Large & Mid Cap Fund - Direct - Growth",
-             amc="Franklin", category="Large & Mid Cap", sector=""),
-        dict(amfi_code="118509", scheme_name="Franklin India Mid Cap Fund - Direct - Growth",
-             amc="Franklin", category="Mid Cap", sector=""),
-        dict(amfi_code="120505", scheme_name="Parag Parikh Flexi Cap Fund - Direct - Growth",
-             amc="PPFAS", category="Flexi Cap", sector=""),
+        dict(
+            amfi_code="118510",
+            scheme_name="Franklin India Large & Mid Cap Fund - Direct - Growth",
+            amc="Franklin",
+            category="Large & Mid Cap",
+            sector="",
+        ),
+        dict(
+            amfi_code="118509",
+            scheme_name="Franklin India Mid Cap Fund - Direct - Growth",
+            amc="Franklin",
+            category="Mid Cap",
+            sector="",
+        ),
+        dict(
+            amfi_code="120505",
+            scheme_name="Parag Parikh Flexi Cap Fund - Direct - Growth",
+            amc="PPFAS",
+            category="Flexi Cap",
+            sector="",
+        ),
     ]
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "manifest.csv"
@@ -432,9 +475,11 @@ def _selftest() -> None:
             assert hit is not None, f"FAIL: {r['scheme_name']!r} did not resolve"
             assert str(hit["amfi_code"]) == r["amfi_code"], (
                 f"FAIL: {r['scheme_name']!r} resolved to {hit['amfi_code']} "
-                f"(expected {r['amfi_code']}) — the subset collision is back")
-        assert len({str(store._manifest_match(r["scheme_name"])["amfi_code"]) for r in rows}) == 3, \
+                f"(expected {r['amfi_code']}) — the subset collision is back"
+            )
+        assert len({str(store._manifest_match(r["scheme_name"])["amfi_code"]) for r in rows}) == 3, (
             "FAIL: three distinct names must resolve to three distinct funds"
+        )
         print("[selftest] exact scheme_name beats the token-subset fallback — PASS")
 
         # ---- an ambiguous FRAGMENT must refuse, not pick the first candidate.
@@ -445,8 +490,9 @@ def _selftest() -> None:
             pass
         # ...and resolve() must swallow it as an honest miss WITHOUT falling
         # through to the fuzzier live registry (which would relocate the guess).
-        assert store.resolve("Franklin India Mid Cap") is None, \
+        assert store.resolve("Franklin India Mid Cap") is None, (
             "FAIL: an ambiguous query must not resolve via the AMFI fallback"
+        )
         print("[selftest] ambiguous fragment refuses + does not fall through to AMFI — PASS")
 
         # ---- unambiguous fragments and code lookups still work.
@@ -460,12 +506,12 @@ def _selftest() -> None:
 
 if __name__ == "__main__":
     import argparse
+
     ap = argparse.ArgumentParser(description="RealNAVStore resolution selftest")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
-        logging.basicConfig(level=logging.WARNING,
-                            format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+        logging.basicConfig(level=logging.WARNING, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
         _selftest()
     else:
         ap.print_help()

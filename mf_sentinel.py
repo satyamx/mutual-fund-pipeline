@@ -36,20 +36,20 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from mf_pipeline import QuantEngine, ValidationOrchestrator
-from mf_nfo_gate import EligibilityGate, NFOAssessor
 import mf_holdings
 import mf_managers
+from mf_nfo_gate import EligibilityGate, NFOAssessor
+from mf_pipeline import QuantEngine, ValidationOrchestrator
 
 LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # type-only: avoids a module-load cycle with mf_agent_orchestrator
-    from mf_agent_orchestrator import FundDossier, ComplianceFinding
+    from mf_agent_orchestrator import ComplianceFinding, FundDossier
 
 
 class AlertSeverity(str, Enum):
@@ -59,28 +59,33 @@ class AlertSeverity(str, Enum):
 
 
 class AlertBasis(str, Enum):
-    REGULATORY = "REGULATORY"              # verified breach of an external SEBI line
-    CAUSAL_COST = "CAUSAL_COST"            # arithmetic cost drag — causal, not statistical
+    REGULATORY = "REGULATORY"  # verified breach of an external SEBI line
+    CAUSAL_COST = "CAUSAL_COST"  # arithmetic cost drag — causal, not statistical
     DESCRIPTIVE_RISK = "DESCRIPTIVE_RISK"  # true historical NAV fact; no predictive claim
-    GUARDRAIL_ONLY = "GUARDRAIL_ONLY"      # factor that only cleared the no-regression guardrail (AUC~0.46)
-    MANAGER_HISTORY = "MANAGER_HISTORY"    # real disclosed-holdings audit (MACS) or tenure
-    NEWS_KEYWORD = "NEWS_KEYWORD"          # word-boundary keyword match on headlines — weak evidence
-    COVERAGE = "COVERAGE"                  # statement about what could NOT be checked
+    GUARDRAIL_ONLY = "GUARDRAIL_ONLY"  # factor that only cleared the no-regression guardrail (AUC~0.46)
+    MANAGER_HISTORY = "MANAGER_HISTORY"  # real disclosed-holdings audit (MACS) or tenure
+    NEWS_KEYWORD = "NEWS_KEYWORD"  # word-boundary keyword match on headlines — weak evidence
+    COVERAGE = "COVERAGE"  # statement about what could NOT be checked
 
 
 # Bases that can never carry HIGH — factors/history/news with no demonstrated skill
 # or no verification are structurally barred from the tier that drives held-fund
 # push notifications. Asserted in --selftest; do not bypass in a rule definition.
-_NEVER_HIGH = {AlertBasis.GUARDRAIL_ONLY, AlertBasis.DESCRIPTIVE_RISK,
-               AlertBasis.MANAGER_HISTORY, AlertBasis.NEWS_KEYWORD, AlertBasis.COVERAGE}
+_NEVER_HIGH = {
+    AlertBasis.GUARDRAIL_ONLY,
+    AlertBasis.DESCRIPTIVE_RISK,
+    AlertBasis.MANAGER_HISTORY,
+    AlertBasis.NEWS_KEYWORD,
+    AlertBasis.COVERAGE,
+}
 
 
 @dataclass
 class Alert:
     code: str
-    severity: str           # AlertSeverity value
-    source: str             # "compliance" | "factor" | "holdings" | "manager" | "nfo" | "news"
-    basis: str              # AlertBasis value
+    severity: str  # AlertSeverity value
+    source: str  # "compliance" | "factor" | "holdings" | "manager" | "nfo" | "news"
+    basis: str  # AlertBasis value
     evidence: Dict[str, Any]
     detail: str
 
@@ -115,7 +120,7 @@ EQ_DD_DEEP_WATCH, EQ_DD_DEEP_INFO = -0.40, -0.30
 EQ_ROLL3Y_NEG_WATCH, EQ_ROLL3Y_NEG_INFO = 0.20, 0.10
 EQ_EXPENSE_WATCH, EQ_EXPENSE_INFO = 0.020, 0.015
 
-PASSIVE_TE_BREACH = 0.02        # SEBI's explicit 1y-rolling TE cap for equity ETF/index funds
+PASSIVE_TE_BREACH = 0.02  # SEBI's explicit 1y-rolling TE cap for equity ETF/index funds
 PASSIVE_TE_WATCH, PASSIVE_TE_INFO = 0.01, 0.005
 PASSIVE_TD_POOR = -0.015
 PASSIVE_EXPENSE_INFO, PASSIVE_EXPENSE_WATCH, PASSIVE_EXPENSE_BREACH = 0.005, 0.0075, 0.010
@@ -135,8 +140,12 @@ CAP_MANDATED_CATEGORIES = {"Large Cap", "Mid Cap", "Small Cap", "Flexi Cap", "La
 # nothing to execute here until that data is hand-supplied, so they are honestly
 # reported as dormant metadata rather than run against data that doesn't exist.
 _STRUCTURALLY_DORMANT_DEBT = (
-    "DEBT_ISSUER_LIMIT_BREACH", "DEBT_GROUP_LIMIT_BREACH", "DEBT_MANDATE_CREDIT_BREACH",
-    "DEBT_CREDIT_QUALITY_LOW", "DEBT_DURATION_STRESS", "DEBT_YIELD_REACHING",
+    "DEBT_ISSUER_LIMIT_BREACH",
+    "DEBT_GROUP_LIMIT_BREACH",
+    "DEBT_MANDATE_CREDIT_BREACH",
+    "DEBT_CREDIT_QUALITY_LOW",
+    "DEBT_DURATION_STRESS",
+    "DEBT_YIELD_REACHING",
 )
 _STRUCTURALLY_DORMANT_HY_ARB = ("HY_ARB_SPREAD_LAG", "HY_ARB_SPREAD_COMPRESSING")
 
@@ -189,8 +198,9 @@ def _compliance_alerts(compliance: List["ComplianceFinding"]) -> Tuple[List[Aler
             sev, basis = AlertSeverity.INFO, AlertBasis.COVERAGE
         else:
             sev, basis = AlertSeverity.WATCH, AlertBasis.REGULATORY
-        alerts.append(Alert(code, sev.value, "compliance", basis.value,
-                            evidence={"rule_id": f.rule_id}, detail=f.detail))
+        alerts.append(
+            Alert(code, sev.value, "compliance", basis.value, evidence={"rule_id": f.rule_id}, detail=f.detail)
+        )
     return alerts, checks_run
 
 
@@ -210,9 +220,16 @@ def _fund_metrics(quant: QuantEngine, nav: pd.Series, benchmark: Optional[pd.Ser
     out["rr3y_negative_share"] = float(rr3.lt(0).mean()) if len(rr3) else float("nan")
 
     have_bench = benchmark is not None and len(benchmark.dropna()) > 0
-    bench_keys = ("excess_cagr_3y", "beta", "tracking_error", "info_ratio",
-                 "upside_capture", "downside_capture", "tracking_difference_tri",
-                 "benchmark_max_dd_3y")
+    bench_keys = (
+        "excess_cagr_3y",
+        "beta",
+        "tracking_error",
+        "info_ratio",
+        "upside_capture",
+        "downside_capture",
+        "tracking_difference_tri",
+        "benchmark_max_dd_3y",
+    )
     if not have_bench:
         out.update({k: float("nan") for k in bench_keys})
         return out
@@ -223,15 +240,13 @@ def _fund_metrics(quant: QuantEngine, nav: pd.Series, benchmark: Optional[pd.Ser
         return out
     fnav, bnav = nav.loc[common], benchmark.loc[common]
     frets, brets = quant.daily_returns(fnav), quant.daily_returns(bnav)
-    out["excess_cagr_3y"] = (float(quant.cagr(fnav) - quant.cagr(bnav))
-                             if len(common) > 252 else float("nan"))
+    out["excess_cagr_3y"] = float(quant.cagr(fnav) - quant.cagr(bnav)) if len(common) > 252 else float("nan")
     beta, _alpha = quant.beta_alpha(frets, brets)
     out["beta"] = beta
     out["tracking_error"] = quant.tracking_error(frets, brets)
     out["info_ratio"] = quant.information_ratio(frets, brets)
     out["upside_capture"], out["downside_capture"] = quant.capture_ratios(frets, brets)
-    out["tracking_difference_tri"] = (quant.tracking_difference_tri(fnav, bnav)
-                                      if len(common) >= 252 else float("nan"))
+    out["tracking_difference_tri"] = quant.tracking_difference_tri(fnav, bnav) if len(common) >= 252 else float("nan")
     bnav3 = bnav.tail(3 * 252)
     out["benchmark_max_dd_3y"] = quant.max_drawdown(bnav3) if len(bnav3) >= 60 else float("nan")
     return out
@@ -246,63 +261,137 @@ def _equity_alerts(m: Dict[str, float], category: str) -> List[Alert]:
     dc = m["downside_capture"]
     if _finite(dc, m["upside_capture"]):
         if dc - m["upside_capture"] >= EQ_CAPTURE_ASYMMETRY_GAP and dc > 1.0:
-            a.append(Alert("EQ_CAPTURE_ASYMMETRY", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.GUARDRAIL_ONLY.value,
-                           {"downside_capture": _fmt(dc), "upside_capture": _fmt(m["upside_capture"])},
-                           f"Keeps more of the downside ({dc:.0%} of benchmark losses) than the "
-                           f"upside ({m['upside_capture']:.0%} of benchmark gains) over 3y — "
-                           f"descriptive of past NAV behaviour; this factor showed no within-cohort "
-                           f"selection skill (rank AUC ~0.46)."))
+            a.append(
+                Alert(
+                    "EQ_CAPTURE_ASYMMETRY",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.GUARDRAIL_ONLY.value,
+                    {"downside_capture": _fmt(dc), "upside_capture": _fmt(m["upside_capture"])},
+                    f"Keeps more of the downside ({dc:.0%} of benchmark losses) than the "
+                    f"upside ({m['upside_capture']:.0%} of benchmark gains) over 3y — "
+                    f"descriptive of past NAV behaviour; this factor showed no within-cohort "
+                    f"selection skill (rank AUC ~0.46).",
+                )
+            )
         elif dc > EQ_DOWNCAP_WATCH:
-            a.append(Alert("EQ_DOWNSIDE_CAPTURE_HIGH", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.GUARDRAIL_ONLY.value, {"downside_capture": _fmt(dc)},
-                           f"Downside capture {dc:.0%} — loses more than the benchmark in down "
-                           f"markets over 3y; descriptive only, no demonstrated selection skill "
-                           f"(rank AUC ~0.46)."))
+            a.append(
+                Alert(
+                    "EQ_DOWNSIDE_CAPTURE_HIGH",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.GUARDRAIL_ONLY.value,
+                    {"downside_capture": _fmt(dc)},
+                    f"Downside capture {dc:.0%} — loses more than the benchmark in down "
+                    f"markets over 3y; descriptive only, no demonstrated selection skill "
+                    f"(rank AUC ~0.46).",
+                )
+            )
     if _finite(m["upside_capture"]) and m["upside_capture"] < EQ_UPCAP_LOW:
-        a.append(Alert("EQ_UPSIDE_CAPTURE_LOW", AlertSeverity.INFO.value, "factor",
-                       AlertBasis.GUARDRAIL_ONLY.value, {"upside_capture": _fmt(m["upside_capture"])},
-                       f"Upside capture {m['upside_capture']:.0%} — captures less than the "
-                       f"benchmark's up-moves; may be a deliberate defensive mandate."))
+        a.append(
+            Alert(
+                "EQ_UPSIDE_CAPTURE_LOW",
+                AlertSeverity.INFO.value,
+                "factor",
+                AlertBasis.GUARDRAIL_ONLY.value,
+                {"upside_capture": _fmt(m["upside_capture"])},
+                f"Upside capture {m['upside_capture']:.0%} — captures less than the "
+                f"benchmark's up-moves; may be a deliberate defensive mandate.",
+            )
+        )
     if _finite(m["excess_cagr_3y"]) and m["excess_cagr_3y"] <= EQ_BENCHMARK_LAG:
-        a.append(Alert("EQ_BENCHMARK_LAG", AlertSeverity.WATCH.value, "factor",
-                       AlertBasis.DESCRIPTIVE_RISK.value,
-                       {"excess_cagr_3y": _fmt(m["excess_cagr_3y"]), "info_ratio": _fmt(m["info_ratio"])},
-                       f"Trails its real category benchmark by {-m['excess_cagr_3y']:.1%}/yr over 3y."))
+        a.append(
+            Alert(
+                "EQ_BENCHMARK_LAG",
+                AlertSeverity.WATCH.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"excess_cagr_3y": _fmt(m["excess_cagr_3y"]), "info_ratio": _fmt(m["info_ratio"])},
+                f"Trails its real category benchmark by {-m['excess_cagr_3y']:.1%}/yr over 3y.",
+            )
+        )
     if _finite(m["beta"]) and abs(m["beta"] - 1.0) > EQ_BETA_DRIFT:
         sev = AlertSeverity.WATCH if category in CAP_MANDATED_CATEGORIES else AlertSeverity.INFO
-        a.append(Alert("EQ_BETA_DRIFT", sev.value, "factor", AlertBasis.DESCRIPTIVE_RISK.value,
-                       {"beta_3y": _fmt(m["beta"])},
-                       f"Beta {m['beta']:.2f} far from category norm — possible category drift."))
+        a.append(
+            Alert(
+                "EQ_BETA_DRIFT",
+                sev.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"beta_3y": _fmt(m["beta"])},
+                f"Beta {m['beta']:.2f} far from category norm — possible category drift.",
+            )
+        )
     if _finite(m["max_dd_3y"], m["benchmark_max_dd_3y"]):
         gap = m["max_dd_3y"] - m["benchmark_max_dd_3y"]
         if gap <= EQ_DD_VS_BENCH:
-            a.append(Alert("EQ_DRAWDOWN_VS_BENCH", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value,
-                           {"max_dd_3y": _fmt(m["max_dd_3y"]), "benchmark_max_dd_3y": _fmt(m["benchmark_max_dd_3y"])},
-                           f"Drew down {-gap:.1%} deeper than its own benchmark over 3y."))
+            a.append(
+                Alert(
+                    "EQ_DRAWDOWN_VS_BENCH",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"max_dd_3y": _fmt(m["max_dd_3y"]), "benchmark_max_dd_3y": _fmt(m["benchmark_max_dd_3y"])},
+                    f"Drew down {-gap:.1%} deeper than its own benchmark over 3y.",
+                )
+            )
     if _finite(m["max_dd_3y"]):
         if m["max_dd_3y"] <= EQ_DD_DEEP_WATCH:
-            a.append(Alert("EQ_DRAWDOWN_DEEP", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"max_dd_3y": _fmt(m["max_dd_3y"])},
-                           f"Max drawdown {m['max_dd_3y']:.1%} over 3y — beyond the Nifty's COVID drawdown (~-38%)."))
+            a.append(
+                Alert(
+                    "EQ_DRAWDOWN_DEEP",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"max_dd_3y": _fmt(m["max_dd_3y"])},
+                    f"Max drawdown {m['max_dd_3y']:.1%} over 3y — beyond the Nifty's COVID drawdown (~-38%).",
+                )
+            )
         elif m["max_dd_3y"] <= EQ_DD_DEEP_INFO:
-            a.append(Alert("EQ_DRAWDOWN_DEEP", AlertSeverity.INFO.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"max_dd_3y": _fmt(m["max_dd_3y"])},
-                           f"Max drawdown {m['max_dd_3y']:.1%} over 3y."))
+            a.append(
+                Alert(
+                    "EQ_DRAWDOWN_DEEP",
+                    AlertSeverity.INFO.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"max_dd_3y": _fmt(m["max_dd_3y"])},
+                    f"Max drawdown {m['max_dd_3y']:.1%} over 3y.",
+                )
+            )
     if _finite(m["rr3y_negative_share"]):
         if m["rr3y_negative_share"] > EQ_ROLL3Y_NEG_WATCH:
-            a.append(Alert("EQ_ROLL3Y_NEGATIVE_SHARE", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
-                           f"{m['rr3y_negative_share']:.0%} of all 3-year holding windows lost money."))
+            a.append(
+                Alert(
+                    "EQ_ROLL3Y_NEGATIVE_SHARE",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
+                    f"{m['rr3y_negative_share']:.0%} of all 3-year holding windows lost money.",
+                )
+            )
         elif m["rr3y_negative_share"] > EQ_ROLL3Y_NEG_INFO:
-            a.append(Alert("EQ_ROLL3Y_NEGATIVE_SHARE", AlertSeverity.INFO.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
-                           f"{m['rr3y_negative_share']:.0%} of all 3-year holding windows lost money."))
+            a.append(
+                Alert(
+                    "EQ_ROLL3Y_NEGATIVE_SHARE",
+                    AlertSeverity.INFO.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
+                    f"{m['rr3y_negative_share']:.0%} of all 3-year holding windows lost money.",
+                )
+            )
     if _finite(m["sortino"]) and m["sortino"] < 0:
-        a.append(Alert("EQ_SORTINO_NEGATIVE", AlertSeverity.INFO.value, "factor",
-                       AlertBasis.DESCRIPTIVE_RISK.value, {"sortino": _fmt(m["sortino"])},
-                       f"Sortino {m['sortino']:.2f} — below the risk-free MAR with downside vol."))
+        a.append(
+            Alert(
+                "EQ_SORTINO_NEGATIVE",
+                AlertSeverity.INFO.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"sortino": _fmt(m["sortino"])},
+                f"Sortino {m['sortino']:.2f} — below the risk-free MAR with downside vol.",
+            )
+        )
     return a
 
 
@@ -311,69 +400,133 @@ def _passive_alerts(m: Dict[str, float]) -> List[Alert]:
     te = m["tracking_error"]
     if _finite(te):
         if te > PASSIVE_TE_BREACH:
-            a.append(Alert("PASSIVE_TRACKING_ERROR_BREACH", AlertSeverity.HIGH.value, "factor",
-                           AlertBasis.REGULATORY.value, {"tracking_error": _fmt(te)},
-                           f"1y-rolling tracking error {te:.2%} exceeds SEBI's 2% cap for equity "
-                           f"ETFs/index funds."))
+            a.append(
+                Alert(
+                    "PASSIVE_TRACKING_ERROR_BREACH",
+                    AlertSeverity.HIGH.value,
+                    "factor",
+                    AlertBasis.REGULATORY.value,
+                    {"tracking_error": _fmt(te)},
+                    f"1y-rolling tracking error {te:.2%} exceeds SEBI's 2% cap for equity ETFs/index funds.",
+                )
+            )
         elif te > PASSIVE_TE_WATCH:
-            a.append(Alert("PASSIVE_TRACKING_ERROR_HIGH", AlertSeverity.WATCH.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"tracking_error": _fmt(te)},
-                           f"Tracking error {te:.2%} — sloppy replication vs well-run peers (typically <50bp)."))
+            a.append(
+                Alert(
+                    "PASSIVE_TRACKING_ERROR_HIGH",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"tracking_error": _fmt(te)},
+                    f"Tracking error {te:.2%} — sloppy replication vs well-run peers (typically <50bp).",
+                )
+            )
         elif te > PASSIVE_TE_INFO:
-            a.append(Alert("PASSIVE_TRACKING_ERROR_HIGH", AlertSeverity.INFO.value, "factor",
-                           AlertBasis.DESCRIPTIVE_RISK.value, {"tracking_error": _fmt(te)},
-                           f"Tracking error {te:.2%}."))
+            a.append(
+                Alert(
+                    "PASSIVE_TRACKING_ERROR_HIGH",
+                    AlertSeverity.INFO.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"tracking_error": _fmt(te)},
+                    f"Tracking error {te:.2%}.",
+                )
+            )
     td = m["tracking_difference_tri"]
     if _finite(td) and td <= PASSIVE_TD_POOR:
-        a.append(Alert("PASSIVE_TRACKING_DIFF_POOR", AlertSeverity.WATCH.value, "factor",
-                       AlertBasis.DESCRIPTIVE_RISK.value,
-                       {"tracking_difference_tri": _fmt(td), "benchmark_basis": "adj_PRI(+1.3%)"},
-                       f"Lags its TRI benchmark by {-td:.2%}/yr — beyond plausible TER drag alone. "
-                       f"NOTE: live benchmark is a PRI+1.3%-dividend-addback approximation (±0.5pp)."))
+        a.append(
+            Alert(
+                "PASSIVE_TRACKING_DIFF_POOR",
+                AlertSeverity.WATCH.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"tracking_difference_tri": _fmt(td), "benchmark_basis": "adj_PRI(+1.3%)"},
+                f"Lags its TRI benchmark by {-td:.2%}/yr — beyond plausible TER drag alone. "
+                f"NOTE: live benchmark is a PRI+1.3%-dividend-addback approximation (±0.5pp).",
+            )
+        )
     return a
 
 
 def _hybrid_alerts(m: Dict[str, float]) -> List[Alert]:
     a: List[Alert] = []
     if _finite(m["excess_cagr_3y"]) and m["excess_cagr_3y"] <= HY_BENCHMARK_LAG:
-        a.append(Alert("HY_BENCHMARK_LAG", AlertSeverity.WATCH.value, "factor",
-                       AlertBasis.DESCRIPTIVE_RISK.value, {"excess_cagr_3y": _fmt(m["excess_cagr_3y"])},
-                       f"Trails its category hybrid benchmark by {-m['excess_cagr_3y']:.1%}/yr over 3y."))
+        a.append(
+            Alert(
+                "HY_BENCHMARK_LAG",
+                AlertSeverity.WATCH.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"excess_cagr_3y": _fmt(m["excess_cagr_3y"])},
+                f"Trails its category hybrid benchmark by {-m['excess_cagr_3y']:.1%}/yr over 3y.",
+            )
+        )
     if _finite(m["downside_capture"]) and m["downside_capture"] > HY_DOWNCAP_WATCH:
-        a.append(Alert("HY_DOWNSIDE_CAPTURE_HIGH", AlertSeverity.WATCH.value, "factor",
-                       AlertBasis.GUARDRAIL_ONLY.value, {"downside_capture": _fmt(m["downside_capture"])},
-                       f"Downside capture {m['downside_capture']:.0%} of the hybrid benchmark — "
-                       f"a hybrid mandate's reason to exist is cushioning drawdowns."))
+        a.append(
+            Alert(
+                "HY_DOWNSIDE_CAPTURE_HIGH",
+                AlertSeverity.WATCH.value,
+                "factor",
+                AlertBasis.GUARDRAIL_ONLY.value,
+                {"downside_capture": _fmt(m["downside_capture"])},
+                f"Downside capture {m['downside_capture']:.0%} of the hybrid benchmark — "
+                f"a hybrid mandate's reason to exist is cushioning drawdowns.",
+            )
+        )
     if _finite(m["max_dd_3y"]) and m["max_dd_3y"] <= HY_DD_DEEP:
-        a.append(Alert("HY_DRAWDOWN_DEEP", AlertSeverity.WATCH.value, "factor",
-                       AlertBasis.DESCRIPTIVE_RISK.value, {"max_dd_3y": _fmt(m["max_dd_3y"])},
-                       f"Max drawdown {m['max_dd_3y']:.1%} over 3y — beyond a typical aggressive-hybrid edge."))
+        a.append(
+            Alert(
+                "HY_DRAWDOWN_DEEP",
+                AlertSeverity.WATCH.value,
+                "factor",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                {"max_dd_3y": _fmt(m["max_dd_3y"])},
+                f"Max drawdown {m['max_dd_3y']:.1%} over 3y — beyond a typical aggressive-hybrid edge.",
+            )
+        )
     return a
 
 
-def _expense_alert(prefix: str, expense_ratio: float, watch: float, info: float,
-                   breach: Optional[float] = None) -> Tuple[Optional[Alert], bool]:
+def _expense_alert(
+    prefix: str, expense_ratio: float, watch: float, info: float, breach: Optional[float] = None
+) -> Tuple[Optional[Alert], bool]:
     """Returns (alert_or_None, was_dormant). Dormant when TER isn't on file (always
     true today per mf_realstore.py — no free TER source)."""
     if not np.isfinite(expense_ratio):
         return None, True
     if breach is not None and expense_ratio > breach:
-        return Alert(f"{prefix}_EXPENSE_ABOVE_REG_CAP", AlertSeverity.HIGH.value, "factor",
-                     AlertBasis.REGULATORY.value, {"expense_ratio": _fmt(expense_ratio)},
-                     f"TER {expense_ratio:.2%} exceeds the SEBI slab ceiling for this scheme type."), False
+        return Alert(
+            f"{prefix}_EXPENSE_ABOVE_REG_CAP",
+            AlertSeverity.HIGH.value,
+            "factor",
+            AlertBasis.REGULATORY.value,
+            {"expense_ratio": _fmt(expense_ratio)},
+            f"TER {expense_ratio:.2%} exceeds the SEBI slab ceiling for this scheme type.",
+        ), False
     if expense_ratio >= watch:
-        return Alert(f"{prefix}_EXPENSE_HIGH", AlertSeverity.WATCH.value, "factor",
-                     AlertBasis.CAUSAL_COST.value, {"expense_ratio": _fmt(expense_ratio)},
-                     f"TER {expense_ratio:.2%} — a 1% gap compounds to ~7.5% over a 7.5y horizon."), False
+        return Alert(
+            f"{prefix}_EXPENSE_HIGH",
+            AlertSeverity.WATCH.value,
+            "factor",
+            AlertBasis.CAUSAL_COST.value,
+            {"expense_ratio": _fmt(expense_ratio)},
+            f"TER {expense_ratio:.2%} — a 1% gap compounds to ~7.5% over a 7.5y horizon.",
+        ), False
     if expense_ratio >= info:
-        return Alert(f"{prefix}_EXPENSE_HIGH", AlertSeverity.INFO.value, "factor",
-                     AlertBasis.CAUSAL_COST.value, {"expense_ratio": _fmt(expense_ratio)},
-                     f"TER {expense_ratio:.2%}."), False
+        return Alert(
+            f"{prefix}_EXPENSE_HIGH",
+            AlertSeverity.INFO.value,
+            "factor",
+            AlertBasis.CAUSAL_COST.value,
+            {"expense_ratio": _fmt(expense_ratio)},
+            f"TER {expense_ratio:.2%}.",
+        ), False
     return None, False
 
 
-def _factor_alerts(quant: QuantEngine, dossier: "FundDossier",
-                   benchmark: Optional[pd.Series]) -> Tuple[List[Alert], List[str], int]:
+def _factor_alerts(
+    quant: QuantEngine, dossier: "FundDossier", benchmark: Optional[pd.Series]
+) -> Tuple[List[Alert], List[str], int]:
     bucket = dossier.bucket.value
     alerts: List[Alert] = []
     dormant: List[str] = []
@@ -392,9 +545,9 @@ def _factor_alerts(quant: QuantEngine, dossier: "FundDossier",
         m = _fund_metrics(quant, dossier.nav, benchmark)
         checks_run += 1
         alerts += _passive_alerts(m)
-        alert, was_dormant = _expense_alert("PASSIVE", dossier.expense_ratio,
-                                            PASSIVE_EXPENSE_WATCH, PASSIVE_EXPENSE_INFO,
-                                            breach=PASSIVE_EXPENSE_BREACH)
+        alert, was_dormant = _expense_alert(
+            "PASSIVE", dossier.expense_ratio, PASSIVE_EXPENSE_WATCH, PASSIVE_EXPENSE_INFO, breach=PASSIVE_EXPENSE_BREACH
+        )
         if alert:
             alerts.append(alert)
         if was_dormant:
@@ -414,11 +567,17 @@ def _factor_alerts(quant: QuantEngine, dossier: "FundDossier",
         m = _fund_metrics(quant, dossier.nav, benchmark)
         checks_run += 1
         if _finite(m["rr3y_negative_share"]) and m["rr3y_negative_share"] > 0:
-            alerts.append(Alert("DEBT_NEGATIVE_3Y_WINDOW", AlertSeverity.WATCH.value, "factor",
-                                AlertBasis.DESCRIPTIVE_RISK.value,
-                                {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
-                                "At least one 3-year holding window lost money — a credit-event "
-                                "signature for a debt fund, not rate noise."))
+            alerts.append(
+                Alert(
+                    "DEBT_NEGATIVE_3Y_WINDOW",
+                    AlertSeverity.WATCH.value,
+                    "factor",
+                    AlertBasis.DESCRIPTIVE_RISK.value,
+                    {"rr3y_negative_share": _fmt(m["rr3y_negative_share"])},
+                    "At least one 3-year holding window lost money — a credit-event "
+                    "signature for a debt fund, not rate noise.",
+                )
+            )
         alert, was_dormant = _expense_alert("DEBT", dossier.expense_ratio, 0.010, 0.0075)
         if alert:
             alerts.append(alert)
@@ -466,8 +625,7 @@ def _holdings_alerts(dossier: "FundDossier") -> Tuple[List[Alert], List[str], in
     # Deliberately NOT gated on the NFO eligibility status: concentration needs a
     # disclosure, not NAV history, so it is often the ONLY evidence available on a
     # newborn fund whose NAV-based factor rules are all dormant.
-    facts = mf_holdings.analyze(dossier.current_holdings,
-                                available=dossier.holdings_available)
+    facts = mf_holdings.analyze(dossier.current_holdings, available=dossier.holdings_available)
     if not facts.available or facts.n_equity == 0:
         # Absence of evidence is dormancy, never a quiet pass.
         return [], [_HOLDINGS_CONCENTRATION_CODE], 0
@@ -495,11 +653,22 @@ def _holdings_alerts(dossier: "FundDossier") -> Tuple[List[Alert], List[str], in
         return [], [], 1
 
     eff = f"{facts.effective_n:.1f}" if facts.effective_n is not None else "n/a"
-    return ([Alert(_HOLDINGS_CONCENTRATION_CODE, sev.value, "holdings",
-                   AlertBasis.DESCRIPTIVE_RISK.value, evidence,
-                   f"Top-10 equity weight {top10:.1%} across {facts.n_equity} names "
-                   f"(effective N {eff}) — concentrated book, higher single-name risk. "
-                   f"A style observation, not a breach.")], [], 1)
+    return (
+        [
+            Alert(
+                _HOLDINGS_CONCENTRATION_CODE,
+                sev.value,
+                "holdings",
+                AlertBasis.DESCRIPTIVE_RISK.value,
+                evidence,
+                f"Top-10 equity weight {top10:.1%} across {facts.n_equity} names "
+                f"(effective N {eff}) — concentrated book, higher single-name risk. "
+                f"A style observation, not a breach.",
+            )
+        ],
+        [],
+        1,
+    )
 
 
 # ==============================================================================
@@ -510,15 +679,29 @@ def _manager_alerts(backtest: Dict[str, Any]) -> Tuple[List[Alert], List[str]]:
     if macs is None:
         return [], []
     if macs < MACS_WATCH_BELOW:
-        return [Alert("MANAGER_PICKS_UNDERPERFORMED", AlertSeverity.WATCH.value, "manager",
-                      AlertBasis.MANAGER_HISTORY.value, {"macs": macs},
-                      f"Manager Alpha Consistency Score {macs}/100 — revealed top-10 picks "
-                      f"underperformed passive sector clones.")], []
+        return [
+            Alert(
+                "MANAGER_PICKS_UNDERPERFORMED",
+                AlertSeverity.WATCH.value,
+                "manager",
+                AlertBasis.MANAGER_HISTORY.value,
+                {"macs": macs},
+                f"Manager Alpha Consistency Score {macs}/100 — revealed top-10 picks "
+                f"underperformed passive sector clones.",
+            )
+        ], []
     if macs < MACS_INFO_BELOW:
-        return [Alert("MANAGER_ALPHA_NOT_EVIDENCED", AlertSeverity.INFO.value, "manager",
-                      AlertBasis.MANAGER_HISTORY.value, {"macs": macs},
-                      f"Manager Alpha Consistency Score {macs}/100 — stock selection roughly "
-                      f"matches a passive clone; alpha not evidenced.")], []
+        return [
+            Alert(
+                "MANAGER_ALPHA_NOT_EVIDENCED",
+                AlertSeverity.INFO.value,
+                "manager",
+                AlertBasis.MANAGER_HISTORY.value,
+                {"macs": macs},
+                f"Manager Alpha Consistency Score {macs}/100 — stock selection roughly "
+                f"matches a passive clone; alpha not evidenced.",
+            )
+        ], []
     return [], []  # Sentinel is a risk/coverage channel — strong MACS emits nothing (user decision)
 
 
@@ -535,8 +718,7 @@ def _load_managers_csv(path: str = "mf_cache/managers.csv") -> Optional[pd.DataF
     log line is the only thing that tells the two apart."""
     rows, issues = mf_managers.load(Path(path))
     for i in issues:
-        (LOGGER.error if i.severity == mf_managers.SEVERITY_ERROR else LOGGER.warning)(
-            "managers.csv %s", i)
+        (LOGGER.error if i.severity == mf_managers.SEVERITY_ERROR else LOGGER.warning)("managers.csv %s", i)
     return rows
 
 
@@ -550,11 +732,15 @@ def _tenure_alert(managers_df: Optional[pd.DataFrame], dossier: "FundDossier") -
         return None
     tenure_days = (pd.Timestamp.today().normalize() - row["start_date"]).days
     if tenure_days < 365:
-        return Alert("MANAGER_TENURE_SHORT", AlertSeverity.INFO.value, "manager",
-                     AlertBasis.MANAGER_HISTORY.value,
-                     {"tenure_days": int(tenure_days), "manager": row["manager_name"]},
-                     f"Current manager ({row['manager_name']}) has run this scheme for "
-                     f"{tenure_days} days (<1y) — this scheme's own track record under them is thin.")
+        return Alert(
+            "MANAGER_TENURE_SHORT",
+            AlertSeverity.INFO.value,
+            "manager",
+            AlertBasis.MANAGER_HISTORY.value,
+            {"tenure_days": int(tenure_days), "manager": row["manager_name"]},
+            f"Current manager ({row['manager_name']}) has run this scheme for "
+            f"{tenure_days} days (<1y) — this scheme's own track record under them is thin.",
+        )
     return None
 
 
@@ -562,18 +748,23 @@ def _tenure_alert(managers_df: Optional[pd.DataFrame], dossier: "FundDossier") -
 # NEWS ALERTS
 # ==============================================================================
 def _news_alerts(sentiment: Dict[str, Any]) -> List[Alert]:
-    return [Alert("REGULATORY_NEWS_KEYWORD", AlertSeverity.WATCH.value, "news",
-                  AlertBasis.NEWS_KEYWORD.value, {"headline": rf},
-                  f"Regulatory keyword match on a headline (word-boundary match, not a verified "
-                  f"enforcement action): {rf!r}")
-           for rf in sentiment.get("red_flags", [])]
+    return [
+        Alert(
+            "REGULATORY_NEWS_KEYWORD",
+            AlertSeverity.WATCH.value,
+            "news",
+            AlertBasis.NEWS_KEYWORD.value,
+            {"headline": rf},
+            f"Regulatory keyword match on a headline (word-boundary match, not a verified enforcement action): {rf!r}",
+        )
+        for rf in sentiment.get("red_flags", [])
+    ]
 
 
 # ==============================================================================
 # NFO ALERTS + DOSSIER
 # ==============================================================================
-def _manager_prior_funds(managers_df: Optional[pd.DataFrame], manager: str,
-                         exclude_scheme: str) -> Dict[str, str]:
+def _manager_prior_funds(managers_df: Optional[pd.DataFrame], manager: str, exclude_scheme: str) -> Dict[str, str]:
     """Other schemes this manager has run, per the hand-sourced managers.csv —
     skill attaches to the manager, not this (as-yet-unpriced) scheme code.
 
@@ -582,44 +773,82 @@ def _manager_prior_funds(managers_df: Optional[pd.DataFrame], manager: str,
     return mf_managers.prior_funds(managers_df, manager, exclude_scheme)
 
 
-def _nfo(dossier: "FundDossier", gate: EligibilityGate, assessor: NFOAssessor,
-        managers_df: Optional[pd.DataFrame]) -> Tuple[List[Alert], Optional[Dict[str, Any]], str]:
+def _nfo(
+    dossier: "FundDossier", gate: EligibilityGate, assessor: NFOAssessor, managers_df: Optional[pd.DataFrame]
+) -> Tuple[List[Alert], Optional[Dict[str, Any]], str]:
     # FundDossier carries no allotment_date field; the NAV series' own earliest
     # date is the best available proxy (real stores start `nav` at inception),
     # so the gate's NEWBORN/YOUNG age tiers still fire instead of silently
     # defaulting every fund with >=1 NAV point to EVALUABLE.
     navd = dossier.nav.dropna()
     allotment_date = navd.index.min().date() if len(navd) else None
-    verdict = gate.assess(dossier.scheme_name, dossier.nav, allotment_date=allotment_date,
-                         has_disclosure=dossier.holdings_available)
+    verdict = gate.assess(
+        dossier.scheme_name, dossier.nav, allotment_date=allotment_date, has_disclosure=dossier.holdings_available
+    )
     status = verdict.status.value
     alerts: List[Alert] = []
     if status in ("PRE_LAUNCH", "NEWBORN"):
-        alerts.append(Alert("NFO_NO_TRACK_RECORD", AlertSeverity.INFO.value, "nfo",
-                            AlertBasis.COVERAGE.value, {"status": status}, verdict.reason))
+        alerts.append(
+            Alert(
+                "NFO_NO_TRACK_RECORD",
+                AlertSeverity.INFO.value,
+                "nfo",
+                AlertBasis.COVERAGE.value,
+                {"status": status},
+                verdict.reason,
+            )
+        )
         structural: Dict[str, str] = {}
         if np.isfinite(dossier.expense_ratio):
             structural["Expense Ratio"] = f"{dossier.expense_ratio:.2%}"
         if np.isfinite(dossier.aum_cr):
             structural["AUM"] = f"₹{dossier.aum_cr:,.0f} cr"
         prior_funds = _manager_prior_funds(managers_df, dossier.manager, dossier.scheme_name)
-        dossier_obj = assessor.assess(dossier.scheme_name, dossier.amc, [dossier.manager],
-                                      dossier.category, dossier.benchmark, verdict,
-                                      manager_prior_funds=prior_funds, structural=structural)
+        dossier_obj = assessor.assess(
+            dossier.scheme_name,
+            dossier.amc,
+            [dossier.manager],
+            dossier.category,
+            dossier.benchmark,
+            verdict,
+            manager_prior_funds=prior_funds,
+            structural=structural,
+        )
         if not dossier_obj.manager_prior_funds:
-            alerts.append(Alert("NFO_MANAGER_PROXY_UNAVAILABLE", AlertSeverity.INFO.value, "nfo",
-                                AlertBasis.COVERAGE.value, {},
-                                "No manager track-record proxy available (needs mf_cache/managers.csv)."))
-        nfo_dossier = dict(scheme_name=dossier_obj.scheme_name, amc=dossier_obj.amc,
-                           managers=dossier_obj.managers, category=dossier_obj.category,
-                           benchmark=dossier_obj.benchmark, status=status,
-                           manager_prior_funds=dossier_obj.manager_prior_funds,
-                           structural=dossier_obj.structural, considerations=dossier_obj.considerations,
-                           rendered=dossier_obj.render())
+            alerts.append(
+                Alert(
+                    "NFO_MANAGER_PROXY_UNAVAILABLE",
+                    AlertSeverity.INFO.value,
+                    "nfo",
+                    AlertBasis.COVERAGE.value,
+                    {},
+                    "No manager track-record proxy available (needs mf_cache/managers.csv).",
+                )
+            )
+        nfo_dossier = dict(
+            scheme_name=dossier_obj.scheme_name,
+            amc=dossier_obj.amc,
+            managers=dossier_obj.managers,
+            category=dossier_obj.category,
+            benchmark=dossier_obj.benchmark,
+            status=status,
+            manager_prior_funds=dossier_obj.manager_prior_funds,
+            structural=dossier_obj.structural,
+            considerations=dossier_obj.considerations,
+            rendered=dossier_obj.render(),
+        )
         return alerts, nfo_dossier, status
     if status == "YOUNG":
-        alerts.append(Alert("NFO_SHORT_HISTORY", AlertSeverity.INFO.value, "nfo",
-                            AlertBasis.COVERAGE.value, {"status": status}, verdict.reason))
+        alerts.append(
+            Alert(
+                "NFO_SHORT_HISTORY",
+                AlertSeverity.INFO.value,
+                "nfo",
+                AlertBasis.COVERAGE.value,
+                {"status": status},
+                verdict.reason,
+            )
+        )
     return alerts, None, status
 
 
@@ -636,9 +865,14 @@ class SentinelEngine:
         self.assessor = NFOAssessor()
         self._managers_df = _load_managers_csv(managers_csv)
 
-    def run(self, dossier: "FundDossier", compliance: List["ComplianceFinding"],
-            backtest: Dict[str, Any], sentiment: Dict[str, Any],
-            benchmark: Optional[pd.Series]) -> SentinelReport:
+    def run(
+        self,
+        dossier: "FundDossier",
+        compliance: List["ComplianceFinding"],
+        backtest: Dict[str, Any],
+        sentiment: Dict[str, Any],
+        benchmark: Optional[pd.Series],
+    ) -> SentinelReport:
         alerts: List[Alert] = []
         dormant: List[str] = []
 
@@ -680,11 +914,12 @@ class SentinelEngine:
         alerts += _news_alerts(sentiment)
 
         alerts.sort(key=lambda a: _SEVERITY_ORDER[a.severity])
-        self.v._record("sentinel", "alerts_emitted", True,
-                       f"{dossier.scheme_name}: {len(alerts)} alerts, {len(dormant)} dormant")
-        return SentinelReport(alerts=alerts, nfo_dossier=nfo_dossier,
-                              checks_run=checks_run, checks_dormant=dormant,
-                              eligibility=status)
+        self.v._record(
+            "sentinel", "alerts_emitted", True, f"{dossier.scheme_name}: {len(alerts)} alerts, {len(dormant)} dormant"
+        )
+        return SentinelReport(
+            alerts=alerts, nfo_dossier=nfo_dossier, checks_run=checks_run, checks_dormant=dormant, eligibility=status
+        )
 
 
 # ==============================================================================
@@ -696,7 +931,7 @@ def _selftest() -> None:
     n = len(dates)
 
     def _path(mu, sigma, start=100.0):
-        rets = rng.normal((mu - 0.5 * sigma ** 2) / 252, sigma / np.sqrt(252), n - 1)
+        rets = rng.normal((mu - 0.5 * sigma**2) / 252, sigma / np.sqrt(252), n - 1)
         return pd.Series(start * np.cumprod(1 + np.concatenate([[0.0], rets])), index=dates)
 
     bench = _path(0.12, 0.16)
@@ -723,27 +958,30 @@ def _selftest() -> None:
 
     # 3. A fund with amplified downside + real lag + deep drawdown -> the matching alerts fire.
     shock = np.zeros(n)
-    shock[n // 2:n // 2 + 40] = -0.01
+    shock[n // 2 : n // 2 + 40] = -0.01
     bad = bench.to_numpy() * np.cumprod(1 + shock) * 0.8
     bad = pd.Series(bad, index=dates)
     m_bad = _fund_metrics(quant, bad, bench)
     bad_alerts = {a.code for a in _equity_alerts(m_bad, "Flexi Cap")}
-    assert "EQ_DRAWDOWN_DEEP" in bad_alerts or "EQ_DRAWDOWN_VS_BENCH" in bad_alerts, \
+    assert "EQ_DRAWDOWN_DEEP" in bad_alerts or "EQ_DRAWDOWN_VS_BENCH" in bad_alerts, (
         f"FAIL: shocked fund did not trip a drawdown alert: {bad_alerts}"
+    )
     print(f"[selftest] shocked fund tripped: {sorted(bad_alerts)} — PASS")
 
     # 4. Missing benchmark -> zero benchmark-relative alerts, no crash.
     m_nobench = _fund_metrics(quant, good, None)
     assert not np.isfinite(m_nobench["excess_cagr_3y"]) and not np.isfinite(m_nobench["beta"])
     nobench_alerts = _equity_alerts(m_nobench, "Flexi Cap")
-    assert all(a.code not in ("EQ_BENCHMARK_LAG", "EQ_BETA_DRIFT", "EQ_DRAWDOWN_VS_BENCH")
-              for a in nobench_alerts), "FAIL: benchmark-relative alert fired with no benchmark"
+    assert all(a.code not in ("EQ_BENCHMARK_LAG", "EQ_BETA_DRIFT", "EQ_DRAWDOWN_VS_BENCH") for a in nobench_alerts), (
+        "FAIL: benchmark-relative alert fired with no benchmark"
+    )
     print("[selftest] missing benchmark: no benchmark-relative alerts fired — PASS")
 
     # 5. Compliance mapping: critical -> HIGH, NOT-AVAILABLE warning -> INFO/COVERAGE, other warning -> WATCH.
     class _F:
         def __init__(self, rule_id, passed, severity, detail):
             self.rule_id, self.passed, self.severity, self.detail = rule_id, passed, severity, detail
+
     findings = [
         _F("min_equity>=65%", False, "critical", "equity 40%"),
         _F("cap_fidelity_min_equity_and_overlap_checks", False, "warning", "NOT AVAILABLE"),
@@ -757,12 +995,15 @@ def _selftest() -> None:
     assert by_code["SEBI_CHECKS_NOT_EVALUATED"].severity == AlertSeverity.INFO.value
     assert by_code["SEBI_CHECKS_NOT_EVALUATED"].basis == AlertBasis.COVERAGE.value
     assert by_code["NAME_CATEGORY_MISMATCH"].severity == AlertSeverity.WATCH.value
-    assert by_code["SEBI_CATEGORY_UNKNOWN"].severity == AlertSeverity.INFO.value, \
+    assert by_code["SEBI_CATEGORY_UNKNOWN"].severity == AlertSeverity.INFO.value, (
         "FAIL: category_known (a coverage gap, not a verified breach) must not be WATCH/REGULATORY"
+    )
     assert by_code["SEBI_CATEGORY_UNKNOWN"].basis == AlertBasis.COVERAGE.value
     assert checks_run == 5 and len(comp_alerts) == 4
-    print("[selftest] compliance mapping: critical->HIGH, NOT-AVAILABLE/category-unknown->INFO/COVERAGE, "
-          "other warning->WATCH — PASS")
+    print(
+        "[selftest] compliance mapping: critical->HIGH, NOT-AVAILABLE/category-unknown->INFO/COVERAGE, "
+        "other warning->WATCH — PASS"
+    )
 
     # 6. Manager alerts: MACS<40 -> WATCH, 40<=MACS<60 -> INFO, >=60 -> nothing.
     assert _manager_alerts({"manager_alpha_consistency_score": 30})[0][0].severity == AlertSeverity.WATCH.value
@@ -775,7 +1016,8 @@ def _selftest() -> None:
     #    string is not a stable contract. Severity/basis were already correct via
     #    `critical`; this pins the code.
     si_alerts, _ = _compliance_alerts(
-        [_F("single_issuer<=10%", False, "critical", "1 equity issuer over SEBI's 10% ceiling: MEGA 22.0%")])
+        [_F("single_issuer<=10%", False, "critical", "1 equity issuer over SEBI's 10% ceiling: MEGA 22.0%")]
+    )
     assert si_alerts[0].code == "SEBI_SINGLE_ISSUER_BREACH", si_alerts[0].code
     assert si_alerts[0].severity == AlertSeverity.HIGH.value
     assert si_alerts[0].basis == AlertBasis.REGULATORY.value
@@ -783,7 +1025,8 @@ def _selftest() -> None:
 
     # 8. Holdings concentration alerts.
     class _B:
-        def __init__(self, value): self.value = value
+        def __init__(self, value):
+            self.value = value
 
     class _D:
         def __init__(self, bucket, holdings, available=True):
@@ -794,13 +1037,21 @@ def _selftest() -> None:
         df.index = df["name"].astype(str).str.upper()
         return df
 
-    diversified = _hframe([dict(name=f"S{i:02d}", weight=0.030, asset_type="equity",
-                                sector=["Financials", "IT", "Pharma", "Auto"][i % 4])
-                           for i in range(30)])
-    concentrated = _hframe([dict(name=f"C{i:02d}", weight=0.085, asset_type="equity", sector="IT")
-                            for i in range(10)] + [dict(name=f"T{i:02d}", weight=0.015,
-                                                        asset_type="equity", sector="Auto")
-                                                   for i in range(10)])
+    diversified = _hframe(
+        [
+            dict(
+                name=f"S{i:02d}",
+                weight=0.030,
+                asset_type="equity",
+                sector=["Financials", "IT", "Pharma", "Auto"][i % 4],
+            )
+            for i in range(30)
+        ]
+    )
+    concentrated = _hframe(
+        [dict(name=f"C{i:02d}", weight=0.085, asset_type="equity", sector="IT") for i in range(10)]
+        + [dict(name=f"T{i:02d}", weight=0.015, asset_type="equity", sector="Auto") for i in range(10)]
+    )
 
     a, d, c = _holdings_alerts(_D("Equity", diversified))
     assert not a and not d and c == 1, f"FAIL: diversified book should be silent, got {a}/{d}"
@@ -824,13 +1075,21 @@ def _selftest() -> None:
     # never escalate to the push-notification tier the way a real breach does.
     raised = False
     try:
-        Alert("HOLDINGS_CONCENTRATION_HIGH", AlertSeverity.HIGH.value, "holdings",
-              AlertBasis.DESCRIPTIVE_RISK.value, {}, "x")
+        Alert(
+            "HOLDINGS_CONCENTRATION_HIGH",
+            AlertSeverity.HIGH.value,
+            "holdings",
+            AlertBasis.DESCRIPTIVE_RISK.value,
+            {},
+            "x",
+        )
     except ValueError:
         raised = True
     assert raised, "FAIL: concentration alert accepted HIGH severity"
-    print("[selftest] holdings: concentrated->WATCH, diversified silent, no-disclosure dormant, "
-          "passive exempt, never HIGH — PASS")
+    print(
+        "[selftest] holdings: concentrated->WATCH, diversified silent, no-disclosure dormant, "
+        "passive exempt, never HIGH — PASS"
+    )
 
     print("[selftest] PASS — Sentinel registry + live rules behave honestly")
 

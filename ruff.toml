@@ -1,0 +1,9 @@
+line-length = 120
+exclude = [".venv", ".claude"]
+
+[lint]
+# Deliberately narrow: real errors + unused imports + import order.
+# Modernisation (UP), datetime-tz (DTZ) and comprehension (C4) rules are NOT
+# enabled here -- they fire ~500 times and are a separate, reviewed cleanup,
+# not something the edit hook should rewrite behind you.
+select = ["E4", "E7", "E9", "F", "I"]

@@ -41,13 +41,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import math
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -55,18 +54,17 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import mf_holdings  # noqa: E402 — portfolio-structure facts + concentration screen (holdings-only)
+
 # ---- Reviewed & reused v1 primitives (hardened in the prior build) -----------
 from mf_pipeline import (  # noqa: E402
     TRADING_DAYS_PER_YEAR,
-    RISK_FREE_RATE_ANNUAL,
     QuantEngine,
     ValidationOrchestrator,
 )
 from mf_sentinel import SentinelEngine  # noqa: E402 — System B: typed alerts, never a fund number
-import mf_holdings  # noqa: E402 — portfolio-structure facts + concentration screen (holdings-only)
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
 LOGGER = logging.getLogger("MFOrchestrator")
 # The canonical "now" for every live evaluation. It MUST advance in production:
 # score_live anchors at min(fund_last_nav, TODAY), so a frozen value pins every
@@ -82,36 +80,43 @@ LOGGER = logging.getLogger("MFOrchestrator")
 _TODAY_OVERRIDE = os.environ.get("MF_TODAY", "").strip()
 TODAY = (pd.Timestamp(_TODAY_OVERRIDE) if _TODAY_OVERRIDE else pd.Timestamp.now()).normalize()
 if _TODAY_OVERRIDE:
-    LOGGER.warning("TODAY pinned to %s via MF_TODAY — live runs must NOT set this, "
-                   "a frozen anchor stops the prediction ledger growing.", TODAY.date())
+    LOGGER.warning(
+        "TODAY pinned to %s via MF_TODAY — live runs must NOT set this, "
+        "a frozen anchor stops the prediction ledger growing.",
+        TODAY.date(),
+    )
 
 
 # ==============================================================================
 # 1. INVESTOR PROFILE FRAMEWORK — dynamic runtime rules
 # ==============================================================================
 class LiquidityNeed(str, Enum):
-    NONE = "none"          # fully locked-in capital, no interim dividends needed
-    PARTIAL = "partial"    # occasional access possible
-    HIGH = "high"          # may need capital at short notice
+    NONE = "none"  # fully locked-in capital, no interim dividends needed
+    PARTIAL = "partial"  # occasional access possible
+    HIGH = "high"  # may need capital at short notice
 
 
 class RiskAppetite(str, Enum):
     CONSERVATIVE = "conservative"
     MODERATE = "moderate"
-    HIGH = "high"          # wealth maximisation, preservation secondary
+    HIGH = "high"  # wealth maximisation, preservation secondary
 
 
 class InvestorProfile(BaseModel):
     """Runtime-mutable investor constraints driving every scoring function."""
+
     model_config = ConfigDict(frozen=True)
 
-    horizon_years: float = Field(default=7.5, gt=0.25, le=40,
-                                 description="Baseline default: 7-8y target inside a 5-10y band")
+    horizon_years: float = Field(
+        default=7.5, gt=0.25, le=40, description="Baseline default: 7-8y target inside a 5-10y band"
+    )
     liquidity_need: LiquidityNeed = Field(default=LiquidityNeed.NONE)
     risk_appetite: RiskAppetite = Field(default=RiskAppetite.HIGH)
-    notes: str = Field(default="Secure Govt job + guaranteed pension; capital locked in; "
-                               "inflation-beating growth prioritised over preservation; "
-                               "category drift / unhedged thematic risk must be flagged.")
+    notes: str = Field(
+        default="Secure Govt job + guaranteed pension; capital locked in; "
+        "inflation-beating growth prioritised over preservation; "
+        "category drift / unhedged thematic risk must be flagged."
+    )
 
     @field_validator("horizon_years")
     @classmethod
@@ -119,9 +124,9 @@ class InvestorProfile(BaseModel):
         return round(float(v), 2)
 
 
-def resolve_investor_profile(config: Optional[Dict[str, Any]] = None,
-                             argv: Optional[Sequence[str]] = None,
-                             interactive: bool = True) -> InvestorProfile:
+def resolve_investor_profile(
+    config: Optional[Dict[str, Any]] = None, argv: Optional[Sequence[str]] = None, interactive: bool = True
+) -> InvestorProfile:
     """
     MANDATORY runtime hook, executed at the start of EVERY pipeline run.
     Precedence: CLI arguments > config dict > interactive prompt > baseline default.
@@ -137,9 +142,11 @@ def resolve_investor_profile(config: Optional[Dict[str, Any]] = None,
     merged: Dict[str, Any] = {}
     if config:
         merged.update({k: v for k, v in config.items() if v is not None})
-    for cli_key, model_key in (("horizon_years", "horizon_years"),
-                               ("liquidity_need", "liquidity_need"),
-                               ("risk_appetite", "risk_appetite")):
+    for cli_key, model_key in (
+        ("horizon_years", "horizon_years"),
+        ("liquidity_need", "liquidity_need"),
+        ("risk_appetite", "risk_appetite"),
+    ):
         val = getattr(ns, cli_key)
         if val is not None:
             merged[model_key] = val
@@ -157,10 +164,13 @@ def resolve_investor_profile(config: Optional[Dict[str, Any]] = None,
             merged["risk_appetite"] = r
 
     profile = InvestorProfile(**merged)
-    LOGGER.info("Investor profile resolved: horizon=%.1fy liquidity=%s risk=%s (%s)",
-                profile.horizon_years, profile.liquidity_need.value,
-                profile.risk_appetite.value,
-                "overridden at runtime" if merged else "baseline default")
+    LOGGER.info(
+        "Investor profile resolved: horizon=%.1fy liquidity=%s risk=%s (%s)",
+        profile.horizon_years,
+        profile.liquidity_need.value,
+        profile.risk_appetite.value,
+        "overridden at runtime" if merged else "baseline default",
+    )
     return profile
 
 
@@ -171,7 +181,7 @@ class SEBIBucket(str, Enum):
     EQUITY = "Equity"
     DEBT = "Debt"
     HYBRID = "Hybrid"
-    LIFE_CYCLE = "Life Cycle"          # NEW: replaces Solution-Oriented
+    LIFE_CYCLE = "Life Cycle"  # NEW: replaces Solution-Oriented
     OTHER_PASSIVE = "Other (Index/ETF/FoF)"
     SOLUTION_ORIENTED_LEGACY = "Solution Oriented (DISCONTINUED)"
 
@@ -179,62 +189,80 @@ class SEBIBucket(str, Enum):
 @dataclass(frozen=True)
 class CategoryRule:
     bucket: SEBIBucket
-    min_segment_weight: Optional[float] = None     # market-cap / sector fidelity floor
-    segment: Optional[str] = None                  # 'large' | 'mid' | 'small' | 'single_sector_debt'
-    min_equity: Optional[float] = None             # total-equity floor
-    overlap_cap: Optional[float] = None            # 50% rule where applicable
-    overlap_scope: Optional[str] = None            # who the cap is measured against
+    min_segment_weight: Optional[float] = None  # market-cap / sector fidelity floor
+    segment: Optional[str] = None  # 'large' | 'mid' | 'small' | 'single_sector_debt'
+    min_equity: Optional[float] = None  # total-equity floor
+    overlap_cap: Optional[float] = None  # 50% rule where applicable
+    overlap_scope: Optional[str] = None  # who the cap is measured against
     notes: str = ""
 
 
 SEBI_2026_RULES: Dict[str, CategoryRule] = {
-    "Large Cap":  CategoryRule(SEBIBucket.EQUITY, 0.80, "large", 0.80,
-                               notes="≥80% in large-cap stocks (top 100 by mkt cap)"),
-    "Mid Cap":    CategoryRule(SEBIBucket.EQUITY, 0.65, "mid", 0.65,
-                               notes="≥65% in mid-cap stocks (101st–250th)"),
-    "Small Cap":  CategoryRule(SEBIBucket.EQUITY, 0.65, "small", 0.65,
-                               notes="≥65% in small-cap stocks (251st onwards)"),
-    "Flexi Cap":  CategoryRule(SEBIBucket.EQUITY, None, None, 0.65),
-    "Value":      CategoryRule(SEBIBucket.EQUITY, None, None, 0.80, 0.50, "contra_sibling",
-                               notes="Feb-2026: equity floor raised 65%→80%; ≤50% overlap with sibling Contra"),
-    "Contra":     CategoryRule(SEBIBucket.EQUITY, None, None, 0.80, 0.50, "value_sibling"),
-    "Dividend Yield": CategoryRule(SEBIBucket.EQUITY, None, None, 0.80,
-                                   notes="Feb-2026: equity floor raised 65%→80%"),
-    "Sectoral":   CategoryRule(SEBIBucket.EQUITY, 0.80, "declared_sector", 0.80, 0.50,
-                               "all_equity_except_large_cap",
-                               notes="≤50% quarterly-avg daily overlap vs sibling equity schemes "
-                                     "(large-cap exempt); AMFI half-yearly sector list; 3y glide path"),
-    "Thematic":   CategoryRule(SEBIBucket.EQUITY, 0.80, "declared_theme", 0.80, 0.50,
-                               "all_equity_except_large_cap"),
-    "Sectoral Debt": CategoryRule(SEBIBucket.DEBT, 0.80, "single_sector_debt",
-                                  notes="NEW Feb-2026 category: ≥80% debt of a single sector"),
+    "Large Cap": CategoryRule(
+        SEBIBucket.EQUITY, 0.80, "large", 0.80, notes="≥80% in large-cap stocks (top 100 by mkt cap)"
+    ),
+    "Mid Cap": CategoryRule(SEBIBucket.EQUITY, 0.65, "mid", 0.65, notes="≥65% in mid-cap stocks (101st–250th)"),
+    "Small Cap": CategoryRule(SEBIBucket.EQUITY, 0.65, "small", 0.65, notes="≥65% in small-cap stocks (251st onwards)"),
+    "Flexi Cap": CategoryRule(SEBIBucket.EQUITY, None, None, 0.65),
+    "Value": CategoryRule(
+        SEBIBucket.EQUITY,
+        None,
+        None,
+        0.80,
+        0.50,
+        "contra_sibling",
+        notes="Feb-2026: equity floor raised 65%→80%; ≤50% overlap with sibling Contra",
+    ),
+    "Contra": CategoryRule(SEBIBucket.EQUITY, None, None, 0.80, 0.50, "value_sibling"),
+    "Dividend Yield": CategoryRule(SEBIBucket.EQUITY, None, None, 0.80, notes="Feb-2026: equity floor raised 65%→80%"),
+    "Sectoral": CategoryRule(
+        SEBIBucket.EQUITY,
+        0.80,
+        "declared_sector",
+        0.80,
+        0.50,
+        "all_equity_except_large_cap",
+        notes="≤50% quarterly-avg daily overlap vs sibling equity schemes "
+        "(large-cap exempt); AMFI half-yearly sector list; 3y glide path",
+    ),
+    "Thematic": CategoryRule(SEBIBucket.EQUITY, 0.80, "declared_theme", 0.80, 0.50, "all_equity_except_large_cap"),
+    "Sectoral Debt": CategoryRule(
+        SEBIBucket.DEBT, 0.80, "single_sector_debt", notes="NEW Feb-2026 category: ≥80% debt of a single sector"
+    ),
     "Corporate Bond": CategoryRule(SEBIBucket.DEBT),
     "Short Duration": CategoryRule(SEBIBucket.DEBT),
-    "Aggressive Hybrid": CategoryRule(SEBIBucket.HYBRID, None, None, 0.65,
-                                      notes="equity 65–80%"),
-    "Conservative Hybrid": CategoryRule(SEBIBucket.HYBRID, None, None, None,
-                                        notes="equity 10–25%"),
-    "Arbitrage":  CategoryRule(SEBIBucket.HYBRID, None, None, 0.65),
-    "Life Cycle": CategoryRule(SEBIBucket.LIFE_CYCLE,
-                               notes="NEW planning-led multi-asset category replacing "
-                                     "Solution-Oriented (discontinued 26-Feb-2026)"),
+    "Aggressive Hybrid": CategoryRule(SEBIBucket.HYBRID, None, None, 0.65, notes="equity 65–80%"),
+    "Conservative Hybrid": CategoryRule(SEBIBucket.HYBRID, None, None, None, notes="equity 10–25%"),
+    "Arbitrage": CategoryRule(SEBIBucket.HYBRID, None, None, 0.65),
+    "Life Cycle": CategoryRule(
+        SEBIBucket.LIFE_CYCLE,
+        notes="NEW planning-led multi-asset category replacing Solution-Oriented (discontinued 26-Feb-2026)",
+    ),
     "Index Fund": CategoryRule(SEBIBucket.OTHER_PASSIVE),
-    "ETF":        CategoryRule(SEBIBucket.OTHER_PASSIVE),
+    "ETF": CategoryRule(SEBIBucket.OTHER_PASSIVE),
     "Retirement/Children (legacy)": CategoryRule(
         SEBIBucket.SOLUTION_ORIENTED_LEGACY,
         notes="Subscriptions must STOP immediately; scheme to merge with a similar "
-              "asset-allocation scheme with prior SEBI approval"),
+        "asset-allocation scheme with prior SEBI approval",
+    ),
 }
 
-RETURN_FOCUSED_NAME_WORDS = ("wealth booster", "multibagger", "assured", "guaranteed",
-                             "high return", "supreme return", "double")
+RETURN_FOCUSED_NAME_WORDS = (
+    "wealth booster",
+    "multibagger",
+    "assured",
+    "guaranteed",
+    "high return",
+    "supreme return",
+    "double",
+)
 
 
 @dataclass
 class ComplianceFinding:
     rule_id: str
     passed: bool
-    severity: str          # info | warning | critical
+    severity: str  # info | warning | critical
     detail: str
 
 
@@ -251,8 +279,7 @@ class TrueToLabelVerifier:
         aligned = pd.concat([w1, w2], axis=1).fillna(0.0)
         return float(np.minimum(aligned.iloc[:, 0], aligned.iloc[:, 1]).sum())
 
-    def quarterly_overlap(self, daily_w1: Dict[str, pd.Series],
-                          daily_w2: Dict[str, pd.Series]) -> float:
+    def quarterly_overlap(self, daily_w1: Dict[str, pd.Series], daily_w2: Dict[str, pd.Series]) -> float:
         """Feb-2026 method: quarterly figure = average of DAILY overlap values."""
         days = sorted(set(daily_w1) & set(daily_w2))
         if not days:
@@ -260,21 +287,30 @@ class TrueToLabelVerifier:
         vals = [self.portfolio_overlap(daily_w1[d], daily_w2[d]) for d in days]
         return float(np.mean(vals))
 
-    def verify(self, fund: "FundDossier",
-               sibling_daily_weights: Dict[str, Dict[str, pd.Series]]) -> List[ComplianceFinding]:
+    def verify(
+        self, fund: "FundDossier", sibling_daily_weights: Dict[str, Dict[str, pd.Series]]
+    ) -> List[ComplianceFinding]:
         findings: List[ComplianceFinding] = []
         rule = SEBI_2026_RULES.get(fund.category)
         if rule is None:
-            findings.append(ComplianceFinding("category_known", False, "warning",
-                                              f"Category {fund.category!r} not in Feb-2026 registry"))
+            findings.append(
+                ComplianceFinding(
+                    "category_known", False, "warning", f"Category {fund.category!r} not in Feb-2026 registry"
+                )
+            )
             return findings
 
         # (a) Discontinued category surveillance
         if rule.bucket == SEBIBucket.SOLUTION_ORIENTED_LEGACY:
-            findings.append(ComplianceFinding(
-                "solution_oriented_discontinued", False, "critical",
-                "Solution-Oriented category discontinued w.e.f. 26-Feb-2026: scheme must stop "
-                "subscriptions and merge (SEBI approval) — evaluate successor Life Cycle scheme instead"))
+            findings.append(
+                ComplianceFinding(
+                    "solution_oriented_discontinued",
+                    False,
+                    "critical",
+                    "Solution-Oriented category discontinued w.e.f. 26-Feb-2026: scheme must stop "
+                    "subscriptions and merge (SEBI approval) — evaluate successor Life Cycle scheme instead",
+                )
+            )
 
         if not fund.holdings_available:
             # No manual holdings-disclosure CSV on file for this fund (real-data
@@ -282,12 +318,17 @@ class TrueToLabelVerifier:
             # running them against an empty portfolio would report a fabricated
             # "0% equity / 0% cap-fidelity" FAIL that isn't true — the data is
             # simply missing. Say so honestly instead of scoring it.
-            findings.append(ComplianceFinding(
-                "cap_fidelity_min_equity_and_overlap_checks", False, "warning",
-                "NOT AVAILABLE — no portfolio holdings disclosure on file "
-                "(mf_cache/disclosures/<code>_<YYYY-MM>.csv missing). SEBI cap-fidelity, "
-                "minimum-equity and 50% overlap checks require real holdings and are "
-                "NOT EVALUATED here (not failed, not fabricated)."))
+            findings.append(
+                ComplianceFinding(
+                    "cap_fidelity_min_equity_and_overlap_checks",
+                    False,
+                    "warning",
+                    "NOT AVAILABLE — no portfolio holdings disclosure on file "
+                    "(mf_cache/disclosures/<code>_<YYYY-MM>.csv missing). SEBI cap-fidelity, "
+                    "minimum-equity and 50% overlap checks require real holdings and are "
+                    "NOT EVALUATED here (not failed, not fabricated).",
+                )
+            )
         else:
             holdings = fund.current_holdings
             eq = holdings[holdings["asset_type"] == "equity"]
@@ -297,31 +338,50 @@ class TrueToLabelVerifier:
             if rule.min_segment_weight is not None and rule.segment in ("large", "mid", "small"):
                 seg_w = float(eq.loc[eq["cap_band"] == rule.segment, "weight"].sum())
                 ok = seg_w >= rule.min_segment_weight - 1e-9
-                findings.append(ComplianceFinding(
-                    f"cap_fidelity_{rule.segment}>= {rule.min_segment_weight:.0%}", ok,
-                    "critical" if not ok else "info",
-                    f"{rule.segment}-cap exposure {seg_w:.1%} vs floor {rule.min_segment_weight:.0%}"))
+                findings.append(
+                    ComplianceFinding(
+                        f"cap_fidelity_{rule.segment}>= {rule.min_segment_weight:.0%}",
+                        ok,
+                        "critical" if not ok else "info",
+                        f"{rule.segment}-cap exposure {seg_w:.1%} vs floor {rule.min_segment_weight:.0%}",
+                    )
+                )
             if rule.segment in ("declared_sector", "declared_theme") and fund.declared_sector:
                 sec_w = float(eq.loc[eq["sector"] == fund.declared_sector, "weight"].sum())
                 ok = sec_w >= (rule.min_segment_weight or 0.80) - 1e-9
-                findings.append(ComplianceFinding(
-                    "sector_theme_fidelity>=80%", ok, "critical" if not ok else "info",
-                    f"{fund.declared_sector} exposure {sec_w:.1%}"))
+                findings.append(
+                    ComplianceFinding(
+                        "sector_theme_fidelity>=80%",
+                        ok,
+                        "critical" if not ok else "info",
+                        f"{fund.declared_sector} exposure {sec_w:.1%}",
+                    )
+                )
             if rule.segment == "single_sector_debt":
                 debt = holdings[holdings["asset_type"] == "debt"]
                 top_sec = debt.groupby("sector")["weight"].sum()
                 share = float(top_sec.max()) if len(top_sec) else 0.0
                 ok = share >= 0.80
-                findings.append(ComplianceFinding("sectoral_debt>=80%_single_sector", ok,
-                                                  "critical" if not ok else "info",
-                                                  f"max single-sector debt share {share:.1%}"))
+                findings.append(
+                    ComplianceFinding(
+                        "sectoral_debt>=80%_single_sector",
+                        ok,
+                        "critical" if not ok else "info",
+                        f"max single-sector debt share {share:.1%}",
+                    )
+                )
 
             # (c) Minimum-equity floors (incl. Feb-2026 raise for Value/Contra/Div-Yield)
             if rule.min_equity is not None:
                 ok = eq_w >= rule.min_equity - 1e-9
-                findings.append(ComplianceFinding(
-                    f"min_equity>={rule.min_equity:.0%}", ok, "critical" if not ok else "info",
-                    f"equity allocation {eq_w:.1%}"))
+                findings.append(
+                    ComplianceFinding(
+                        f"min_equity>={rule.min_equity:.0%}",
+                        ok,
+                        "critical" if not ok else "info",
+                        f"equity allocation {eq_w:.1%}",
+                    )
+                )
 
             # (c2) SEBI single-issuer 10% ceiling (MF Regulations) — a scheme may hold
             # at most 10% of NAV in the equity of one issuer. Index/ETF schemes are
@@ -331,8 +391,7 @@ class TrueToLabelVerifier:
             if rule.bucket in (SEBIBucket.EQUITY, SEBIBucket.HYBRID):
                 hf = mf_holdings.analyze(holdings, available=True)
                 for rid, passed, detail in mf_holdings.single_issuer_findings(hf):
-                    findings.append(ComplianceFinding(
-                        rid, passed, "critical" if not passed else "info", detail))
+                    findings.append(ComplianceFinding(rid, passed, "critical" if not passed else "info", detail))
 
             # (d) 50% overlap ceiling — quarterly average of daily overlaps
             if rule.overlap_cap is not None and sibling_daily_weights:
@@ -341,21 +400,36 @@ class TrueToLabelVerifier:
                     if np.isnan(q_ov):
                         continue
                     ok = q_ov <= rule.overlap_cap + 1e-9
-                    findings.append(ComplianceFinding(
-                        f"overlap_vs[{sib_name}]<=50%", ok, "critical" if not ok else "info",
-                        f"quarterly-avg daily overlap {q_ov:.1%} (scope: {rule.overlap_scope}; "
-                        f"3y glide path applies to pre-existing thematic schemes)"))
+                    findings.append(
+                        ComplianceFinding(
+                            f"overlap_vs[{sib_name}]<=50%",
+                            ok,
+                            "critical" if not ok else "info",
+                            f"quarterly-avg daily overlap {q_ov:.1%} (scope: {rule.overlap_scope}; "
+                            f"3y glide path applies to pre-existing thematic schemes)",
+                        )
+                    )
 
         # (e) Naming discipline: name==category; no return-focused words
         name_l = fund.scheme_name.lower()
         cat_in_name = fund.category.lower() in name_l
-        findings.append(ComplianceFinding("scheme_name_matches_category", cat_in_name,
-                                          "warning" if not cat_in_name else "info",
-                                          f"name={fund.scheme_name!r} category={fund.category!r}"))
+        findings.append(
+            ComplianceFinding(
+                "scheme_name_matches_category",
+                cat_in_name,
+                "warning" if not cat_in_name else "info",
+                f"name={fund.scheme_name!r} category={fund.category!r}",
+            )
+        )
         bad_words = [w for w in RETURN_FOCUSED_NAME_WORDS if w in name_l]
-        findings.append(ComplianceFinding("no_return_focused_words_in_name", not bad_words,
-                                          "warning" if bad_words else "info",
-                                          f"flagged={bad_words}"))
+        findings.append(
+            ComplianceFinding(
+                "no_return_focused_words_in_name",
+                not bad_words,
+                "warning" if bad_words else "info",
+                f"flagged={bad_words}",
+            )
+        )
         for f in findings:
             self.v._record(f"sebi2026:{fund.scheme_name}", f.rule_id, f.passed, f.detail)
         return findings
@@ -402,13 +476,19 @@ class MockMarketDataStore:
         self._px = self._build_stock_prices()
         self.funds = self._build_funds()
 
-    def _path(self, mu: float, sigma: float, start: float = 100.0,
-              driver: Optional[pd.Series] = None, beta: float = 1.0,
-              idio: float = 0.0) -> pd.Series:
+    def _path(
+        self,
+        mu: float,
+        sigma: float,
+        start: float = 100.0,
+        driver: Optional[pd.Series] = None,
+        beta: float = 1.0,
+        idio: float = 0.0,
+    ) -> pd.Series:
         n = len(self.dates)
         dt = 1.0 / TRADING_DAYS_PER_YEAR
         if driver is None:
-            rets = self.rng.normal((mu - 0.5 * sigma ** 2) * dt, sigma * math.sqrt(dt), n - 1)
+            rets = self.rng.normal((mu - 0.5 * sigma**2) * dt, sigma * math.sqrt(dt), n - 1)
             rets = np.concatenate([[0.0], rets])
         else:
             d = driver.pct_change().fillna(0.0).to_numpy()
@@ -417,9 +497,15 @@ class MockMarketDataStore:
         return pd.Series(start * np.cumprod(1 + rets), index=self.dates)
 
     def _build_sector_indices(self) -> Dict[str, pd.Series]:
-        params = {"Financials": (0.13, 0.19), "IT": (0.11, 0.21), "Energy": (0.12, 0.20),
-                  "Pharma": (0.115, 0.18), "Auto": (0.125, 0.22), "FMCG": (0.10, 0.14),
-                  "Infrastructure": (0.14, 0.23)}
+        params = {
+            "Financials": (0.13, 0.19),
+            "IT": (0.11, 0.21),
+            "Energy": (0.12, 0.20),
+            "Pharma": (0.115, 0.18),
+            "Auto": (0.125, 0.22),
+            "FMCG": (0.10, 0.14),
+            "Infrastructure": (0.14, 0.23),
+        }
         idx = {s: self._path(mu, sig) for s, (mu, sig) in params.items()}
         idx["NIFTY 50 TRI"] = self._path(0.123, 0.165)
         idx["NIFTY SMALLCAP 250 TRI"] = self._path(0.15, 0.25)
@@ -431,19 +517,30 @@ class MockMarketDataStore:
         for i in range(60):
             sector = self.SECTORS[i % len(self.SECTORS)]
             band = "large" if i < 22 else ("mid" if i < 42 else "small")
-            rows.append(dict(ticker=f"{sector[:3].upper()}{i:02d}.NS",
-                             name=f"{sector} Co {i:02d}", sector=sector, cap_band=band,
-                             # per-stock skill: some names genuinely beat their sector
-                             true_alpha=float(self.rng.normal(0.0, 0.05)),
-                             idio_vol=float(self.rng.uniform(0.10, 0.30))))
+            rows.append(
+                dict(
+                    ticker=f"{sector[:3].upper()}{i:02d}.NS",
+                    name=f"{sector} Co {i:02d}",
+                    sector=sector,
+                    cap_band=band,
+                    # per-stock skill: some names genuinely beat their sector
+                    true_alpha=float(self.rng.normal(0.0, 0.05)),
+                    idio_vol=float(self.rng.uniform(0.10, 0.30)),
+                )
+            )
         return pd.DataFrame(rows).set_index("ticker")
 
     def _build_stock_prices(self) -> pd.DataFrame:
         cols = {}
         for t, row in self.stocks.iterrows():
-            cols[t] = self._path(row["true_alpha"], 0.0, start=float(self.rng.uniform(50, 3000)),
-                                 driver=self.sector_indices[row["sector"]],
-                                 beta=float(self.rng.uniform(0.85, 1.15)), idio=row["idio_vol"])
+            cols[t] = self._path(
+                row["true_alpha"],
+                0.0,
+                start=float(self.rng.uniform(50, 3000)),
+                driver=self.sector_indices[row["sector"]],
+                beta=float(self.rng.uniform(0.85, 1.15)),
+                idio=row["idio_vol"],
+            )
         return pd.DataFrame(cols)
 
     # ---------------------- synthetic fund construction -----------------------
@@ -452,12 +549,13 @@ class MockMarketDataStore:
         df = self.stocks.loc[tickers, ["name", "sector", "cap_band"]].copy()
         df["weight"] = w
         df["asset_type"] = "equity"
-        cash = pd.DataFrame([{"name": "TREPS/Cash", "sector": "Cash", "cap_band": "cash",
-                              "weight": 0.035, "asset_type": "cash"}], index=["CASH"])
+        cash = pd.DataFrame(
+            [{"name": "TREPS/Cash", "sector": "Cash", "cap_band": "cash", "weight": 0.035, "asset_type": "cash"}],
+            index=["CASH"],
+        )
         return pd.concat([df, cash])
 
-    def _pick(self, band: Optional[str], sector: Optional[str], n: int,
-              skill: float) -> List[str]:
+    def _pick(self, band: Optional[str], sector: Optional[str], n: int, skill: float) -> List[str]:
         pool = self.stocks
         if band:
             pool = pool[pool["cap_band"] == band]
@@ -472,38 +570,115 @@ class MockMarketDataStore:
     def _build_funds(self) -> Dict[str, Dict[str, Any]]:
         funds: Dict[str, Dict[str, Any]] = {}
 
-        def make(name, isin, category, amc, manager, band=None, sector=None,
-                 n=18, skill=0.5, ter=0.012, nav_alpha=0.0, declared_sector=None):
+        def make(
+            name,
+            isin,
+            category,
+            amc,
+            manager,
+            band=None,
+            sector=None,
+            n=18,
+            skill=0.5,
+            ter=0.012,
+            nav_alpha=0.0,
+            declared_sector=None,
+        ):
             snaps = {}
             for label, yrs in (("t-5y", 5), ("t-3y", 3), ("current", 0)):
                 tickers = self._pick(band, sector, n, skill)
-                snaps[label] = {"as_of": (TODAY - pd.DateOffset(years=yrs)).normalize(),
-                                "holdings": self._disclosure(
-                                    tickers, self.rng.dirichlet(np.ones(len(tickers)) * 2.5))}
-            bench = declared_sector if declared_sector else \
-                ("NIFTY SMALLCAP 250 TRI" if band == "small" else "NIFTY 50 TRI")
-            nav = self._path(nav_alpha - ter, 0.0, start=float(self.rng.uniform(15, 400)),
-                             driver=self.sector_indices[bench],
-                             beta=1.0 if category in ("Index Fund", "ETF") else
-                             float(self.rng.uniform(0.9, 1.05)),
-                             idio=0.004 if category in ("Index Fund", "ETF")
-                             else float(self.rng.uniform(0.03, 0.07)))
-            funds[name] = dict(isin=isin, category=category, amc=amc, manager=manager,
-                               declared_sector=declared_sector, benchmark=bench,
-                               expense_ratio=ter, aum_cr=float(self.rng.uniform(1500, 40000)),
-                               nav=nav, snapshots=snaps)
-        make("Bharat Small Cap Fund", "INF001SC00010", "Small Cap", "Bharat AMC",
-             "R. Iyer", band="small", n=20, skill=0.85, ter=0.008, nav_alpha=0.035)
-        make("Bharat Banking & PSU Thematic Fund", "INF001TH00027", "Thematic", "Bharat AMC",
-             "K. Menon", sector="Financials", n=14, skill=0.25, ter=0.019,
-             nav_alpha=-0.01, declared_sector="Financials")
-        make("Bharat Financial Services Sectoral Fund", "INF001SE00034", "Sectoral",
-             "Bharat AMC", "K. Menon", sector="Financials", n=14, skill=0.30, ter=0.021,
-             nav_alpha=-0.005, declared_sector="Financials")
-        make("Alpha Nifty 50 Index Fund", "INF002IX00019", "Index Fund", "Alpha AMC",
-             "Passive Desk", band="large", n=22, skill=0.0, ter=0.0015, nav_alpha=0.0)
-        make("Deccan Retirement Fund", "INF003RT00042", "Retirement/Children (legacy)",
-             "Deccan AMC", "S. Rao", band="large", n=16, skill=0.4, ter=0.017, nav_alpha=0.005)
+                snaps[label] = {
+                    "as_of": (TODAY - pd.DateOffset(years=yrs)).normalize(),
+                    "holdings": self._disclosure(tickers, self.rng.dirichlet(np.ones(len(tickers)) * 2.5)),
+                }
+            bench = (
+                declared_sector
+                if declared_sector
+                else ("NIFTY SMALLCAP 250 TRI" if band == "small" else "NIFTY 50 TRI")
+            )
+            nav = self._path(
+                nav_alpha - ter,
+                0.0,
+                start=float(self.rng.uniform(15, 400)),
+                driver=self.sector_indices[bench],
+                beta=1.0 if category in ("Index Fund", "ETF") else float(self.rng.uniform(0.9, 1.05)),
+                idio=0.004 if category in ("Index Fund", "ETF") else float(self.rng.uniform(0.03, 0.07)),
+            )
+            funds[name] = dict(
+                isin=isin,
+                category=category,
+                amc=amc,
+                manager=manager,
+                declared_sector=declared_sector,
+                benchmark=bench,
+                expense_ratio=ter,
+                aum_cr=float(self.rng.uniform(1500, 40000)),
+                nav=nav,
+                snapshots=snaps,
+            )
+
+        make(
+            "Bharat Small Cap Fund",
+            "INF001SC00010",
+            "Small Cap",
+            "Bharat AMC",
+            "R. Iyer",
+            band="small",
+            n=20,
+            skill=0.85,
+            ter=0.008,
+            nav_alpha=0.035,
+        )
+        make(
+            "Bharat Banking & PSU Thematic Fund",
+            "INF001TH00027",
+            "Thematic",
+            "Bharat AMC",
+            "K. Menon",
+            sector="Financials",
+            n=14,
+            skill=0.25,
+            ter=0.019,
+            nav_alpha=-0.01,
+            declared_sector="Financials",
+        )
+        make(
+            "Bharat Financial Services Sectoral Fund",
+            "INF001SE00034",
+            "Sectoral",
+            "Bharat AMC",
+            "K. Menon",
+            sector="Financials",
+            n=14,
+            skill=0.30,
+            ter=0.021,
+            nav_alpha=-0.005,
+            declared_sector="Financials",
+        )
+        make(
+            "Alpha Nifty 50 Index Fund",
+            "INF002IX00019",
+            "Index Fund",
+            "Alpha AMC",
+            "Passive Desk",
+            band="large",
+            n=22,
+            skill=0.0,
+            ter=0.0015,
+            nav_alpha=0.0,
+        )
+        make(
+            "Deccan Retirement Fund",
+            "INF003RT00042",
+            "Retirement/Children (legacy)",
+            "Deccan AMC",
+            "S. Rao",
+            band="large",
+            n=16,
+            skill=0.4,
+            ter=0.017,
+            nav_alpha=0.005,
+        )
         return funds
 
     # daily equity weight paths over last quarter (for the quarterly-overlap rule):
@@ -556,8 +731,7 @@ class MockMarketDataStore:
                 continue
             if rec["category"] in ("Large Cap", "Index Fund", "ETF"):
                 continue  # SEBI: large-cap schemes exempt from the overlap cap
-            if SEBI_2026_RULES.get(rec["category"],
-                                   CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
+            if SEBI_2026_RULES.get(rec["category"], CategoryRule(SEBIBucket.DEBT)).bucket != SEBIBucket.EQUITY:
                 continue
             out[name] = self.daily_weights_last_quarter(name)
         return out
@@ -571,43 +745,103 @@ class MockMarketDataStore:
 # interface (see MockMarketDataStore), so these carry no facade class; only their
 # AdapterSpec is registered at import to populate the USER ACTION CHECKLIST.
 # Live: AMFI NAVAll.txt + SEBI category master. Mock: MockMarketDataStore.
-register_adapter(AdapterSpec(
-    "Scheme_Registry", True, "https://mfdata.in/api/v1/search + api.mfapi.in",
-    "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient", "Agent A"))
+register_adapter(
+    AdapterSpec(
+        "Scheme_Registry",
+        True,
+        "https://mfdata.in/api/v1/search + api.mfapi.in",
+        "NO KEY REQUIRED — implemented in live_adapters.MFDataClient/MFApiClient",
+        "Agent A",
+    )
+)
 # Live: Morningstar/ACE MF/CAMS monthly portfolios. Mock: synthetic snapshots.
-register_adapter(AdapterSpec(
-    "Portfolio_Disclosures", True,
-    "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
-    "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
-    "Agents A & B"))
+register_adapter(
+    AdapterSpec(
+        "Portfolio_Disclosures",
+        True,
+        "https://mfdata.in/api/v1/families/{id}/holdings?month=YYYY-MM",
+        "NO KEY REQUIRED — free monthly holdings snapshots; replaces paid Morningstar/ACE",
+        "Agents A & B",
+    )
+)
 # Live: yfinance NSE tickers (.NS). Mock: sector-driven synthetic prices.
-register_adapter(AdapterSpec(
-    "Stock_Price_History", True, "yfinance (NSE .NS tickers + yf.Search name resolution)",
-    "NO KEY REQUIRED — pip install yfinance", "Agent B"))
+register_adapter(
+    AdapterSpec(
+        "Stock_Price_History",
+        True,
+        "yfinance (NSE .NS tickers + yf.Search name resolution)",
+        "NO KEY REQUIRED — pip install yfinance",
+        "Agent B",
+    )
+)
 
 
 class NewsSearchAdapter:
     """Live: LLM web-search tool / NewsAPI / GDELT. Mock: curated event feed."""
-    spec = register_adapter(AdapterSpec(
-        "News_Sentiment_Search", False,
-        "https://api.anthropic.com/v1/messages with web_search_20250305 tool",
-        "ANTHROPIC_API_KEY  <-- THE ONLY KEY THE SYSTEM NEEDS", "Agent D"))
+
+    spec = register_adapter(
+        AdapterSpec(
+            "News_Sentiment_Search",
+            False,
+            "https://api.anthropic.com/v1/messages with web_search_20250305 tool",
+            "ANTHROPIC_API_KEY  <-- THE ONLY KEY THE SYSTEM NEEDS",
+            "Agent D",
+        )
+    )
 
     _MOCK_FEED = [
-        dict(entity="Bharat AMC", days_ago=6, headline="Bharat AMC reports record SIP inflows; small-cap book crosses ₹40,000 cr", tone=+1),
-        dict(entity="R. Iyer", days_ago=21, headline="Fund manager R. Iyer completes 9 years at helm; long-tenure stability cited", tone=+1),
-        dict(entity="K. Menon", days_ago=11, headline="SEBI seeks clarification from Bharat AMC on overlapping thematic offerings", tone=-1),
-        dict(entity="Financials", days_ago=4, headline="RBI tightens NBFC provisioning norms; financial sector funds under pressure", tone=-1),
-        dict(entity="Financials", days_ago=15, headline="Credit growth moderates to 11% YoY; bank margins guidance trimmed", tone=-1),
-        dict(entity="Deccan AMC", days_ago=30, headline="Deccan AMC to merge retirement scheme after SEBI discontinues solution-oriented category", tone=0),
-        dict(entity="Alpha AMC", days_ago=9, headline="Alpha AMC cuts index fund TER to 15 bps in passive price war", tone=+1),
+        dict(
+            entity="Bharat AMC",
+            days_ago=6,
+            headline="Bharat AMC reports record SIP inflows; small-cap book crosses ₹40,000 cr",
+            tone=+1,
+        ),
+        dict(
+            entity="R. Iyer",
+            days_ago=21,
+            headline="Fund manager R. Iyer completes 9 years at helm; long-tenure stability cited",
+            tone=+1,
+        ),
+        dict(
+            entity="K. Menon",
+            days_ago=11,
+            headline="SEBI seeks clarification from Bharat AMC on overlapping thematic offerings",
+            tone=-1,
+        ),
+        dict(
+            entity="Financials",
+            days_ago=4,
+            headline="RBI tightens NBFC provisioning norms; financial sector funds under pressure",
+            tone=-1,
+        ),
+        dict(
+            entity="Financials",
+            days_ago=15,
+            headline="Credit growth moderates to 11% YoY; bank margins guidance trimmed",
+            tone=-1,
+        ),
+        dict(
+            entity="Deccan AMC",
+            days_ago=30,
+            headline="Deccan AMC to merge retirement scheme after SEBI discontinues solution-oriented category",
+            tone=0,
+        ),
+        dict(
+            entity="Alpha AMC",
+            days_ago=9,
+            headline="Alpha AMC cuts index fund TER to 15 bps in passive price war",
+            tone=+1,
+        ),
         dict(entity="IT", days_ago=7, headline="IT services order books rebound on GenAI integration deals", tone=+1),
     ]
 
     def fetch(self, entities: Sequence[str]) -> List[Dict[str, Any]]:
         ents = {e.lower() for e in entities}
-        return [dict(item, date=str((TODAY - pd.Timedelta(days=item["days_ago"])).date()))
-                for item in self._MOCK_FEED if item["entity"].lower() in ents]
+        return [
+            dict(item, date=str((TODAY - pd.Timedelta(days=item["days_ago"])).date()))
+            for item in self._MOCK_FEED
+            if item["entity"].lower() in ents
+        ]
 
 
 # ==============================================================================
@@ -616,6 +850,7 @@ class NewsSearchAdapter:
 @dataclass
 class FundDossier:
     """Agent A's normalized output — the single source of truth downstream."""
+
     scheme_name: str
     isin: str
     category: str
@@ -654,7 +889,7 @@ class DataIngestionCategorizerAgent:
     """
 
     def __init__(self, store, validator: ValidationOrchestrator) -> None:
-        self.store = store          # unified store API (mock shim OR LiveDataStore)
+        self.store = store  # unified store API (mock shim OR LiveDataStore)
         self.v = validator
         self.log = logging.getLogger("MFOrchestrator.AgentA")
 
@@ -705,18 +940,26 @@ class DataIngestionCategorizerAgent:
         if bucket == SEBIBucket.DEBT:
             missing.append("portfolio_ytm_and_duration_feed")
         dossier = FundDossier(
-            scheme_name=name, isin=rec["isin"], category=category, bucket=bucket,
-            amc=rec["amc"], manager=rec["manager"], benchmark=rec["benchmark"],
-            declared_sector=rec.get("declared_sector"), expense_ratio=rec["expense_ratio"],
-            aum_cr=rec["aum_cr"], nav=rec["nav"], snapshots=snaps,
+            scheme_name=name,
+            isin=rec["isin"],
+            category=category,
+            bucket=bucket,
+            amc=rec["amc"],
+            manager=rec["manager"],
+            benchmark=rec["benchmark"],
+            declared_sector=rec.get("declared_sector"),
+            expense_ratio=rec["expense_ratio"],
+            aum_cr=rec["aum_cr"],
+            nav=rec["nav"],
+            snapshots=snaps,
             current_holdings=current,
             daily_equity_weights=self.store.daily_weights_last_quarter(name),
-            missing_params=missing, holdings_available=holdings_available,
-            amfi_code=rec.get("amfi_code", ""))
-        self.v._record("agentA", "dossier_built", True,
-                       f"{name} -> {category} ({bucket.value}); missing={missing}")
-        self.log.info("Resolved %r -> %s | category=%s | missing params=%s",
-                      query, name, category, missing or "none")
+            missing_params=missing,
+            holdings_available=holdings_available,
+            amfi_code=rec.get("amfi_code", ""),
+        )
+        self.v._record("agentA", "dossier_built", True, f"{name} -> {category} ({bucket.value}); missing={missing}")
+        self.log.info("Resolved %r -> %s | category=%s | missing params=%s", query, name, category, missing or "none")
         return dossier
 
 
@@ -760,12 +1003,18 @@ class HistoricalBacktesterAgent:
             sec = self.store.sector_index(h["sector"], start, basket)
             if sec is None or sec.dropna().empty:
                 continue
-            rows.append(dict(
-                ticker=t, name=h["name"], sector=h["sector"], weight=h["weight"],
-                stock_cagr=self.quant.cagr(s),
-                stock_max_dd=self.quant.max_drawdown(s),
-                sector_cagr=self.quant.cagr(sec),
-                excess_cagr=self.quant.cagr(s) - self.quant.cagr(sec)))
+            rows.append(
+                dict(
+                    ticker=t,
+                    name=h["name"],
+                    sector=h["sector"],
+                    weight=h["weight"],
+                    stock_cagr=self.quant.cagr(s),
+                    stock_max_dd=self.quant.max_drawdown(s),
+                    sector_cagr=self.quant.cagr(sec),
+                    excess_cagr=self.quant.cagr(s) - self.quant.cagr(sec),
+                )
+            )
         audit = pd.DataFrame(rows)
         if not audit.empty:
             audit["beat_sector"] = audit["excess_cagr"] > 0
@@ -776,14 +1025,17 @@ class HistoricalBacktesterAgent:
             # No manual holdings-disclosure CSV on file: there is no real top-10
             # portfolio to audit at t-5y/t-3y. Report the score as unavailable
             # rather than computing it off an empty/zero portfolio.
-            self.v._record("agentB", "backtest_complete", False,
-                           f"{dossier.scheme_name}: holdings unavailable, MACS not computed")
+            self.v._record(
+                "agentB", "backtest_complete", False, f"{dossier.scheme_name}: holdings unavailable, MACS not computed"
+            )
             return dict(
-                windows={}, manager_alpha_consistency_score=None,
+                windows={},
+                manager_alpha_consistency_score=None,
                 interpretation="NOT AVAILABLE — no historical portfolio holdings disclosure "
-                               "on file (mf_cache/disclosures/<code>_<YYYY-MM>.csv missing); "
-                               "this score requires real top-10 holdings and is never "
-                               "computed from synthetic data.")
+                "on file (mf_cache/disclosures/<code>_<YYYY-MM>.csv missing); "
+                "this score requires real top-10 holdings and is never "
+                "computed from synthetic data.",
+            )
         results: Dict[str, Any] = {"windows": {}}
         window_excess: Dict[str, float] = {}
         for label in ("t-5y", "t-3y"):
@@ -799,35 +1051,44 @@ class HistoricalBacktesterAgent:
                 hit_rate=float(audit["beat_sector"].mean()),
                 weighted_excess_cagr=weighted_excess,
                 avg_stock_max_dd=float(np.dot(w, audit["stock_max_dd"]) / w.sum()),
-                audit_table=audit.round(4))
+                audit_table=audit.round(4),
+            )
         if not results["windows"]:
             # Holdings were on file but neither window could be audited (e.g. no
             # stock-price history for these tickers) — report unavailable rather
             # than let an empty-slice mean silently become NaN.
-            self.v._record("agentB", "backtest_complete", False,
-                           f"{dossier.scheme_name}: no window could be audited "
-                           f"(stock price history unavailable), MACS not computed")
+            self.v._record(
+                "agentB",
+                "backtest_complete",
+                False,
+                f"{dossier.scheme_name}: no window could be audited "
+                f"(stock price history unavailable), MACS not computed",
+            )
             results["manager_alpha_consistency_score"] = None
             results["interpretation"] = (
                 "NOT AVAILABLE — holdings were on file but no window could be audited "
                 "(stock price history unavailable for these tickers); this score is "
-                "never fabricated.")
+                "never fabricated."
+            )
             return results
         hit = float(np.mean([results["windows"][k]["hit_rate"] for k in results["windows"]]))
         mean_excess = float(np.mean(list(window_excess.values()))) if window_excess else 0.0
         excess_component = float(np.clip((mean_excess + 0.06) / 0.12, 0, 1))
-        persistence = 1.0 if window_excess and all(v > 0 for v in window_excess.values()) else \
-                      (0.5 if any(v > 0 for v in window_excess.values()) else 0.0)
+        persistence = (
+            1.0
+            if window_excess and all(v > 0 for v in window_excess.values())
+            else (0.5 if any(v > 0 for v in window_excess.values()) else 0.0)
+        )
         score = round(100 * (0.45 * hit + 0.35 * excess_component + 0.20 * persistence), 1)
         results["manager_alpha_consistency_score"] = score
         results["interpretation"] = (
             "Manager's revealed stock picks genuinely beat passive sector-tracking clones"
-            if score >= 60 else
-            "Stock selection roughly matches a passive sector clone — alpha not evidenced"
-            if score >= 40 else
-            "Historical picks UNDERPERFORMED their own sectors — negative selection skill")
-        self.v._record("agentB", "backtest_complete", True,
-                       f"{dossier.scheme_name} MACS={score}")
+            if score >= 60
+            else "Stock selection roughly matches a passive sector clone — alpha not evidenced"
+            if score >= 40
+            else "Historical picks UNDERPERFORMED their own sectors — negative selection skill"
+        )
+        self.v._record("agentB", "backtest_complete", True, f"{dossier.scheme_name} MACS={score}")
         return results
 
 
@@ -848,28 +1109,36 @@ class ProfileRiskScorerAgent:
         # Base surface is calibrated to the HIGH risk appetite (conservative/
         # moderate subtract growth below); drift_thematic stays at 0.10 in every
         # branch because the profile mandates flagging category drift regardless.
-        w = dict(growth=0.40, downside=0.15, consistency=0.20, cost=0.10,
-                 liquidity=0.05, drift_thematic=0.10)
+        w = dict(growth=0.40, downside=0.15, consistency=0.20, cost=0.10, liquidity=0.05, drift_thematic=0.10)
         if p.risk_appetite == RiskAppetite.CONSERVATIVE:
-            w["growth"] -= 0.15; w["downside"] += 0.15
+            w["growth"] -= 0.15
+            w["downside"] += 0.15
         elif p.risk_appetite == RiskAppetite.MODERATE:
-            w["growth"] -= 0.07; w["downside"] += 0.07
+            w["growth"] -= 0.07
+            w["downside"] += 0.07
         if p.horizon_years < 4:
-            w["downside"] += 0.08; w["liquidity"] += 0.04; w["growth"] -= 0.12
+            w["downside"] += 0.08
+            w["liquidity"] += 0.04
+            w["growth"] -= 0.12
         elif p.horizon_years >= 7:
             # was >= 8, which excluded the baseline profile's own 7.5y default
             # despite its declared 7-8y target band — long-horizon growth tilt
             # must cover the band it was written for
-            w["growth"] += 0.05; w["downside"] -= 0.05
+            w["growth"] += 0.05
+            w["downside"] -= 0.05
         if p.liquidity_need == LiquidityNeed.HIGH:
             # exit-sensitive: liquidity AND concentrated-thematic exposure both matter more
-            w["liquidity"] += 0.12; w["drift_thematic"] += 0.04; w["growth"] -= 0.16
+            w["liquidity"] += 0.12
+            w["drift_thematic"] += 0.04
+            w["growth"] -= 0.16
         elif p.liquidity_need == LiquidityNeed.PARTIAL:
-            w["liquidity"] += 0.05; w["growth"] -= 0.05
+            w["liquidity"] += 0.05
+            w["growth"] -= 0.05
         elif p.liquidity_need == LiquidityNeed.NONE:
             # locked-in capital: exit friction is not a selection criterion until
             # horizon end — keep a token residual for the terminal liquidation
-            w["liquidity"] -= 0.04; w["growth"] += 0.04
+            w["liquidity"] -= 0.04
+            w["growth"] += 0.04
         # D5 (2026-08-06): floor at 0 BEFORE normalising. The modifiers above stack
         # subtractively, and three can hit the same factor — conservative (-0.15) +
         # horizon<4 (-0.12) + liquidity=high (-0.16) off a 0.40 base leaves growth at
@@ -886,8 +1155,7 @@ class ProfileRiskScorerAgent:
         total = sum(w.values())
         return {k: v / total for k, v in w.items()}
 
-    def run(self, dossier: FundDossier, profile: InvestorProfile,
-            benchmark: pd.Series) -> Dict[str, Any]:
+    def run(self, dossier: FundDossier, profile: InvestorProfile, benchmark: pd.Series) -> Dict[str, Any]:
         nav = dossier.nav
         rets = self.quant.daily_returns(nav)
         brets = self.quant.daily_returns(benchmark)
@@ -904,8 +1172,7 @@ class ProfileRiskScorerAgent:
         consistency = float(np.clip(1.0 - (rr3.lt(0).mean() if len(rr3) else 0.5), 0, 1))
         # TER has no free real-data source (AMFI/mfapi don't publish it): held
         # neutral rather than let a NaN silently poison the whole utility score.
-        cost = (float(np.clip(1.0 - dossier.expense_ratio / 0.0225, 0, 1))
-                if np.isfinite(dossier.expense_ratio) else 0.5)
+        cost = float(np.clip(1.0 - dossier.expense_ratio / 0.0225, 0, 1)) if np.isfinite(dossier.expense_ratio) else 0.5
         # exit friction proxy: small/sectoral exposure raises days-to-liquidate
         small_w = float(eq.loc[eq["cap_band"] == "small", "weight"].sum()) if len(eq) else 0.0
         liquidity = float(np.clip(1.0 - 0.9 * small_w - 0.3 * max(top_sector_w - 0.4, 0), 0, 1))
@@ -913,8 +1180,10 @@ class ProfileRiskScorerAgent:
         flags: List[str] = []
         if dossier.category in ("Sectoral", "Thematic") and top_sector_w > 0.75:
             drift_pen += 0.6
-            flags.append(f"UNHEDGED THEMATIC CONCENTRATION: {top_sector_w:.0%} in "
-                         f"{dossier.declared_sector} with no derivative hedge disclosed")
+            flags.append(
+                f"UNHEDGED THEMATIC CONCENTRATION: {top_sector_w:.0%} in "
+                f"{dossier.declared_sector} with no derivative hedge disclosed"
+            )
         beta, _ = self.quant.beta_alpha(rets, brets)
         if dossier.bucket == SEBIBucket.EQUITY and np.isfinite(beta) and abs(beta - 1) > 0.35:
             drift_pen += 0.4
@@ -927,12 +1196,17 @@ class ProfileRiskScorerAgent:
         vol_1y = float(rets.tail(252).std() * np.sqrt(252)) if len(rets) >= 30 else float("nan")
         nav3 = nav.tail(756)
         max_dd_3y = float((nav3 / nav3.cummax() - 1.0).min()) if len(nav3) else float("nan")
-        common = (nav.index.intersection(benchmark.index)
-                  if benchmark is not None and len(benchmark) else nav.index[:0])
-        excess_cagr_3y = (float(cagr_full - self.quant.cagr(benchmark.loc[common]))
-                          if len(common) > 252 else float("nan"))
-        facts = dict(cagr=float(cagr_full), vol_1y=vol_1y, max_dd_3y=max_dd_3y,
-                     sortino_3y=float(sortino), excess_cagr_3y=excess_cagr_3y)
+        common = nav.index.intersection(benchmark.index) if benchmark is not None and len(benchmark) else nav.index[:0]
+        excess_cagr_3y = (
+            float(cagr_full - self.quant.cagr(benchmark.loc[common])) if len(common) > 252 else float("nan")
+        )
+        facts = dict(
+            cagr=float(cagr_full),
+            vol_1y=vol_1y,
+            max_dd_3y=max_dd_3y,
+            sortino_3y=float(sortino),
+            excess_cagr_3y=excess_cagr_3y,
+        )
         # Holdings-structure facts (a disclosure snapshot, NOT NAV): surfaced as
         # ground-truth levels. Coverage-gated to NaN when no disclosure is on file so
         # the concentration metric greys out downstream — missing holdings can never
@@ -944,23 +1218,39 @@ class ProfileRiskScorerAgent:
             top10_weight=hf.top10_weight if hf.top10_weight is not None else _na,
             effective_n=hf.effective_n if hf.effective_n is not None else _na,
             top_sector_weight=hf.top_sector_weight if hf.top_sector_weight is not None else _na,
-            n_holdings=float(hf.n_equity) if hf.available and hf.n_equity else _na)
+            n_holdings=float(hf.n_equity) if hf.available and hf.n_equity else _na,
+        )
 
         weights = self.utility_weights(profile)
-        subs = dict(growth=growth, downside=downside, consistency=consistency,
-                    cost=cost, liquidity=liquidity, drift_thematic=drift_thematic)
+        subs = dict(
+            growth=growth,
+            downside=downside,
+            consistency=consistency,
+            cost=cost,
+            liquidity=liquidity,
+            drift_thematic=drift_thematic,
+        )
         utility = round(100 * sum(weights[k] * subs[k] for k in weights), 1)
-        self.v._record("agentC", "utility_scored", True,
-                       f"{dossier.scheme_name} U={utility} weights={ {k: round(v,2) for k,v in weights.items()} }")
-        return dict(utility_score=utility, sub_scores={k: round(v, 3) for k, v in subs.items()},
-                    # 6dp, NOT 3dp: the app recomputes utility from these weights and
-                    # compares it against a HARD cutoff (SCREEN_SCORE_RED). At 3dp the
-                    # worst-case recomputation error is ~0.3 on a 0-100 scale, enough to
-                    # land a fund near the cutoff on the opposite verdict branch from the
-                    # one Python would pick. At 6dp the weights' contribution is ~3e-4 and
-                    # the residual is dominated by sub_scores' own 3dp rounding (~0.05).
-                    weight_matrix={k: round(v, 6) for k, v in weights.items()}, facts=facts,
-                    risk_flags=flags, beta=None if not np.isfinite(beta) else round(beta, 2))
+        self.v._record(
+            "agentC",
+            "utility_scored",
+            True,
+            f"{dossier.scheme_name} U={utility} weights={ {k: round(v, 2) for k, v in weights.items()} }",
+        )
+        return dict(
+            utility_score=utility,
+            sub_scores={k: round(v, 3) for k, v in subs.items()},
+            # 6dp, NOT 3dp: the app recomputes utility from these weights and
+            # compares it against a HARD cutoff (SCREEN_SCORE_RED). At 3dp the
+            # worst-case recomputation error is ~0.3 on a 0-100 scale, enough to
+            # land a fund near the cutoff on the opposite verdict branch from the
+            # one Python would pick. At 6dp the weights' contribution is ~3e-4 and
+            # the residual is dominated by sub_scores' own 3dp rounding (~0.05).
+            weight_matrix={k: round(v, 6) for k, v in weights.items()},
+            facts=facts,
+            risk_flags=flags,
+            beta=None if not np.isfinite(beta) else round(beta, 2),
+        )
 
 
 class NewsSentimentResearcherAgent:
@@ -972,8 +1262,16 @@ class NewsSentimentResearcherAgent:
     of net tone.
     """
 
-    REGULATORY_TERMS = ("sebi seeks", "show cause", "penalty", "ban", "probe",
-                        "investigation", "front-running", "discontinue")
+    REGULATORY_TERMS = (
+        "sebi seeks",
+        "show cause",
+        "penalty",
+        "ban",
+        "probe",
+        "investigation",
+        "front-running",
+        "discontinue",
+    )
 
     def __init__(self, store, validator: ValidationOrchestrator) -> None:
         self.store = store
@@ -986,22 +1284,27 @@ class NewsSentimentResearcherAgent:
         entities = [dossier.amc, dossier.manager, *conc_sectors]
         items = self.store.news(entities)
         if not items:
-            return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[],
-                        entities_queried=entities)
+            return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[], entities_queried=entities)
         weights, tones, red_flags = [], [], []
         for it in items:
             decay = 0.5 ** (it["days_ago"] / 14.0)
-            weights.append(decay); tones.append(it["tone"])
+            weights.append(decay)
+            tones.append(it["tone"])
             # word-boundary match: naive substring made "ban" fire on "bank margins",
             # a false regulatory flag that now (post-reframe) would force a SELL.
             hl = it["headline"].lower()
             if any(re.search(rf"\b{re.escape(term)}\b", hl) for term in self.REGULATORY_TERMS):
                 red_flags.append(it["headline"])
         net = float(np.dot(weights, tones) / np.sum(weights))
-        self.v._record("agentD", "sentiment_researched", True,
-                       f"{dossier.scheme_name} net={net:+.2f} items={len(items)} flags={len(red_flags)}")
-        return dict(net_sentiment=round(net, 2), n_items=len(items),
-                    red_flags=red_flags, items=items, entities_queried=entities)
+        self.v._record(
+            "agentD",
+            "sentiment_researched",
+            True,
+            f"{dossier.scheme_name} net={net:+.2f} items={len(items)} flags={len(red_flags)}",
+        )
+        return dict(
+            net_sentiment=round(net, 2), n_items=len(items), red_flags=red_flags, items=items, entities_queried=entities
+        )
 
 
 # ==============================================================================
@@ -1024,9 +1327,15 @@ class RecommendationEngine:
     def __init__(self, validator: ValidationOrchestrator) -> None:
         self.v = validator
 
-    def run(self, dossier: FundDossier, compliance: List[ComplianceFinding],
-            backtest: Dict[str, Any], profile_score: Dict[str, Any],
-            sentiment: Dict[str, Any], profile: InvestorProfile) -> Dict[str, Any]:
+    def run(
+        self,
+        dossier: FundDossier,
+        compliance: List[ComplianceFinding],
+        backtest: Dict[str, Any],
+        profile_score: Dict[str, Any],
+        sentiment: Dict[str, Any],
+        profile: InvestorProfile,
+    ) -> Dict[str, Any]:
         # HONEST FRAMING (2026-07 reframe): on NAV-only data this is a QUANT +
         # COMPLIANCE SCREEN, not a skill-verified buy engine. We deliberately do
         # NOT fuse a composite or emit BUY/SELL/HOLD. A weighted blend of a
@@ -1050,29 +1359,35 @@ class RecommendationEngine:
         if not is_passive and macs is None:
             coverage_flags.append(
                 "HOLDINGS NOT AVAILABLE — manager-skill audit and SEBI cap-fidelity / "
-                "overlap checks NOT EVALUATED (absence of evidence, not a pass)")
+                "overlap checks NOT EVALUATED (absence of evidence, not a pass)"
+            )
         if not np.isfinite(dossier.expense_ratio):
-            coverage_flags.append(
-                "EXPENSE_RATIO_UNAVAILABLE — no free real-data source; cost sub-score held neutral")
+            coverage_flags.append("EXPENSE_RATIO_UNAVAILABLE — no free real-data source; cost sub-score held neutral")
         if not np.isfinite(facts.get("excess_cagr_3y", float("nan"))):
-            coverage_flags.append(
-                "BENCHMARK_EXCESS_UNAVAILABLE — no aligned benchmark series for excess-return")
+            coverage_flags.append("BENCHMARK_EXCESS_UNAVAILABLE — no aligned benchmark series for excess-return")
 
         observations, flags = [], []
         if macs is not None and macs >= 60:
-            observations.append(f"Manager Alpha Consistency Score {macs}/100 — historical top-10 "
-                                f"picks beat passive sector clones in both audit windows")
+            observations.append(
+                f"Manager Alpha Consistency Score {macs}/100 — historical top-10 "
+                f"picks beat passive sector clones in both audit windows"
+            )
         elif macs is not None and macs < 40:
-            flags.append(f"Manager Alpha Consistency Score {macs}/100 — revealed picks "
-                         f"underperformed their own sectors; passive alternative superior")
+            flags.append(
+                f"Manager Alpha Consistency Score {macs}/100 — revealed picks "
+                f"underperformed their own sectors; passive alternative superior"
+            )
         if np.isfinite(dossier.expense_ratio) and profile_score["sub_scores"]["cost"] >= 0.7:
-            observations.append(f"Low cost structure (TER {dossier.expense_ratio:.2%}) compounds "
-                                f"over the {profile.horizon_years:.0f}y horizon")
+            observations.append(
+                f"Low cost structure (TER {dossier.expense_ratio:.2%}) compounds "
+                f"over the {profile.horizon_years:.0f}y horizon"
+            )
         elif np.isfinite(dossier.expense_ratio):
             flags.append(f"Elevated TER {dossier.expense_ratio:.2%} drags long-horizon compounding")
         if profile_score["sub_scores"]["growth"] >= 0.6:
-            observations.append("Realised growth comfortably inflation-beating for the profile's "
-                                "wealth-maximisation objective")
+            observations.append(
+                "Realised growth comfortably inflation-beating for the profile's wealth-maximisation objective"
+            )
         for fl in profile_score["risk_flags"]:
             flags.append(fl)
         for f in critical:
@@ -1080,11 +1395,14 @@ class RecommendationEngine:
         for f in warnings:
             flags.append(f"SEBI Feb-2026 warning [{f.rule_id}]: {f.detail}")
         if sentiment["net_sentiment"] > 0.3:
-            observations.append(f"Positive news tone ({sentiment['net_sentiment']:+.2f}) across "
-                                f"{sentiment['n_items']} recent items")
+            observations.append(
+                f"Positive news tone ({sentiment['net_sentiment']:+.2f}) across {sentiment['n_items']} recent items"
+            )
         elif sentiment["net_sentiment"] < -0.3:
-            flags.append(f"Negative news tone ({sentiment['net_sentiment']:+.2f}); "
-                         f"headlines: {[i['headline'][:60] for i in sentiment['items'][:2]]}")
+            flags.append(
+                f"Negative news tone ({sentiment['net_sentiment']:+.2f}); "
+                f"headlines: {[i['headline'][:60] for i in sentiment['items'][:2]]}"
+            )
         for rf in sentiment["red_flags"]:
             flags.append(f"REGULATORY RED FLAG: {rf}")
         if not observations:
@@ -1108,26 +1426,31 @@ class RecommendationEngine:
             "cagr": _band(facts["cagr"], 0.10, 0.06),
             "excess_cagr_3y": _band(facts["excess_cagr_3y"], 0.01, -0.01),
             "sortino_3y": _band(facts["sortino_3y"], 0.75, 0.0),
-            "max_dd_3y": _band(facts["max_dd_3y"], -0.20, -0.35),   # negative; shallower is better
+            "max_dd_3y": _band(facts["max_dd_3y"], -0.20, -0.35),  # negative; shallower is better
             "consistency": _band(profile_score["sub_scores"]["consistency"], 0.60, 0.40),
-            "expense": ("grey" if not np.isfinite(dossier.expense_ratio)
-                        else _band(dossier.expense_ratio, 0.010, 0.020, higher_better=False)),
+            "expense": (
+                "grey"
+                if not np.isfinite(dossier.expense_ratio)
+                else _band(dossier.expense_ratio, 0.010, 0.020, higher_better=False)
+            ),
             # Portfolio concentration (top-10 equity weight, LOWER better). A holdings
             # fact NAV cannot see; greys out when no disclosure is on file. Surfaced as
             # a visible screen metric — NOT folded into the greens/reds verdict count
             # (a high-conviction book is a legitimate style, not a defect); a genuine
             # SEBI single-issuer breach instead drives the verdict through `compliance`.
-            "concentration": _band(facts.get("top10_weight", float("nan")),
-                                   mf_holdings.TOP10_DIVERSIFIED,
-                                   mf_holdings.TOP10_CONCENTRATED, higher_better=False),
+            "concentration": _band(
+                facts.get("top10_weight", float("nan")),
+                mf_holdings.TOP10_DIVERSIFIED,
+                mf_holdings.TOP10_CONCENTRATED,
+                higher_better=False,
+            ),
         }
-        metric_colors["compliance"] = ("red" if critical else
-                                       "amber" if (warnings or (not is_passive and macs is None))
-                                       else "green")
+        metric_colors["compliance"] = (
+            "red" if critical else "amber" if (warnings or (not is_passive and macs is None)) else "green"
+        )
         # supporting weighted screen score (profile-weighted sub-scores) → a banded
         # datapoint, honestly labelled a screening aid (measured below chance alone).
-        score_band = ("green" if utility >= SCREEN_SCORE_GREEN
-                      else ("red" if utility < SCREEN_SCORE_RED else "blue"))
+        score_band = "green" if utility >= SCREEN_SCORE_GREEN else ("red" if utility < SCREEN_SCORE_RED else "blue")
         metric_colors["screen_score"] = score_band
 
         core = ["cagr", "excess_cagr_3y", "sortino_3y", "max_dd_3y", "consistency"]
@@ -1158,59 +1481,76 @@ class RecommendationEngine:
                 v, c = "HOLD / WATCH", "blue"
             # BUY on the quant screen alone (holdings never on free data) carries its
             # caveat visibly — the user chose "BUY allowed, caveat shown".
-            cav = ("screen-favourable on NAV facts only — manager skill & "
-                   "holdings NOT verified; not a prediction of outperformance"
-                   if v == "BUY" and not is_passive and macs is None else "")
+            cav = (
+                "screen-favourable on NAV facts only — manager skill & "
+                "holdings NOT verified; not a prediction of outperformance"
+                if v == "BUY" and not is_passive and macs is None
+                else ""
+            )
             return v, c, cav
 
         verdict, verdict_color, verdict_caveat = _verdict(score_band == "red")
         _keys = ("verdict", "verdict_color", "verdict_caveat")
-        verdict_branches = {"score_red": dict(zip(_keys, _verdict(True))),
-                            "score_not_red": dict(zip(_keys, _verdict(False)))}
+        verdict_branches = {
+            "score_red": dict(zip(_keys, _verdict(True))),
+            "score_not_red": dict(zip(_keys, _verdict(False))),
+        }
 
         # Confidence must reflect the DATA ACTUALLY ON DISK, not an adapter's
         # self-declared intent. A mocked run must never report high confidence.
         try:
             from mf_datasources import readiness
+
             rdy = readiness()
             live_share = float((rdy["status"] == "READY").mean())
             # Agent B's holdings feed is the load-bearing input; without it the
             # Manager Alpha score is synthetic and confidence is capped hard.
-            holdings_ready = bool(
-                (rdy.loc[rdy["source"] == "Historical disclosures", "status"] == "READY").any())
+            holdings_ready = bool((rdy.loc[rdy["source"] == "Historical disclosures", "status"] == "READY").any())
         except Exception:  # noqa: BLE001
             live_share, holdings_ready = 0.0, False
         confidence = round(float(np.clip(0.15 + 0.85 * live_share, 0, 1)), 2)
         if not holdings_ready:
             confidence = min(confidence, 0.45)
-        self.v._record("recommendation", "issued", True,
-                       f"{dossier.scheme_name}: {verdict} ({verdict_color}) "
-                       f"screen={utility} greens={greens} reds={reds}")
+        self.v._record(
+            "recommendation",
+            "issued",
+            True,
+            f"{dossier.scheme_name}: {verdict} ({verdict_color}) screen={utility} greens={greens} reds={reds}",
+        )
         return dict(
-            verdict=verdict, verdict_color=verdict_color, verdict_caveat=verdict_caveat,
+            verdict=verdict,
+            verdict_color=verdict_color,
+            verdict_caveat=verdict_caveat,
             # Both possible verdicts + the cutoff that selects between them, so the
             # app personalises by recomputing `utility` alone (docs/d4_profile_verdicts.md).
-            verdict_branches=verdict_branches, screen_score_red_below=SCREEN_SCORE_RED,
+            verdict_branches=verdict_branches,
+            screen_score_red_below=SCREEN_SCORE_RED,
             metric_colors=metric_colors,
             kind="screen-based recommendation (transparent rule over the metrics below; "
-                 "NAV-only data, manager skill unverified)",
+            "NAV-only data, manager skill unverified)",
             profile_fit_score=utility,
             sub_scores=profile_score["sub_scores"],
             weight_matrix=profile_score["weight_matrix"],
             facts=facts,
             coverage_flags=coverage_flags,
-            manager_alpha=(macs if macs is not None else
-                           ("N/A (passive mandate)" if is_passive else
-                            "NOT AVAILABLE (holdings missing)")),
+            manager_alpha=(
+                macs
+                if macs is not None
+                else ("N/A (passive mandate)" if is_passive else "NOT AVAILABLE (holdings missing)")
+            ),
             sentiment_net=round(sentiment["net_sentiment"], 2),
-            observations=observations, flags=flags,
+            observations=observations,
+            flags=flags,
             confidence=confidence,
             confidence_note=(
                 "LOW CONFIDENCE: no live data on disk — run bootstrap.py"
-                if live_share == 0 else
-                "CAPPED at 0.45: historical disclosures missing, so the Manager "
+                if live_share == 0
+                else "CAPPED at 0.45: historical disclosures missing, so the Manager "
                 "Alpha Consistency Score is NOT based on real holdings"
-                if not holdings_ready else ""))
+                if not holdings_ready
+                else ""
+            ),
+        )
 
 
 class MasterOrchestrator:
@@ -1227,9 +1567,12 @@ class MasterOrchestrator:
             self.store = store
         elif live:
             from mf_realstore import RealNAVStore  # lazy: avoids a module-load cycle
+
             self.store = RealNAVStore()
-            LOGGER.info("LIVE mode: RealNAVStore wired (AMFI/mfapi/CapBand/yfinance/"
-                        "Anthropic via mf_cache/). Run bootstrap.py first to warm the cache.")
+            LOGGER.info(
+                "LIVE mode: RealNAVStore wired (AMFI/mfapi/CapBand/yfinance/"
+                "Anthropic via mf_cache/). Run bootstrap.py first to warm the cache."
+            )
         else:
             self.store = MockMarketDataStore(seed=seed)
         self.agent_a = DataIngestionCategorizerAgent(self.store, self.validator)
@@ -1268,10 +1611,10 @@ class MasterOrchestrator:
         if self._overrides is None:
             try:
                 import mf_overrides
+
                 self._overrides, issues = mf_overrides.load(manifest=manifest)
                 for issue in issues:
-                    log = (self.log.warning if issue.severity == mf_overrides.SEVERITY_ERROR
-                           else self.log.info)
+                    log = self.log.warning if issue.severity == mf_overrides.SEVERITY_ERROR else self.log.info
                     log("universe override %s", issue)
                 if self._overrides:
                     self.log.info("Loaded %d curated universe override(s)", len(self._overrides))
@@ -1292,6 +1635,7 @@ class MasterOrchestrator:
         """
         try:
             from mf_datasources import MFAPIAdapter
+
             series, _meta, _rep = MFAPIAdapter().nav_series(code)
             return series if series is not None and len(series) >= 5 else None
         except Exception:  # noqa: BLE001 — a failed fetch is a coverage gap, never a crash
@@ -1307,6 +1651,7 @@ class MasterOrchestrator:
         if self._universe_index is None:
             try:
                 from mf_live_score import load_universe_index
+
                 self._universe_index = load_universe_index()
             except Exception as exc:  # noqa: BLE001 — never break a run over a flag's precision
                 self.log.warning("Universe index unavailable: %s", exc)
@@ -1327,6 +1672,7 @@ class MasterOrchestrator:
                 from mf_features import FeatureEngine
                 from mf_infer import CohortInferencer
                 from mf_labels import load_manifest, load_nav_panel
+
                 self._cohort_manifest = load_manifest()
                 self._cohort_nav_panel = load_nav_panel(self._cohort_manifest)
                 self._cohort_inferencer = CohortInferencer()
@@ -1336,8 +1682,7 @@ class MasterOrchestrator:
                 self._cohort_unavailable = str(exc)
                 self.log.warning("Cohort signal unavailable this run: %s", exc)
                 return None
-        return (self._cohort_manifest, self._cohort_nav_panel,
-                self._cohort_inferencer, self._cohort_engine)
+        return (self._cohort_manifest, self._cohort_nav_panel, self._cohort_inferencer, self._cohort_engine)
 
     @property
     def cohort_model_id(self) -> Optional[str]:
@@ -1361,16 +1706,18 @@ class MasterOrchestrator:
             return {}
         return self.store.sibling_equity_schemes(dossier.scheme_name, dossier.amc)
 
-    def evaluate(self, query: str,
-                 profile_config: Optional[Dict[str, Any]] = None,
-                 argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    def evaluate(
+        self, query: str, profile_config: Optional[Dict[str, Any]] = None, argv: Optional[Sequence[str]] = None
+    ) -> Dict[str, Any]:
         try:
             profile = resolve_investor_profile(profile_config, argv, interactive=True)
-            dossier = self.agent_a.run(query)                      # gate: must succeed
+            dossier = self.agent_a.run(query)  # gate: must succeed
             if dossier.missing_params:
-                self.log.warning("Agent A surfaced missing params %s — proceeding with "
-                                 "documented defaults; prompt the user in interactive mode",
-                                 dossier.missing_params)
+                self.log.warning(
+                    "Agent A surfaced missing params %s — proceeding with "
+                    "documented defaults; prompt the user in interactive mode",
+                    dossier.missing_params,
+                )
             bench = self.store.benchmark_series(dossier.benchmark)
 
             with ThreadPoolExecutor(max_workers=3, thread_name_prefix="SUB_AGENT") as pool:
@@ -1380,8 +1727,7 @@ class MasterOrchestrator:
                 compliance = self.verifier.verify(dossier, self._sibling_weights(dossier))
                 backtest, profile_score, sentiment = fut_b.result(), fut_c.result(), fut_d.result()
 
-            rec = self.recommender.run(dossier, compliance, backtest,
-                                       profile_score, sentiment, profile)
+            rec = self.recommender.run(dossier, compliance, backtest, profile_score, sentiment, profile)
             sentinel_report = self.sentinel.run(dossier, compliance, backtest, sentiment, bench)
 
             # cohort_q1 — the one out-of-sample-validated signal (phase_b_v2:
@@ -1399,32 +1745,46 @@ class MasterOrchestrator:
                     if res is None:
                         rec["coverage_flags"].append(
                             "COHORT SIGNAL NOT EVALUATED — MODEL_ARTIFACT_UNAVAILABLE"
-                            + (f": {self._cohort_unavailable}" if self._cohort_unavailable else ""))
+                            + (f": {self._cohort_unavailable}" if self._cohort_unavailable else "")
+                        )
                     else:
                         from mf_live_score import score_live
+
                         manifest, nav_panel, inferencer, engine = res
-                        cohort_signal = score_live(dossier.amfi_code, manifest=manifest,
-                                                   nav_panel=nav_panel, inferencer=inferencer,
-                                                   engine=engine, today=TODAY,
-                                                   universe_index=self._cohort_universe_index(),
-                                                   nav_loader=self._candidate_nav_loader,
-                                                   overrides=self._curated_overrides(manifest))
+                        cohort_signal = score_live(
+                            dossier.amfi_code,
+                            manifest=manifest,
+                            nav_panel=nav_panel,
+                            inferencer=inferencer,
+                            engine=engine,
+                            today=TODAY,
+                            universe_index=self._cohort_universe_index(),
+                            nav_loader=self._candidate_nav_loader,
+                            overrides=self._curated_overrides(manifest),
+                        )
                         if cohort_signal["status"] != "OK":
                             rec["coverage_flags"].append(
                                 f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"
-                                + (f": {cohort_signal['note']}" if cohort_signal["note"] else ""))
+                                + (f": {cohort_signal['note']}" if cohort_signal["note"] else "")
+                            )
             except Exception as exc:  # noqa: BLE001 — see comment above
                 self.log.warning("Cohort signal errored for %r: %s", dossier.scheme_name, exc)
                 rec["coverage_flags"].append("COHORT SIGNAL NOT EVALUATED — unexpected error")
 
             self.validator.register_iteration(context=f"evaluate:{dossier.scheme_name}")
-            return dict(profile=profile.model_dump(mode="json"), dossier=dossier, compliance=compliance,
-                        backtest=backtest, profile_score=profile_score,
-                        sentiment=sentiment, recommendation=rec, sentinel=sentinel_report,
-                        cohort_signal=cohort_signal)
+            return dict(
+                profile=profile.model_dump(mode="json"),
+                dossier=dossier,
+                compliance=compliance,
+                backtest=backtest,
+                profile_score=profile_score,
+                sentiment=sentiment,
+                recommendation=rec,
+                sentinel=sentinel_report,
+                cohort_signal=cohort_signal,
+            )
         except Exception as exc:  # noqa: BLE001 — institutional runs must degrade cleanly
-            self.log.error("Evaluation failed for %r: %s\n%s", query, exc,
-                           traceback_format(exc))
+            self.log.error("Evaluation failed for %r: %s\n%s", query, exc, traceback_format(exc))
             return dict(error=str(exc), query=query)
 
     # ------------------------------ reporting --------------------------------
@@ -1440,59 +1800,72 @@ class MasterOrchestrator:
         print(f"  {d.scheme_name}  |  {d.isin}  |  {d.category} ({d.bucket.value})")
         aum_str = f"₹{d.aum_cr:,.0f} cr" if np.isfinite(d.aum_cr) else "NOT AVAILABLE"
         ter_str = f"{d.expense_ratio:.2%}" if np.isfinite(d.expense_ratio) else "NOT AVAILABLE"
-        print(f"  AMC: {d.amc}  |  Manager: {d.manager}  |  AUM {aum_str}  "
-              f"|  TER {ter_str}")
+        print(f"  AMC: {d.amc}  |  Manager: {d.manager}  |  AUM {aum_str}  |  TER {ter_str}")
         print("=" * 86)
-        print(f"  Investor profile: {p['horizon_years']}y horizon | liquidity="
-              f"{p['liquidity_need']} | risk={p['risk_appetite']}")
+        print(
+            f"  Investor profile: {p['horizon_years']}y horizon | liquidity="
+            f"{p['liquidity_need']} | risk={p['risk_appetite']}"
+        )
+
         def _pct(x, nd=2, signed=False):
             if not (isinstance(x, (int, float)) and np.isfinite(x)):
                 return "n/a"
             return f"{x:+.{nd}%}" if signed else f"{x:.{nd}%}"
+
         dot = {"green": "🟢", "red": "🔴", "blue": "🔵", "amber": "🟡", "grey": "⚪"}
         mc = r["metric_colors"]
-        print(f"\n  >>> RECOMMENDATION: {dot[r['verdict_color']]} {r['verdict']}"
-              f"   (confidence {r['confidence']})")
+        print(f"\n  >>> RECOMMENDATION: {dot[r['verdict_color']]} {r['verdict']}   (confidence {r['confidence']})")
         if r["verdict_caveat"]:
             print(f"      ⚠ {r['verdict_caveat']}")
         print(f"      basis: {r['kind']}")
         if r["confidence_note"]:
             print(f"      {r['confidence_note']}")
         f = r["facts"]
-        print(f"      CAGR {dot[mc['cagr']]} {_pct(f['cagr'])} | "
-              f"excess/bench(3y) {dot[mc['excess_cagr_3y']]} {_pct(f['excess_cagr_3y'], signed=True)} | "
-              f"Sortino {dot[mc['sortino_3y']]} {f['sortino_3y']:.2f} | "
-              f"maxDD(3y) {dot[mc['max_dd_3y']]} {_pct(f['max_dd_3y'], 1)} | "
-              f"consistency {dot[mc['consistency']]} {r['sub_scores']['consistency']:.2f}")
+        print(
+            f"      CAGR {dot[mc['cagr']]} {_pct(f['cagr'])} | "
+            f"excess/bench(3y) {dot[mc['excess_cagr_3y']]} {_pct(f['excess_cagr_3y'], signed=True)} | "
+            f"Sortino {dot[mc['sortino_3y']]} {f['sortino_3y']:.2f} | "
+            f"maxDD(3y) {dot[mc['max_dd_3y']]} {_pct(f['max_dd_3y'], 1)} | "
+            f"consistency {dot[mc['consistency']]} {r['sub_scores']['consistency']:.2f}"
+        )
         exp_str = _pct(d.expense_ratio) if np.isfinite(d.expense_ratio) else "n/a"
         en = f.get("effective_n", float("nan"))
         en_str = f"{en:.0f}" if isinstance(en, (int, float)) and np.isfinite(en) else "n/a"
-        print(f"      expense {dot[mc['expense']]} {exp_str} | "
-              f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])} | "
-              f"concentration {dot[mc['concentration']]} top10={_pct(f.get('top10_weight', float('nan')), 1)} "
-              f"(eff.N {en_str})")
-        print(f"      Supporting screen score: {dot[mc['screen_score']]} "
-              f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)")
+        print(
+            f"      expense {dot[mc['expense']]} {exp_str} | "
+            f"compliance {dot[mc['compliance']]} | vol(1y) {_pct(f['vol_1y'])} | "
+            f"concentration {dot[mc['concentration']]} top10={_pct(f.get('top10_weight', float('nan')), 1)} "
+            f"(eff.N {en_str})"
+        )
+        print(
+            f"      Supporting screen score: {dot[mc['screen_score']]} "
+            f"{r['profile_fit_score']}/100  (weighted screening aid — supporting datapoint, not the verdict)"
+        )
         print(f"      Manager Alpha: {r['manager_alpha']}")
         cs = result.get("cohort_signal")
         if cs is not None and cs["status"] == "OK":
-            print(f"      Cohort signal ({cs['target']}): p={cs['probability']:.2f}, "
-                  f"percentile={cs['cohort_percentile']:.0%} within {cs['cohort_n']}-fund cohort "
-                  f"'{cs['cohort_key']}' @ {cs['anchor']} — {cs['note']}")
+            print(
+                f"      Cohort signal ({cs['target']}): p={cs['probability']:.2f}, "
+                f"percentile={cs['cohort_percentile']:.0%} within {cs['cohort_n']}-fund cohort "
+                f"'{cs['cohort_key']}' @ {cs['anchor']} — {cs['note']}"
+            )
         for cf in r["coverage_flags"]:
             print(f"      [DATA GAP] {cf}")
         if d.bucket == SEBIBucket.OTHER_PASSIVE:
-            print("\n  Manager Alpha Consistency Score: N/A — passive mandate; "
-                  "evaluated on tracking fidelity, cost and compliance instead")
+            print(
+                "\n  Manager Alpha Consistency Score: N/A — passive mandate; "
+                "evaluated on tracking fidelity, cost and compliance instead"
+            )
         else:
             mac = result["backtest"].get("manager_alpha_consistency_score")
             mac_str = f"{mac}/100 — " if mac is not None else ""
-            print(f"\n  Manager Alpha Consistency Score: "
-                  f"{mac_str}{result['backtest'].get('interpretation','')}")
+            print(f"\n  Manager Alpha Consistency Score: {mac_str}{result['backtest'].get('interpretation', '')}")
         for label, w in result["backtest"].get("windows", {}).items():
-            print(f"    [{label} @ {w['as_of']}] hit-rate {w['hit_rate']:.0%} | "
-                  f"wtd excess CAGR {w['weighted_excess_cagr']:+.2%} | "
-                  f"wtd stock max-DD {w['avg_stock_max_dd']:.1%}")
+            print(
+                f"    [{label} @ {w['as_of']}] hit-rate {w['hit_rate']:.0%} | "
+                f"wtd excess CAGR {w['weighted_excess_cagr']:+.2%} | "
+                f"wtd stock max-DD {w['avg_stock_max_dd']:.1%}"
+            )
         print("\n  OBSERVATIONS:")
         for x in r["observations"]:
             print(f"    + {x}")
@@ -1500,17 +1873,17 @@ class MasterOrchestrator:
         for x in r["flags"]:
             print(f"    - {x}")
         fails = [f for f in result["compliance"] if not f.passed]
-        print(f"\n  SEBI Feb-2026 true-to-label: {len(result['compliance'])} checks, "
-              f"{len(fails)} adverse")
+        print(f"\n  SEBI Feb-2026 true-to-label: {len(result['compliance'])} checks, {len(fails)} adverse")
         for f in fails:
             print(f"    [{f.severity.upper()}] {f.rule_id}: {f.detail}")
         s = result["sentiment"]
-        print(f"\n  News sentiment: net {s['net_sentiment']:+.2f} over {s['n_items']} items "
-              f"(entities: {', '.join(s['entities_queried'])})")
+        print(
+            f"\n  News sentiment: net {s['net_sentiment']:+.2f} over {s['n_items']} items "
+            f"(entities: {', '.join(s['entities_queried'])})"
+        )
         sr = result["sentinel"]
         dot_sev = {"HIGH": "🔴", "WATCH": "🟡", "INFO": "⚪"}
-        print(f"\n  SENTINEL ({sr.checks_run} checks run, {len(sr.checks_dormant)} dormant, "
-              f"{len(sr.alerts)} alerts):")
+        print(f"\n  SENTINEL ({sr.checks_run} checks run, {len(sr.checks_dormant)} dormant, {len(sr.alerts)} alerts):")
         for a in sr.alerts:
             print(f"    {dot_sev[a.severity]} [{a.severity}] {a.code} ({a.basis}): {a.detail}")
         if sr.nfo_dossier:
@@ -1519,6 +1892,7 @@ class MasterOrchestrator:
 
 def traceback_format(exc: BaseException) -> str:
     import traceback as tb
+
     return "".join(tb.format_exception(type(exc), exc, exc.__traceback__))
 
 
@@ -1533,15 +1907,19 @@ def print_user_action_checklist() -> None:
         print(f"    [DONE] {a.name:<24} {a.endpoint}")
     print("\n  YOUR REMAINING ACTIONS:")
     for i, a in enumerate(todo, 1):
-        print(f"    {i}. {a.name}  (used by {a.used_by})\n"
-              f"       endpoint : {a.endpoint}\n"
-              f"       requires : {a.required_config}")
+        print(
+            f"    {i}. {a.name}  (used by {a.used_by})\n"
+            f"       endpoint : {a.endpoint}\n"
+            f"       requires : {a.required_config}"
+        )
     n = len(todo)
-    print(f"    {n+1}. OPTIONAL — AMFI cap-band XLSX for exact SEBI 80%/65% fidelity checks:\n"
-          "       download from amfiindia.com/otherdata/categorisation-of-stocks,\n"
-          "       then  export AMFI_CAP_XLSX=/path/to/file.xlsx\n"
-          "       (skip it and the pipeline falls back to market-cap cut-offs automatically)")
-    print(f"    {n+2}. Run:  python3 bootstrap.py    (probes every source, caches, reports readiness)")
+    print(
+        f"    {n + 1}. OPTIONAL — AMFI cap-band XLSX for exact SEBI 80%/65% fidelity checks:\n"
+        "       download from amfiindia.com/otherdata/categorisation-of-stocks,\n"
+        "       then  export AMFI_CAP_XLSX=/path/to/file.xlsx\n"
+        "       (skip it and the pipeline falls back to market-cap cut-offs automatically)"
+    )
+    print(f"    {n + 2}. Run:  python3 bootstrap.py    (probes every source, caches, reports readiness)")
 
 
 # ==============================================================================
@@ -1555,12 +1933,12 @@ def main() -> None:
     MasterOrchestrator.print_report(r1)
 
     print("\n############ RUN 2: SAME thematic fund, TWO different runtime profiles ####")
-    r2a = orch.evaluate("Bharat Banking & PSU Thematic Fund")   # default profile
+    r2a = orch.evaluate("Bharat Banking & PSU Thematic Fund")  # default profile
     MasterOrchestrator.print_report(r2a)
-    r2b = orch.evaluate("Bharat Banking & PSU Thematic Fund",
-                        profile_config=dict(horizon_years=2.5,
-                                            liquidity_need="high",
-                                            risk_appetite="conservative"))
+    r2b = orch.evaluate(
+        "Bharat Banking & PSU Thematic Fund",
+        profile_config=dict(horizon_years=2.5, liquidity_need="high", risk_appetite="conservative"),
+    )
     MasterOrchestrator.print_report(r2b)
 
     print("\n############ RUN 3: query by ISIN | passive fund ############")
@@ -1571,12 +1949,12 @@ def main() -> None:
     r4 = orch.evaluate("Deccan Retirement Fund")
     MasterOrchestrator.print_report(r4)
 
-    print(f"\nValidation harness: {len(orch.validator.records)} checks, "
-          f"{orch.validator.failure_count} adverse findings recorded "
-          f"(adverse = surveillance hits, not code errors)")
+    print(
+        f"\nValidation harness: {len(orch.validator.records)} checks, "
+        f"{orch.validator.failure_count} adverse findings recorded "
+        f"(adverse = surveillance hits, not code errors)"
+    )
     print_user_action_checklist()
-
-
 
 
 if __name__ == "__main__":

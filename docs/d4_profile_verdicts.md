@@ -32,9 +32,12 @@ scores it weighs never move.
 **And `score_band` only matters as a single boolean.** In the rule —
 
 ```python
-if critical_breach or reds >= 3 or (reds > greens and score_band == "red"):  SELL
-elif greens >= 3 and reds == 0 and score_band != "red":                      BUY
-else:                                                                        HOLD
+if critical_breach or reds >= 3 or (reds > greens and score_band == "red"):
+    SELL
+elif greens >= 3 and reds == 0 and score_band != "red":
+    BUY
+else:
+    HOLD
 ```
 
 — `score_band` appears only as `== "red"` / `!= "red"`, i.e. `utility < 45`. The green

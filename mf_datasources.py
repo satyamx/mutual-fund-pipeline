@@ -33,8 +33,8 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urljoin, urlparse
 
 import numpy as np
 import pandas as pd
@@ -52,6 +52,7 @@ ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
 def _requests():
     try:
         import requests  # noqa: PLC0415
+
         return requests
     except ImportError:
         return None
@@ -63,8 +64,7 @@ def _get_json(url: str, timeout: int = 20, retries: int = 3) -> Optional[Any]:
         return None
     for attempt in range(retries):
         try:
-            resp = r.get(url, timeout=timeout,
-                         headers={"User-Agent": "mf-pipeline/2.0"})
+            resp = r.get(url, timeout=timeout, headers={"User-Agent": "mf-pipeline/2.0"})
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:  # noqa: BLE001
@@ -93,10 +93,15 @@ def _get_bytes(url: str, referer: str, timeout: int = 60) -> Optional[bytes]:
     if r is None:
         return None
     try:
-        resp = r.get(url, timeout=timeout, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Referer": referer})
+        resp = r.get(
+            url,
+            timeout=timeout,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Referer": referer,
+            },
+        )
         resp.raise_for_status()
         return resp.content
     except Exception as exc:  # noqa: BLE001
@@ -123,9 +128,11 @@ class CleaningReport:
             self.ambiguous = []
 
     def summary(self) -> str:
-        return (f"{self.rows_in}->{self.rows_out} obs | "
-                f"{self.spikes_removed} bad prints removed | "
-                f"{self.payout_steps_detected} IDCW payout steps reconstructed")
+        return (
+            f"{self.rows_in}->{self.rows_out} obs | "
+            f"{self.spikes_removed} bad prints removed | "
+            f"{self.payout_steps_detected} IDCW payout steps reconstructed"
+        )
 
 
 class NAVCleaner:
@@ -151,13 +158,14 @@ class NAVCleaner:
     Anything ambiguous is surfaced in the report, never silently "corrected".
     """
 
-    SPIKE_THRESHOLD = 0.10        # bad-print candidate
-    REVERSION_TOLERANCE = 0.5     # reverts >=50% of the jump => typo
-    PAYOUT_THRESHOLD = 0.03       # IDCW steps are commonly 3-8%
-    BENCHMARK_TOLERANCE = 0.015   # benchmark moved <1.5% => the drop was fund-specific
+    SPIKE_THRESHOLD = 0.10  # bad-print candidate
+    REVERSION_TOLERANCE = 0.5  # reverts >=50% of the jump => typo
+    PAYOUT_THRESHOLD = 0.03  # IDCW steps are commonly 3-8%
+    BENCHMARK_TOLERANCE = 0.015  # benchmark moved <1.5% => the drop was fund-specific
 
-    def clean(self, s: pd.Series, is_idcw_plan: bool = False,
-              benchmark: Optional[pd.Series] = None) -> Tuple[pd.Series, CleaningReport]:
+    def clean(
+        self, s: pd.Series, is_idcw_plan: bool = False, benchmark: Optional[pd.Series] = None
+    ) -> Tuple[pd.Series, CleaningReport]:
         s = s.dropna().sort_index()
         rep = CleaningReport(rows_in=len(s))
         if len(s) < 5:
@@ -199,12 +207,13 @@ class NAVCleaner:
                 # market fell too => a crash, not a payout. Leave it alone.
                 if bench_ret[i] < -self.BENCHMARK_TOLERANCE:
                     rep.ambiguous.append(
-                        f"{pd.Timestamp(idx[i+1]).date()}: fund {ret[i]:+.1%} vs "
-                        f"benchmark {bench_ret[i]:+.1%} -> treated as MARKET MOVE")
+                        f"{pd.Timestamp(idx[i + 1]).date()}: fund {ret[i]:+.1%} vs "
+                        f"benchmark {bench_ret[i]:+.1%} -> treated as MARKET MOVE"
+                    )
                     continue
             rep.payout_steps_detected += 1
             rep.payout_dates.append(str(pd.Timestamp(idx[i + 1]).date()))
-            tr_factor[i + 1:] *= (1.0 / (1.0 + ret[i]))
+            tr_factor[i + 1 :] *= 1.0 / (1.0 + ret[i])
 
         cleaned = pd.Series(vals * tr_factor, index=pd.DatetimeIndex(idx), name=s.name)
         rep.rows_out = len(cleaned)
@@ -240,7 +249,7 @@ class MFAPIAdapter:
             p.write_text(json.dumps(payload))
             self.live = True
             return payload
-        if p.exists():                      # network down -> serve stale cache
+        if p.exists():  # network down -> serve stale cache
             LOGGER.warning("mfapi unreachable; serving cached %s", scheme_code)
             return json.loads(p.read_text())
         return None
@@ -249,8 +258,9 @@ class MFAPIAdapter:
         res = _get_json(f"{MFAPI_BASE}/mf/search?q={query.replace(' ', '%20')}")
         return res or []
 
-    def nav_series(self, scheme_code: str, benchmark: Optional[pd.Series] = None
-                   ) -> Tuple[Optional[pd.Series], Dict[str, Any], Optional[CleaningReport]]:
+    def nav_series(
+        self, scheme_code: str, benchmark: Optional[pd.Series] = None
+    ) -> Tuple[Optional[pd.Series], Dict[str, Any], Optional[CleaningReport]]:
         payload = self.fetch_raw(scheme_code)
         if not payload:
             return None, {}, None
@@ -267,10 +277,13 @@ class MFAPIAdapter:
         # Growth-plan preference: warn loudly if this is an IDCW plan, because a
         # raw IDCW NAV understates true return and silently poisons every metric.
         if is_idcw:
-            LOGGER.warning("Scheme %s is an IDCW/dividend plan. Total-return "
-                           "reconstruction applied (%d payout steps). Prefer the "
-                           "GROWTH plan code for clean analytics.",
-                           scheme_code, rep.payout_steps_detected)
+            LOGGER.warning(
+                "Scheme %s is an IDCW/dividend plan. Total-return "
+                "reconstruction applied (%d payout steps). Prefer the "
+                "GROWTH plan code for clean analytics.",
+                scheme_code,
+                rep.payout_steps_detected,
+            )
         return cleaned, meta, rep
 
     def health(self) -> bool:
@@ -280,8 +293,10 @@ class MFAPIAdapter:
 class AMFIRegistryLive:
     """AMFI NAVAll.txt -> scheme master (code, ISINs, name, category, AMC)."""
 
-    LINE = re.compile(r"^(?P<code>\d{4,8});(?P<isin1>[^;]*);(?P<isin2>[^;]*);"
-                      r"(?P<name>[^;]+);(?P<nav>[0-9.]+|N\.A\.);(?P<date>[^;]+)\s*$")
+    LINE = re.compile(
+        r"^(?P<code>\d{4,8});(?P<isin1>[^;]*);(?P<isin2>[^;]*);"
+        r"(?P<name>[^;]+);(?P<nav>[0-9.]+|N\.A\.);(?P<date>[^;]+)\s*$"
+    )
 
     # A category header is "<Family> Schemes(<Asset> - <Sub>)". The literal
     # Scheme/Schemes token before the parenthesis is what separates it from an AMC
@@ -311,8 +326,7 @@ class AMFIRegistryLive:
                 LOGGER.warning("AMFI unreachable; serving cached master")
                 return pd.read_parquet(p)
             LOGGER.error("AMFI unreachable and no cache. Run bootstrap.py with network.")
-            return pd.DataFrame(columns=["amfi_code", "isin", "scheme_name",
-                                         "category_raw", "amc", "nav", "date"])
+            return pd.DataFrame(columns=["amfi_code", "isin", "scheme_name", "category_raw", "amc", "nav", "date"])
         rows, category, amc = [], None, None
         for line in txt.splitlines():
             line = line.strip()
@@ -322,14 +336,20 @@ class AMFIRegistryLive:
             if m:
                 if m.group("nav") == "N.A.":
                     continue
-                rows.append(dict(amfi_code=m.group("code"),
-                                 isin=(m.group("isin1") or "").strip() or None,
-                                 scheme_name=m.group("name").strip(),
-                                 category_raw=category, amc=amc,
-                                 nav=float(m.group("nav")), date=m.group("date")))
+                rows.append(
+                    dict(
+                        amfi_code=m.group("code"),
+                        isin=(m.group("isin1") or "").strip() or None,
+                        scheme_name=m.group("name").strip(),
+                        category_raw=category,
+                        amc=amc,
+                        nav=float(m.group("nav")),
+                        date=m.group("date"),
+                    )
+                )
             elif self.CATEGORY_HEADER.match(line):  # "Open Ended Schemes(Equity Scheme - Large Cap Fund)"
                 category = line
-            elif ";" not in line:                   # AMC banner line
+            elif ";" not in line:  # AMC banner line
                 amc = line
         df = pd.DataFrame(rows)
         if not df.empty:
@@ -378,19 +398,24 @@ class AMFIRegistryLive:
         # tightest match — fewest characters beyond the query — so an equal-ranked
         # tie is broken by specificity instead of by file order.
         name = hit["scheme_name"].str.upper()
-        score = (name.str.contains("DIRECT").astype(int) * 2
-                 + name.str.contains("GROWTH").astype(int) * 2
-                 - name.str.contains("IDCW|DIVIDEND").astype(int) * 3)
-        ranked = hit.assign(_s=score, _len=name.str.len()).sort_values(
-            ["_s", "_len"], ascending=[False, True])
+        score = (
+            name.str.contains("DIRECT").astype(int) * 2
+            + name.str.contains("GROWTH").astype(int) * 2
+            - name.str.contains("IDCW|DIVIDEND").astype(int) * 3
+        )
+        ranked = hit.assign(_s=score, _len=name.str.len()).sort_values(["_s", "_len"], ascending=[False, True])
         if len(ranked) > 1:
             top = ranked.iloc[0]
             rest = ranked[(ranked["_s"] == top["_s"]) & (ranked["_len"] == top["_len"])]
             if len(rest) > 1:
-                LOGGER.warning("AMFI resolve(%r) is ambiguous — %d equally-specific "
-                               "schemes (%s); taking %s (%s).", query, len(rest),
-                               ", ".join(rest["amfi_code"].astype(str).head(4)),
-                               top["scheme_name"], top["amfi_code"])
+                LOGGER.warning(
+                    "AMFI resolve(%r) is ambiguous — %d equally-specific schemes (%s); taking %s (%s).",
+                    query,
+                    len(rest),
+                    ", ".join(rest["amfi_code"].astype(str).head(4)),
+                    top["scheme_name"],
+                    top["amfi_code"],
+                )
         return ranked.iloc[0]
 
     def health(self) -> bool:
@@ -426,8 +451,7 @@ class CapBandAdapter:
         dated = []
         for href, datestr in self.LINK_RE.findall(html):
             try:
-                dated.append((datetime.strptime(datestr, "%d%b%Y").date(),
-                              urljoin(AMFI_CAPLIST_PAGE, href)))
+                dated.append((datetime.strptime(datestr, "%d%b%Y").date(), urljoin(AMFI_CAPLIST_PAGE, href)))
             except ValueError:
                 continue
         if not dated:
@@ -440,9 +464,19 @@ class CapBandAdapter:
         (30-Jun/31-Dec), skipping a period too recent to plausibly be published yet
         (AMFI publish lag), tried against both known download hosts."""
         today = date.today()
-        candidates = sorted({c for c in (date(today.year, 12, 31), date(today.year, 6, 30),
-                                         date(today.year - 1, 12, 31), date(today.year - 1, 6, 30))
-                             if c <= today}, reverse=True)
+        candidates = sorted(
+            {
+                c
+                for c in (
+                    date(today.year, 12, 31),
+                    date(today.year, 6, 30),
+                    date(today.year - 1, 12, 31),
+                    date(today.year - 1, 6, 30),
+                )
+                if c <= today
+            },
+            reverse=True,
+        )
         period = next((c for c in candidates if (today - c).days >= 45), candidates[-1])
         fname = f"AverageMarketCapitalization{period.day}{period.strftime('%b')}{period.year}.xlsx"
         return [self.XLSX_BASE + fname, self.XLSX_BASE_ALT + fname]
@@ -475,8 +509,10 @@ class CapBandAdapter:
                 return s.mask(s.str.lower().isin(["", "-", "nan", "none"]))
 
             sym = clean_sym("NSE Symbol").fillna(clean_sym("BSE Symbol"))
-            band = (df[cat_col].astype(str).str.extract(r"(?i)(large|mid|small)", expand=False)
-                    .str.lower().str.capitalize() + " Cap")
+            band = (
+                df[cat_col].astype(str).str.extract(r"(?i)(large|mid|small)", expand=False).str.lower().str.capitalize()
+                + " Cap"
+            )
             company = df["Company name"].astype(str).str.strip()
             out = pd.DataFrame({"symbol": sym, "company": company, "cap_band": band})
             # Keep rows lacking an exchange symbol when the company name is usable —
@@ -497,8 +533,7 @@ class CapBandAdapter:
             return
         try:
             if not self.fetch():
-                LOGGER.warning("Cap-band auto-fetch failed; manual drop-in required "
-                               "(see bootstrap.py [5/5]).")
+                LOGGER.warning("Cap-band auto-fetch failed; manual drop-in required (see bootstrap.py [5/5]).")
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Cap-band auto-fetch raised %s; degrading gracefully", exc)
 
@@ -513,11 +548,13 @@ class CapBandAdapter:
             if cat is None:
                 LOGGER.error("cap list present but no category column found")
                 return None
-            out = pd.DataFrame({
-                "symbol": df[sym].astype(str).str.strip() if sym else None,
-                "company": df[nm].astype(str).str.strip() if nm else None,
-                "cap_band": df[cat].astype(str).str.lower().str.extract(
-                    r"(large|mid|small)", expand=False)})
+            out = pd.DataFrame(
+                {
+                    "symbol": df[sym].astype(str).str.strip() if sym else None,
+                    "company": df[nm].astype(str).str.strip() if nm else None,
+                    "cap_band": df[cat].astype(str).str.lower().str.extract(r"(large|mid|small)", expand=False),
+                }
+            )
             return out.dropna(subset=["cap_band"])
         return None
 
@@ -588,10 +625,8 @@ class AnthropicNewsAgent:
 
     def research(self, amc: str, manager: str, sectors: Sequence[str]) -> Dict[str, Any]:
         if not self.api_key:
-            LOGGER.warning("ANTHROPIC_API_KEY unset — Agent D returns NEUTRAL "
-                           "(no news is better than invented news)")
-            return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[],
-                        live=False, note="no API key")
+            LOGGER.warning("ANTHROPIC_API_KEY unset — Agent D returns NEUTRAL (no news is better than invented news)")
+            return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[], live=False, note="no API key")
         r = _requests()
         if r is None:
             return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[], live=False)
@@ -608,12 +643,21 @@ class AnthropicNewsAgent:
             "net_sentiment 0. Do not invent headlines."
         )
         try:
-            resp = r.post(ANTHROPIC_MESSAGES, timeout=90, headers={
-                "x-api-key": self.api_key, "anthropic-version": "2023-06-01",
-                "content-type": "application/json"},
-                json={"model": self.MODEL, "max_tokens": 2000,
-                      "messages": [{"role": "user", "content": prompt}],
-                      "tools": [{"type": "web_search_20250305", "name": "web_search"}]})
+            resp = r.post(
+                ANTHROPIC_MESSAGES,
+                timeout=90,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.MODEL,
+                    "max_tokens": 2000,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                },
+            )
             resp.raise_for_status()
             blocks = resp.json().get("content", [])
             text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -622,10 +666,14 @@ class AnthropicNewsAgent:
             data = json.loads(m.group(0)) if m else {}
             items = data.get("items", [])
             self.live = True
-            return dict(net_sentiment=float(data.get("net_sentiment", 0.0)),
-                        n_items=len(items),
-                        red_flags=[i["headline"] for i in items if i.get("regulatory_flag")],
-                        items=items, summary=data.get("summary", ""), live=True)
+            return dict(
+                net_sentiment=float(data.get("net_sentiment", 0.0)),
+                n_items=len(items),
+                red_flags=[i["headline"] for i in items if i.get("regulatory_flag")],
+                items=items,
+                summary=data.get("summary", ""),
+                live=True,
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Agent D live call failed (%s) — returning NEUTRAL", exc)
             return dict(net_sentiment=0.0, n_items=0, red_flags=[], items=[], live=False)
@@ -664,25 +712,27 @@ def _selftest_navall() -> None:
     file that mislabelled 2,544 rows and misattributed 12 IL&FS schemes to ICICI
     Prudential.
     """
-    sample = "\n".join([
-        "Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date",
-        "",
-        "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
-        "",
-        "Alpha Mutual Fund",
-        "100001;INF000000001;-;Alpha Large Cap Fund - Direct - Growth;123.45;01-Jul-2026",
-        "",
-        "Close Ended Schemes(Income)",
-        "",
-        "Beta Mutual Fund",
-        "100002;INF000000002;-;Beta Income Fund - Growth;10.11;01-Jul-2026",
-        "",
-        "IL&FS Mutual Fund (IDF)",                       # AMC banner, NOT a category
-        "100003;INF000000003;-;IL&FS Infrastructure Debt Fund Series 1A - Growth;9.87;01-Jul-2026",
-        "",
-        "Gamma Mutual Fund",                              # follows the IDF block
-        "100004;INF000000004;-;Gamma Income Fund - Growth;12.34;01-Jul-2026",
-    ])
+    sample = "\n".join(
+        [
+            "Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date",
+            "",
+            "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+            "",
+            "Alpha Mutual Fund",
+            "100001;INF000000001;-;Alpha Large Cap Fund - Direct - Growth;123.45;01-Jul-2026",
+            "",
+            "Close Ended Schemes(Income)",
+            "",
+            "Beta Mutual Fund",
+            "100002;INF000000002;-;Beta Income Fund - Growth;10.11;01-Jul-2026",
+            "",
+            "IL&FS Mutual Fund (IDF)",  # AMC banner, NOT a category
+            "100003;INF000000003;-;IL&FS Infrastructure Debt Fund Series 1A - Growth;9.87;01-Jul-2026",
+            "",
+            "Gamma Mutual Fund",  # follows the IDF block
+            "100004;INF000000004;-;Gamma Income Fund - Growth;12.34;01-Jul-2026",
+        ]
+    )
 
     rows, category, amc = [], None, None
     for line in sample.splitlines():
@@ -691,8 +741,7 @@ def _selftest_navall() -> None:
             continue
         m = AMFIRegistryLive.LINE.match(line)
         if m:
-            rows.append(dict(code=m.group("code"), name=m.group("name").strip(),
-                             category_raw=category, amc=amc))
+            rows.append(dict(code=m.group("code"), name=m.group("name").strip(), category_raw=category, amc=amc))
         elif AMFIRegistryLive.CATEGORY_HEADER.match(line):
             category = line
         elif ";" not in line:
@@ -719,10 +768,11 @@ def _selftest_navall() -> None:
     assert not AMFIRegistryLive.CATEGORY_HEADER.match("IL&FS Mutual Fund (IDF)")
     assert not AMFIRegistryLive.CATEGORY_HEADER.match("Alpha Mutual Fund")
     assert AMFIRegistryLive.CATEGORY_HEADER.match("Open Ended Schemes(Equity Scheme - ELSS)")
-    assert AMFIRegistryLive.CATEGORY_HEADER.match(
-        "Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)")
-    print("[selftest] NAVAll: paren-bearing AMC banner read as AMC (not category); "
-          "following AMCs keep their real category — PASS")
+    assert AMFIRegistryLive.CATEGORY_HEADER.match("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)")
+    print(
+        "[selftest] NAVAll: paren-bearing AMC banner read as AMC (not category); "
+        "following AMCs keep their real category — PASS"
+    )
     _selftest_resolve()
     print("[selftest] PASS — mf_datasources NAVAll parsing + scheme resolution")
 
@@ -736,25 +786,30 @@ def _selftest_resolve() -> None:
     (2) A full name that is a token-SUBSET of a longer scheme resolved to the
     longer one, because the fallback took the first row it found.
     """
-    master = pd.DataFrame([
-        ("118510", "INF090I01JR0", "Franklin India Large & Mid Cap Fund - Direct - Growth"),
-        ("118509", "INF090I01JS8", "Franklin India Mid Cap Fund - Direct - Growth"),
-        ("151078", "INF209KB1ZH3", "Zeta Focused Fund - Direct Plan - Growth"),
-        ("151079", "INF209KB1ZH4", "Zeta Focused Fund - Regular Plan - IDCW"),
-    ], columns=["amfi_code", "isin", "scheme_name"])
+    master = pd.DataFrame(
+        [
+            ("118510", "INF090I01JR0", "Franklin India Large & Mid Cap Fund - Direct - Growth"),
+            ("118509", "INF090I01JS8", "Franklin India Mid Cap Fund - Direct - Growth"),
+            ("151078", "INF209KB1ZH3", "Zeta Focused Fund - Direct Plan - Growth"),
+            ("151079", "INF209KB1ZH4", "Zeta Focused Fund - Regular Plan - IDCW"),
+        ],
+        columns=["amfi_code", "isin", "scheme_name"],
+    )
 
     class _Stub(AMFIRegistryLive):
         def master(self):  # noqa: D102 — no network, no cache
             return master
 
     reg = _Stub()
-    assert reg.resolve("151078")["scheme_name"].startswith("Zeta"), \
+    assert reg.resolve("151078")["scheme_name"].startswith("Zeta"), (
         "FAIL: a bare AMFI code must resolve — it is the key candidates are enumerated by"
+    )
     assert reg.resolve("118509")["amfi_code"] == "118509"
     assert reg.resolve("INF209KB1ZH3")["amfi_code"] == "151078", "FAIL: ISIN lookup regressed"
     # The subset collision: the full Mid Cap name must not land on Large & Mid Cap.
-    assert reg.resolve("Franklin India Mid Cap Fund - Direct - Growth")["amfi_code"] == "118509", \
+    assert reg.resolve("Franklin India Mid Cap Fund - Direct - Growth")["amfi_code"] == "118509", (
         "FAIL: exact name lost to the token-subset fallback"
+    )
     # A genuine fragment still works, and still prefers DIRECT+GROWTH over IDCW.
     assert reg.resolve("Zeta Focused")["amfi_code"] == "151078"
     assert reg.resolve("no such fund") is None
@@ -763,6 +818,7 @@ def _selftest_resolve() -> None:
 
 if __name__ == "__main__":
     import argparse
+
     ap = argparse.ArgumentParser(description="mf_datasources checks")
     ap.add_argument("--selftest", action="store_true")
     ap.parse_args()

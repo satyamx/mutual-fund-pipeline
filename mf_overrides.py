@@ -65,12 +65,21 @@ ALLOWED_COLUMNS = REQUIRED_COLUMNS + VALUE_COLUMNS + META_COLUMNS
 # Columns that would let the file dictate an OUTPUT rather than supply an input.
 # Named explicitly so the error message can say why, instead of "unknown column".
 _FORBIDDEN_COLUMNS = {
-    "label", "y_cohort_q1", "y", "target", "probability", "prob", "score",
-    "verdict", "verdict_color", "cohort_percentile", "rank",
+    "label",
+    "y_cohort_q1",
+    "y",
+    "target",
+    "probability",
+    "prob",
+    "score",
+    "verdict",
+    "verdict_color",
+    "cohort_percentile",
+    "rank",
 }
 
-SEVERITY_ERROR = "ERROR"      # override is DROPPED — never applied
-SEVERITY_WARN = "WARN"        # applied, but surfaced
+SEVERITY_ERROR = "ERROR"  # override is DROPPED — never applied
+SEVERITY_WARN = "WARN"  # applied, but surfaced
 
 
 @dataclass(frozen=True)
@@ -100,8 +109,9 @@ def _clean(v) -> Optional[str]:
     return s or None
 
 
-def validate(frame: pd.DataFrame, trained_categories: Set[str],
-             known_sectors: Set[str]) -> tuple[Dict[str, Override], List[Issue]]:
+def validate(
+    frame: pd.DataFrame, trained_categories: Set[str], known_sectors: Set[str]
+) -> tuple[Dict[str, Override], List[Issue]]:
     """Pure validation. Returns (accepted overrides, issues).
 
     Rows with an ERROR are dropped, never partially applied — a half-accepted row
@@ -116,16 +126,26 @@ def validate(frame: pd.DataFrame, trained_categories: Set[str],
     cols = {str(c).strip().lower() for c in frame.columns}
     forbidden = cols & _FORBIDDEN_COLUMNS
     if forbidden:
-        issues.append(Issue(None, SEVERITY_ERROR,
-                            f"columns {sorted(forbidden)} would let this file set an OUTPUT "
-                            "(a label/score/verdict). Overrides supply inputs only — "
-                            "category and sector. Whole file rejected."))
+        issues.append(
+            Issue(
+                None,
+                SEVERITY_ERROR,
+                f"columns {sorted(forbidden)} would let this file set an OUTPUT "
+                "(a label/score/verdict). Overrides supply inputs only — "
+                "category and sector. Whole file rejected.",
+            )
+        )
         return {}, issues
     unknown = cols - set(ALLOWED_COLUMNS)
     if unknown:
-        issues.append(Issue(None, SEVERITY_ERROR,
-                            f"unknown columns {sorted(unknown)}; allowed: {list(ALLOWED_COLUMNS)}. "
-                            "Whole file rejected rather than silently ignoring them."))
+        issues.append(
+            Issue(
+                None,
+                SEVERITY_ERROR,
+                f"unknown columns {sorted(unknown)}; allowed: {list(ALLOWED_COLUMNS)}. "
+                "Whole file rejected rather than silently ignoring them.",
+            )
+        )
         return {}, issues
     if "amfi_code" not in cols:
         issues.append(Issue(None, SEVERITY_ERROR, "missing required column 'amfi_code'"))
@@ -152,36 +172,57 @@ def validate(frame: pd.DataFrame, trained_categories: Set[str],
             issues.append(Issue(code, SEVERITY_ERROR, "row sets neither category nor sector — dropped"))
             continue
         if category is not None and category not in trained_categories:
-            issues.append(Issue(code, SEVERITY_ERROR,
-                                f"category {category!r} is not in the trained universe "
-                                f"({len(trained_categories)} categories). Hand-writing a fund into "
-                                "an untrained cohort would fabricate model coverage — dropped."))
+            issues.append(
+                Issue(
+                    code,
+                    SEVERITY_ERROR,
+                    f"category {category!r} is not in the trained universe "
+                    f"({len(trained_categories)} categories). Hand-writing a fund into "
+                    "an untrained cohort would fabricate model coverage — dropped.",
+                )
+            )
             continue
         if sector is not None and known_sectors and sector not in known_sectors:
             # WARN not ERROR: a genuinely new sector is legitimate, but a typo here
             # silently produces a one-member cohort that later fails as THIN_COHORT.
-            issues.append(Issue(code, SEVERITY_WARN,
-                                f"sector {sector!r} matches no sector already in the manifest. "
-                                "If this is a typo it will create a phantom one-member cohort; "
-                                f"known: {sorted(known_sectors)[:6]}..."))
+            issues.append(
+                Issue(
+                    code,
+                    SEVERITY_WARN,
+                    f"sector {sector!r} matches no sector already in the manifest. "
+                    "If this is a typo it will create a phantom one-member cohort; "
+                    f"known: {sorted(known_sectors)[:6]}...",
+                )
+            )
         if not source_url:
-            issues.append(Issue(code, SEVERITY_WARN,
-                                "no source_url — every curated row should be traceable to a real "
-                                "AMC factsheet/SID (same rule as managers.csv)"))
+            issues.append(
+                Issue(
+                    code,
+                    SEVERITY_WARN,
+                    "no source_url — every curated row should be traceable to a real "
+                    "AMC factsheet/SID (same rule as managers.csv)",
+                )
+            )
 
-        accepted[code] = Override(amfi_code=code, category=category, sector=sector,
-                                  source_url=source_url, note=_clean(raw.get("note")))
+        accepted[code] = Override(
+            amfi_code=code, category=category, sector=sector, source_url=source_url, note=_clean(raw.get("note"))
+        )
     return accepted, issues
 
 
-def load(path: Path = OVERRIDES_PATH, *, trained_categories: Optional[Set[str]] = None,
-         known_sectors: Optional[Set[str]] = None,
-         manifest: Optional[pd.DataFrame] = None) -> tuple[Dict[str, Override], List[Issue]]:
+def load(
+    path: Path = OVERRIDES_PATH,
+    *,
+    trained_categories: Optional[Set[str]] = None,
+    known_sectors: Optional[Set[str]] = None,
+    manifest: Optional[pd.DataFrame] = None,
+) -> tuple[Dict[str, Override], List[Issue]]:
     """Read + validate the overrides file. Absent file is normal, not an error."""
     if manifest is not None:
         trained_categories = trained_categories or {str(c) for c in manifest["category"].dropna().unique()}
-        known_sectors = known_sectors if known_sectors is not None else {
-            str(s) for s in manifest["sector"].dropna().unique()}
+        known_sectors = (
+            known_sectors if known_sectors is not None else {str(s) for s in manifest["sector"].dropna().unique()}
+        )
     if not Path(path).exists():
         return {}, []
     try:
@@ -195,11 +236,15 @@ def _selftest() -> None:
     trained = {"Flexi Cap", "Large Cap", "Sectoral/Thematic"}
     sectors = {"Banking/Financials", "Technology", "Pharma"}
 
-    def frame(rows): return pd.DataFrame(rows)
+    def frame(rows):
+        return pd.DataFrame(rows)
 
     # 1. A good row is accepted.
-    ok, issues = validate(frame([dict(amfi_code="100001", sector="Technology",
-                                      source_url="https://amc.example/sid.pdf")]), trained, sectors)
+    ok, issues = validate(
+        frame([dict(amfi_code="100001", sector="Technology", source_url="https://amc.example/sid.pdf")]),
+        trained,
+        sectors,
+    )
     assert list(ok) == ["100001"] and ok["100001"].sector == "Technology"
     assert not [i for i in issues if i.severity == SEVERITY_ERROR], issues
     print("[selftest] a sourced sector override is accepted — PASS")
@@ -212,14 +257,14 @@ def _selftest() -> None:
     print("[selftest] overrides that set a label/score/verdict are rejected wholesale — PASS")
 
     # 3. Cannot hand-write a fund into an UNTRAINED cohort.
-    ok, issues = validate(frame([dict(amfi_code="100002", category="Dividend Yield",
-                                      source_url="u")]), trained, sectors)
+    ok, issues = validate(
+        frame([dict(amfi_code="100002", category="Dividend Yield", source_url="u")]), trained, sectors
+    )
     assert ok == {} and any("not in the trained universe" in i.message for i in issues)
     print("[selftest] category outside the trained set is refused — PASS")
 
     # 4. A typo'd sector WARNs (would otherwise become a silent one-member cohort).
-    ok, issues = validate(frame([dict(amfi_code="100003", sector="Tecnology", source_url="u")]),
-                          trained, sectors)
+    ok, issues = validate(frame([dict(amfi_code="100003", sector="Tecnology", source_url="u")]), trained, sectors)
     assert "100003" in ok, "a novel sector is legitimate — must not be dropped"
     assert any(i.severity == SEVERITY_WARN and "phantom" in i.message for i in issues)
     print("[selftest] unrecognised sector warns about phantom cohorts, still applies — PASS")
@@ -227,9 +272,16 @@ def _selftest() -> None:
     # 5. Unsourced row warns; duplicate codes drop BOTH (order-independence).
     ok, issues = validate(frame([dict(amfi_code="100004", sector="Pharma")]), trained, sectors)
     assert "100004" in ok and any("source_url" in i.message for i in issues)
-    ok, issues = validate(frame([dict(amfi_code="1", sector="Pharma", source_url="u"),
-                                 dict(amfi_code="1", sector="Technology", source_url="u")]),
-                          trained, sectors)
+    ok, issues = validate(
+        frame(
+            [
+                dict(amfi_code="1", sector="Pharma", source_url="u"),
+                dict(amfi_code="1", sector="Technology", source_url="u"),
+            ]
+        ),
+        trained,
+        sectors,
+    )
     assert ok == {} and any("duplicate" in i.message for i in issues), ok
     print("[selftest] unsourced row warns; duplicate amfi_code drops both — PASS")
 
@@ -240,13 +292,25 @@ def _selftest() -> None:
     ok, issues = validate(frame([dict(amfi_code="1", source_url="u")]), trained, sectors)
     assert ok == {} and any("neither category nor sector" in i.message for i in issues)
     # A missing file is normal, never an error.
-    assert load(Path("overrides/__definitely_absent__.csv"), trained_categories=trained,
-                known_sectors=sectors) == ({}, [])
+    assert load(Path("overrides/__definitely_absent__.csv"), trained_categories=trained, known_sectors=sectors) == (
+        {},
+        [],
+    )
     print("[selftest] unknown column rejected, empty row dropped, absent file is not an error — PASS")
 
     # ---- sector proposer -----------------------------------------------------------
-    amcs = {"quant", "Bajaj Finserv", "Quantum", "Nippon India", "Aditya Birla Sun Life",
-            "Tata", "ICICI Prudential", "Kotak", "SBI", "Baroda BNP Paribas"}
+    amcs = {
+        "quant",
+        "Bajaj Finserv",
+        "Quantum",
+        "Nippon India",
+        "Aditya Birla Sun Life",
+        "Tata",
+        "ICICI Prudential",
+        "Kotak",
+        "SBI",
+        "Baroda BNP Paribas",
+    }
 
     # THE TRAP THIS EXISTS FOR: `quant` is an AMC, not a sector claim. Every one of
     # these would be mislabeled `Quant` by a plain keyword scan.
@@ -264,9 +328,14 @@ def _selftest() -> None:
     assert propose_sector("Quantum Ethical Fund", amcs)[0] is None
 
     # A strategy name is NOT a sector, even when it contains sector-ish words.
-    for nm in ("ICICI Prudential Innovation Fund", "Kotak Active Momentum Fund",
-               "SBI Quality Fund", "Baroda BNP Paribas Multi-Factor Fund",
-               "Nippon India Japan Equity Fund", "Tata Ethical Fund"):
+    for nm in (
+        "ICICI Prudential Innovation Fund",
+        "Kotak Active Momentum Fund",
+        "SBI Quality Fund",
+        "Baroda BNP Paribas Multi-Factor Fund",
+        "Nippon India Japan Equity Fund",
+        "Tata Ethical Fund",
+    ):
         sec, _, why = propose_sector(nm, amcs)
         assert sec is None and why, f"{nm} should be left for a human"
     # ...specifically: an ethical/Shariah screen must not be filed under the ESG sector.
@@ -291,11 +360,13 @@ def _selftest() -> None:
     # THE 24-FUND REGRESSION, locked. A bare `services` marker swallowed every
     # "Banking and Financial Services" fund — the largest clean group in the worklist —
     # and the first real run proposed exactly ONE financials fund out of 25.
-    for nm in ("HDFC Banking & Financial Services Fund - Growth Option",
-               "Canara Robeco Banking and Financials Services Fund - Direct",   # AMFI's own spelling
-               "Motilal Oswal Financial Services Fund- Direct Growth",
-               "Edelweiss Financial Services Fund - Direct Plan - Growth",
-               "quant BFSI Fund - Growth Option - Direct Plan"):
+    for nm in (
+        "HDFC Banking & Financial Services Fund - Growth Option",
+        "Canara Robeco Banking and Financials Services Fund - Direct",  # AMFI's own spelling
+        "Motilal Oswal Financial Services Fund- Direct Growth",
+        "Edelweiss Financial Services Fund - Direct Plan - Growth",
+        "quant BFSI Fund - Growth Option - Direct Plan",
+    ):
         assert propose_sector(nm, amcs)[0] == "Banking/Financial Services", nm
     # ...while a STANDALONE services mandate is still correctly left for the human.
     for nm in ("Kotak Services Fund", "Axis Services Opportunities Fund - Direct Plan"):
@@ -306,7 +377,10 @@ def _selftest() -> None:
     # manifest scheme, and cutting at the first 'Growth' would leave 'Nippon India'.
     assert normalize_scheme_name("Nippon India Growth Mid Cap Fund") == "Nippon India Growth Mid Cap Fund"
     assert normalize_scheme_name("Kotak Energy Opportunities Fund-Direct-Growth") == "Kotak Energy Opportunities Fund"
-    assert normalize_scheme_name("SBI CONSUMPTION OPPORTUNITIES FUND - DIRECT PLAN - GROWTH") == "SBI CONSUMPTION OPPORTUNITIES FUND"
+    assert (
+        normalize_scheme_name("SBI CONSUMPTION OPPORTUNITIES FUND - DIRECT PLAN - GROWTH")
+        == "SBI CONSUMPTION OPPORTUNITIES FUND"
+    )
     # An 'Opportunities' name that DOES name a sector keeps its sector; only the
     # contentless 'Special Opportunities' is withheld.
     assert propose_sector("SBI CONSUMPTION OPPORTUNITIES FUND - DIRECT PLAN - GROWTH", amcs)[0] == "FMCG/Consumption"
@@ -322,8 +396,10 @@ def _selftest() -> None:
     # Quant sector — the boundary does the work of two lookaheads.
     assert propose_sector("quant Quantamental Fund - Growth Option", amcs)[0] is None
     assert propose_sector("Quantum India ESG Equity Fund", amcs)[0] == "ESG"
-    print("[selftest] sector proposer: AMC prefixes stripped before matching (quant/"
-          "Finserv/Quantum traps held), strategy names refused a sector — PASS")
+    print(
+        "[selftest] sector proposer: AMC prefixes stripped before matching (quant/"
+        "Finserv/Quantum traps held), strategy names refused a sector — PASS"
+    )
 
     print("[selftest] PASS — mf_overrides accepts curated inputs and refuses curated ANSWERS")
 
@@ -412,9 +488,10 @@ _STRATEGY_MARKERS: tuple[tuple[str, str], ...] = (
     # commodity funds — the wrong-peer-group failure this module exists to prevent,
     # arrived at politely. Whether a global mandate may join a domestic cohort is a
     # human's call, so it goes in the human's pile.
-    (r"international|global|asian|japan|taiwan|\bus\b|china|europe",
-     "non-domestic mandate — a global sleeve does not belong in a domestic sector "
-     "cohort even when it names one"),
+    (
+        r"international|global|asian|japan|taiwan|\bus\b|china|europe",
+        "non-domestic mandate — a global sleeve does not belong in a domestic sector cohort even when it names one",
+    ),
     (r"rural", "rural theme — spans several sectors"),
     # THE 24-FUND BUG. A bare `services` also matches "Banking and Financial Services",
     # so every one of the 24 financials funds — the single largest clean group in the
@@ -432,9 +509,9 @@ _STRATEGY_MARKERS: tuple[tuple[str, str], ...] = (
 class Proposal:
     amfi_code: str
     scheme_name: str
-    sector: Optional[str]          # None = deliberately left for the human
-    matched_on: Optional[str]      # the token that fired, so the call is auditable
-    reason: Optional[str]          # why it was left blank, when sector is None
+    sector: Optional[str]  # None = deliberately left for the human
+    matched_on: Optional[str]  # the token that fired, so the call is auditable
+    reason: Optional[str]  # why it was left blank, when sector is None
 
 
 def normalize_scheme_name(scheme_name: str) -> str:
@@ -445,13 +522,13 @@ def normalize_scheme_name(scheme_name: str) -> str:
     naive cut at the first option keyword would truncate it to 'Nippon India'. Matching
     on the tail-free name is what lets a rule anchor on the end of a name at all."""
     import re as _re
+
     s = " ".join(str(scheme_name).split())
     m = _re.search(r"\bfund\b", s, _re.IGNORECASE)
     if not m:
         return s
-    head, tail = s[: m.end()], s[m.end():]
-    cut = _re.search(r"(?i)\b(direct|regular|growth|idcw|dividend|cumulative|payout|reinvest)",
-                     tail)
+    head, tail = s[: m.end()], s[m.end() :]
+    cut = _re.search(r"(?i)\b(direct|regular|growth|idcw|dividend|cumulative|payout|reinvest)", tail)
     if cut:
         tail = tail[: cut.start()]
     return (head + tail).strip(" -–—,")
@@ -467,17 +544,18 @@ def strip_amc_prefix(scheme_name: str, amc_prefixes: Set[str]) -> str:
     for pref in sorted(amc_prefixes, key=len, reverse=True):
         p = pref.lower().strip()
         if p and low.startswith(p):
-            return s[len(pref):].lstrip(" -–—")
+            return s[len(pref) :].lstrip(" -–—")
     return s
 
 
 def propose_sector(scheme_name: str, amc_prefixes: Set[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """(sector, matched_on, reason). Pure — no I/O, so the selftest can pin the traps."""
     import re as _re
+
     body = strip_amc_prefix(normalize_scheme_name(scheme_name), amc_prefixes).lower()
-    for pattern, why in _STRATEGY_MARKERS:          # strategy check FIRST: a strategy
-        if _re.search(pattern, body):               # name that happens to contain a
-            return None, None, why                  # sector word is still a strategy
+    for pattern, why in _STRATEGY_MARKERS:  # strategy check FIRST: a strategy
+        if _re.search(pattern, body):  # name that happens to contain a
+            return None, None, why  # sector word is still a strategy
     for pattern, sector in SECTOR_RULES:
         m = _re.search(pattern, body)
         if m:
@@ -498,11 +576,31 @@ def _amc_prefixes(manifest: "pd.DataFrame") -> Set[str]:
         if base:
             out.add(base.strip())
     # Scheme names use trading names the `amc` column spells differently.
-    out.update({"Kotak", "Franklin India", "Franklin", "LIC MF", "Jio BlackRock",
-                "JioBlackRock", "Invesco India", "Mirae Asset", "Baroda BNP Paribas",
-                "Canara Robeco", "Bank of India", "The Wealth Company", "360 ONE",
-                "Aditya Birla Sun Life", "Motilal Oswal", "Nippon India", "quant",
-                "WhiteOak Capital", "Mahindra Manulife", "Bajaj Finserv", "PGIM India"})
+    out.update(
+        {
+            "Kotak",
+            "Franklin India",
+            "Franklin",
+            "LIC MF",
+            "Jio BlackRock",
+            "JioBlackRock",
+            "Invesco India",
+            "Mirae Asset",
+            "Baroda BNP Paribas",
+            "Canara Robeco",
+            "Bank of India",
+            "The Wealth Company",
+            "360 ONE",
+            "Aditya Birla Sun Life",
+            "Motilal Oswal",
+            "Nippon India",
+            "quant",
+            "WhiteOak Capital",
+            "Mahindra Manulife",
+            "Bajaj Finserv",
+            "PGIM India",
+        }
+    )
     return out
 
 
@@ -512,6 +610,7 @@ def _propose(worklist: Path, out_path: Optional[Path]) -> None:
     Reads the git-tracked worklist rather than re-deriving from mf_cache/amfi_master
     (as --gaps does) so it runs on a cold checkout with no fetched data."""
     import mf_labels
+
     manifest = mf_labels.load_manifest()
     known = {str(s).strip() for s in manifest["sector"].dropna() if str(s).strip()}
     amcs = _amc_prefixes(manifest)
@@ -554,16 +653,25 @@ def _propose(worklist: Path, out_path: Optional[Path]) -> None:
 
     if out_path is not None:
         if out_path.resolve() == OVERRIDES_PATH.resolve():
-            raise SystemExit(f"refusing to write proposals over the curated overrides "
-                             f"file ({OVERRIDES_PATH}) — these are SUGGESTIONS, not curation")
+            raise SystemExit(
+                f"refusing to write proposals over the curated overrides "
+                f"file ({OVERRIDES_PATH}) — these are SUGGESTIONS, not curation"
+            )
         with out_path.open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["amfi_code", "category", "proposed_sector", "matched_on",
-                        "needs_human", "reason", "note"])
+            w.writerow(["amfi_code", "category", "proposed_sector", "matched_on", "needs_human", "reason", "note"])
             for p in proposals:
-                w.writerow([p.amfi_code, "Sectoral/Thematic", p.sector or "",
-                            p.matched_on or "", "" if p.sector else "YES",
-                            p.reason or "", p.scheme_name])
+                w.writerow(
+                    [
+                        p.amfi_code,
+                        "Sectoral/Thematic",
+                        p.sector or "",
+                        p.matched_on or "",
+                        "" if p.sector else "YES",
+                        p.reason or "",
+                        p.scheme_name,
+                    ]
+                )
         print(f"\nwrote {len(proposals)} proposal(s) to {out_path}")
         print("REVIEW REQUIRED. These are suggestions read off the scheme name, not curation.")
         print(f"Accepted rows go to {OVERRIDES_PATH} with a real source_url, then --validate.")
@@ -576,7 +684,9 @@ def _gaps(out_path: Optional[Path] = None) -> None:
     the 10-row console preview. The preview is fine for "how bad is it"; it is useless
     as a work surface, and this is the single biggest hand-curation task in the project
     (204 funds), so it needs to leave the terminal."""
-    import mf_labels, mf_universe as U
+    import mf_labels
+    import mf_universe as U
+
     manifest = mf_labels.load_manifest()
     trained = U.trained_categories(manifest)
     master = pd.read_parquet("mf_cache/amfi_master.parquet")
@@ -611,8 +721,10 @@ def _gaps(out_path: Optional[Path] = None) -> None:
         # work and a skeleton dump would silently erase it (same reasoning that keeps
         # this whole directory out of mf_cache/).
         if out_path.resolve() == OVERRIDES_PATH.resolve():
-            raise SystemExit(f"refusing to overwrite the curated overrides file "
-                             f"({OVERRIDES_PATH}) with a blank skeleton — pick another --out path")
+            raise SystemExit(
+                f"refusing to overwrite the curated overrides file "
+                f"({OVERRIDES_PATH}) with a blank skeleton — pick another --out path"
+            )
         with out_path.open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["amfi_code", "category", "sector", "source_url", "note"])
@@ -622,8 +734,10 @@ def _gaps(out_path: Optional[Path] = None) -> None:
                 # against exactly that peer group.
                 w.writerow([code, "Sectoral/Thematic", "", "", name])
         print(f"\nwrote {len(todo)} row(s) to {out_path}")
-        print("fill the `sector` column (reuse an existing sector where one fits — a new "
-              "one-member sector is below COHORT_MIN_SIZE and fails later as THIN_COHORT),")
+        print(
+            "fill the `sector` column (reuse an existing sector where one fits — a new "
+            "one-member sector is below COHORT_MIN_SIZE and fails later as THIN_COHORT),"
+        )
         print(f"then append the filled rows to {OVERRIDES_PATH} and run --validate")
         known = sorted({s for s in manifest["sector"].dropna().astype(str) if s.strip()})
         print(f"\nsectors already in use ({len(known)}): {', '.join(known)}")
@@ -638,16 +752,27 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--gaps", action="store_true", help="show what is blocked and what to curate")
-    ap.add_argument("--out", type=Path, default=None,
-                    help="with --gaps: write EVERY blocked fund to this CSV as a "
-                         "ready-to-edit skeleton, instead of the 10-row console preview")
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="with --gaps: write EVERY blocked fund to this CSV as a "
+        "ready-to-edit skeleton, instead of the 10-row console preview",
+    )
     ap.add_argument("--validate", action="store_true", help="validate the real overrides file")
-    ap.add_argument("--propose", action="store_true",
-                    help="SUGGEST a sector for each blocked fund by reading its scheme "
-                         "name, with the matched token as evidence. Writes suggestions "
-                         "to --out for human review; never touches the curated file.")
-    ap.add_argument("--worklist", type=Path, default=Path("overrides/_sector_worklist.csv"),
-                    help="with --propose: the blocked-fund worklist to read")
+    ap.add_argument(
+        "--propose",
+        action="store_true",
+        help="SUGGEST a sector for each blocked fund by reading its scheme "
+        "name, with the matched token as evidence. Writes suggestions "
+        "to --out for human review; never touches the curated file.",
+    )
+    ap.add_argument(
+        "--worklist",
+        type=Path,
+        default=Path("overrides/_sector_worklist.csv"),
+        help="with --propose: the blocked-fund worklist to read",
+    )
     a = ap.parse_args()
     if a.propose:
         _propose(a.worklist, a.out)
@@ -655,11 +780,14 @@ if __name__ == "__main__":
         _gaps(a.out)
     elif a.validate:
         import mf_labels
+
         _have, _issues = load(manifest=mf_labels.load_manifest())
         for i in _issues:
             print(f"  {i}")
-        print(f"{len(_have)} valid override(s); "
-              f"{sum(1 for i in _issues if i.severity == SEVERITY_ERROR)} error(s), "
-              f"{sum(1 for i in _issues if i.severity == SEVERITY_WARN)} warning(s)")
+        print(
+            f"{len(_have)} valid override(s); "
+            f"{sum(1 for i in _issues if i.severity == SEVERITY_ERROR)} error(s), "
+            f"{sum(1 for i in _issues if i.severity == SEVERITY_WARN)} warning(s)"
+        )
     else:
         _selftest()

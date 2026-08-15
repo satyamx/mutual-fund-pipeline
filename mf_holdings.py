@@ -72,6 +72,7 @@ _EQUITY = "equity"
 class HoldingsFacts:
     """Deterministic portfolio-structure facts from one disclosure snapshot. Every
     numeric field is None when `available` is False — never a fabricated zero."""
+
     available: bool
     n_equity: int = 0
     equity_weight: Optional[float] = None
@@ -106,19 +107,21 @@ def analyze(holdings: Optional[pd.DataFrame], available: bool = True) -> Holding
         return HoldingsFacts(
             available=False,
             note="NOT AVAILABLE — no portfolio holdings disclosure on file "
-                 "(mf_cache/disclosures/<code>_<YYYY-MM>.csv). Concentration screen "
-                 "and single-issuer check NOT EVALUATED (absence of evidence, not a pass).")
+            "(mf_cache/disclosures/<code>_<YYYY-MM>.csv). Concentration screen "
+            "and single-issuer check NOT EVALUATED (absence of evidence, not a pass).",
+        )
 
     eq = holdings[holdings["asset_type"] == _EQUITY].copy()
     eq = eq[pd.to_numeric(eq["weight"], errors="coerce").notna()]
     if eq.empty:
         return HoldingsFacts(
-            available=True, n_equity=0,
+            available=True,
+            n_equity=0,
             equity_weight=0.0,
             cash_weight=_sum_weight(holdings, "cash"),
             debt_weight=_sum_weight(holdings, "debt"),
-            note="Disclosure on file but no equity sleeve — concentration screen N/A "
-                 "for a non-equity book.")
+            note="Disclosure on file but no equity sleeve — concentration screen N/A for a non-equity book.",
+        )
 
     w = eq["weight"].astype(float)
     ordered = w.sort_values(ascending=False)
@@ -126,13 +129,13 @@ def analyze(holdings: Optional[pd.DataFrame], available: bool = True) -> Holding
 
     # effective_n over the renormalised equity book (independent of the cash drag)
     p = w / equity_weight
-    hhi = float((p ** 2).sum())
+    hhi = float((p**2).sum())
     effective_n = float(1.0 / hhi) if hhi > 0 else None
 
     top10_weight = float(ordered.head(10).sum())
-    concentration_score = float(np.clip(
-        (TOP10_CONCENTRATED - top10_weight) / (TOP10_CONCENTRATED - TOP10_DIVERSIFIED),
-        0.0, 1.0))
+    concentration_score = float(
+        np.clip((TOP10_CONCENTRATED - top10_weight) / (TOP10_CONCENTRATED - TOP10_DIVERSIFIED), 0.0, 1.0)
+    )
 
     # sector concentration (sector may be absent in a sparse CSV — degrade to None)
     top_sector = top_sector_weight = None
@@ -142,8 +145,7 @@ def analyze(holdings: Optional[pd.DataFrame], available: bool = True) -> Holding
             top_sector = str(sec.index[0])
             top_sector_weight = float(sec.iloc[0])
 
-    breaches = [(str(n), float(v)) for n, v in ordered.items()
-                if v > SEBI_SINGLE_ISSUER_CAP + 1e-9]
+    breaches = [(str(n), float(v)) for n, v in ordered.items() if v > SEBI_SINGLE_ISSUER_CAP + 1e-9]
 
     return HoldingsFacts(
         available=True,
@@ -160,7 +162,8 @@ def analyze(holdings: Optional[pd.DataFrame], available: bool = True) -> Holding
         top_sector_weight=top_sector_weight,
         single_issuer_breaches=breaches,
         concentration_score=concentration_score,
-        note="")
+        note="",
+    )
 
 
 def single_issuer_findings(facts: HoldingsFacts) -> List[Tuple[str, bool, str]]:
@@ -172,13 +175,21 @@ def single_issuer_findings(facts: HoldingsFacts) -> List[Tuple[str, bool, str]]:
     if not facts.available or facts.n_equity == 0:
         return []
     if not facts.single_issuer_breaches:
-        return [("single_issuer<=10%", True,
-                 f"max single equity issuer {facts.top1_weight:.1%} "
-                 f"({facts.top1_name}) within SEBI 10% ceiling")]
+        return [
+            (
+                "single_issuer<=10%",
+                True,
+                f"max single equity issuer {facts.top1_weight:.1%} ({facts.top1_name}) within SEBI 10% ceiling",
+            )
+        ]
     listed = ", ".join(f"{n} {v:.1%}" for n, v in facts.single_issuer_breaches[:5])
-    return [("single_issuer<=10%", False,
-             f"{len(facts.single_issuer_breaches)} equity issuer(s) over SEBI's 10% "
-             f"ceiling: {listed}")]
+    return [
+        (
+            "single_issuer<=10%",
+            False,
+            f"{len(facts.single_issuer_breaches)} equity issuer(s) over SEBI's 10% ceiling: {listed}",
+        )
+    ]
 
 
 # ==============================================================================
@@ -193,15 +204,23 @@ def _frame(rows: List[dict]) -> pd.DataFrame:
 def _selftest() -> None:
     # 1) DIVERSIFIED book: 20 equal-ish equity names + cash -> green screen, no breach
     div = _frame(
-        [dict(name=f"S{i:02d}", weight=0.048, asset_type="equity",
-              sector=["Financials", "IT", "Pharma", "Auto"][i % 4], cap_band="large")
-         for i in range(20)]
-        + [dict(name="CASH", weight=0.04, asset_type="cash", sector="Cash", cap_band="cash")])
+        [
+            dict(
+                name=f"S{i:02d}",
+                weight=0.048,
+                asset_type="equity",
+                sector=["Financials", "IT", "Pharma", "Auto"][i % 4],
+                cap_band="large",
+            )
+            for i in range(20)
+        ]
+        + [dict(name="CASH", weight=0.04, asset_type="cash", sector="Cash", cap_band="cash")]
+    )
     f = analyze(div)
     assert f.available and f.n_equity == 20
     assert abs(f.top10_weight - 0.48) < 1e-6, f.top10_weight
     assert not f.single_issuer_breaches
-    assert 18 < f.effective_n <= 20 + 1e-6, f.effective_n   # ~equal-weight -> ~N
+    assert 18 < f.effective_n <= 20 + 1e-6, f.effective_n  # ~equal-weight -> ~N
     # top10 0.48 sits just inside the amber band (0.45..0.65)
     assert 0 < f.concentration_score < 1, f.concentration_score
     assert single_issuer_findings(f)[0][1] is True
@@ -209,9 +228,9 @@ def _selftest() -> None:
     # 2) CONCENTRATED book: one 22% position -> red screen + SEBI breach
     conc = _frame(
         [dict(name="MEGA", weight=0.22, asset_type="equity", sector="IT", cap_band="large")]
-        + [dict(name=f"T{i:02d}", weight=0.06, asset_type="equity",
-                sector="IT", cap_band="large") for i in range(12)]
-        + [dict(name="CASH", weight=0.06, asset_type="cash", sector="Cash", cap_band="cash")])
+        + [dict(name=f"T{i:02d}", weight=0.06, asset_type="equity", sector="IT", cap_band="large") for i in range(12)]
+        + [dict(name="CASH", weight=0.06, asset_type="cash", sector="Cash", cap_band="cash")]
+    )
     f = analyze(conc)
     assert f.top1_name == "MEGA" and abs(f.top1_weight - 0.22) < 1e-9
     assert f.single_issuer_breaches and f.single_issuer_breaches[0][0] == "MEGA"
@@ -233,15 +252,17 @@ def _selftest() -> None:
     assert f.available is False and f.top10_weight is None
 
     # 5) debt-only book: equity sleeve empty -> N/A screen, not a fake green
-    debt = _frame([dict(name="GSEC", weight=0.9, asset_type="debt", sector="Sovereign",
-                        cap_band=None),
-                   dict(name="CASH", weight=0.1, asset_type="cash", sector="Cash", cap_band="cash")])
+    debt = _frame(
+        [
+            dict(name="GSEC", weight=0.9, asset_type="debt", sector="Sovereign", cap_band=None),
+            dict(name="CASH", weight=0.1, asset_type="cash", sector="Cash", cap_band="cash"),
+        ]
+    )
     f = analyze(debt)
     assert f.available and f.n_equity == 0 and f.concentration_score is None
     assert abs(f.debt_weight - 0.9) < 1e-9
 
-    print("mf_holdings selftest: OK "
-          "(diversified/concentrated/unavailable/empty/debt-only all honest)")
+    print("mf_holdings selftest: OK (diversified/concentrated/unavailable/empty/debt-only all honest)")
 
 
 if __name__ == "__main__":

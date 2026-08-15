@@ -118,7 +118,8 @@ def _availability() -> pd.DataFrame:
             "No benchmark availability sheet at %s — every real-index lookup will "
             "report unavailable and fall back to the peer proxy. Benchmark-relative "
             "facts (excess_cagr_*) degrade to NOT AVAILABLE; they are never guessed.",
-            AVAILABILITY_CSV)
+            AVAILABILITY_CSV,
+        )
         return pd.DataFrame(columns=["benchmark_name", "source", "return_type"])
     return pd.read_csv(AVAILABILITY_CSV)
 
@@ -127,8 +128,7 @@ def _availability() -> pd.DataFrame:
 def _benchmark_meta() -> Dict[str, Dict[str, str]]:
     """benchmark_name -> {source, return_type}, from benchmark_availability.csv."""
     df = _availability()
-    return {r.benchmark_name: dict(source=r.source, return_type=r.return_type)
-            for r in df.itertuples()}
+    return {r.benchmark_name: dict(source=r.source, return_type=r.return_type) for r in df.itertuples()}
 
 
 @lru_cache(maxsize=32)
@@ -161,8 +161,9 @@ class ForwardReturn:
     yrs: float
 
 
-def _asof(series: pd.Series, target: pd.Timestamp, tol_days: int = 10
-          ) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
+def _asof(
+    series: pd.Series, target: pd.Timestamp, tol_days: int = 10
+) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
     """Last value on or before `target`, within `tol_days` calendar days."""
     pos = series.index.searchsorted(target, side="right") - 1
     if pos < 0:
@@ -173,8 +174,9 @@ def _asof(series: pd.Series, target: pd.Timestamp, tol_days: int = 10
     return d0, float(series.iloc[pos])
 
 
-def forward_return(series: pd.Series, t: pd.Timestamp, years: int = 3,
-                    tol_days: int = 10, min_yrs: float = 2.75) -> Optional[ForwardReturn]:
+def forward_return(
+    series: pd.Series, t: pd.Timestamp, years: int = 3, tol_days: int = 10, min_yrs: float = 2.75
+) -> Optional[ForwardReturn]:
     """Annualized forward return from `t` to `t + years`, per design §1.2:
     NAV0 = last value <= t (within tol_days); NAV1 = last value <= t+years
     (within tol_days); require yrs >= min_yrs; else None (no sample)."""
@@ -190,8 +192,7 @@ def forward_return(series: pd.Series, t: pd.Timestamp, years: int = 3,
     return ForwardReturn(value=(v1 / v0) ** (1.0 / yrs) - 1.0, d0=d0, d1=d1, yrs=yrs)
 
 
-def real_index_forward(name: Optional[str], t: pd.Timestamp
-                        ) -> Optional[Tuple[float, str]]:
+def real_index_forward(name: Optional[str], t: pd.Timestamp) -> Optional[Tuple[float, str]]:
     """(annualized_return, 'fund_nav'|'adj_pri') if `name`'s real-index series
     covers the [t, t+3y] window, else None."""
     if not name:
@@ -239,14 +240,15 @@ class PeerProxyResolver:
 
     def quality(self, code: str) -> str:
         kind = self._group_key(code)[0]
-        return {"category": "peer_category", "sector": "peer_sector",
-                "pooled_thematic": "pooled_fallback"}[kind]
+        return {"category": "peer_category", "sector": "peer_sector", "pooled_thematic": "pooled_fallback"}[kind]
 
-    def loo_median(self, code: str, t: pd.Timestamp, fwd_lookup: Dict[Tuple[str, pd.Timestamp], float]
-                    ) -> Tuple[Optional[float], int]:
+    def loo_median(
+        self, code: str, t: pd.Timestamp, fwd_lookup: Dict[Tuple[str, pd.Timestamp], float]
+    ) -> Tuple[Optional[float], int]:
         peers = self.groups[self._group_key(code)]
-        vals = [fwd_lookup[(p, t)] for p in peers
-                if p != code and (p, t) in fwd_lookup and not pd.isna(fwd_lookup[(p, t)])]
+        vals = [
+            fwd_lookup[(p, t)] for p in peers if p != code and (p, t) in fwd_lookup and not pd.isna(fwd_lookup[(p, t)])
+        ]
         if len(vals) < 2:
             return None, len(vals)
         return float(np.median(vals)), len(vals)
@@ -261,31 +263,36 @@ def _benchmark_name(category: str, sector: Optional[str]) -> Optional[str]:
     return CATEGORY_BENCHMARK.get(category)
 
 
-def resolve_hybrid(code: str, category: str, sector: Optional[str], t: pd.Timestamp,
-                    peer_resolver: PeerProxyResolver,
-                    fwd_lookup: Dict[Tuple[str, pd.Timestamp], float]) -> dict:
+def resolve_hybrid(
+    code: str,
+    category: str,
+    sector: Optional[str],
+    t: pd.Timestamp,
+    peer_resolver: PeerProxyResolver,
+    fwd_lookup: Dict[Tuple[str, pd.Timestamp], float],
+) -> dict:
     """(a) fund_nav -> (b) adj_pri -> (c) peer_proxy -> (d) none."""
     name = _benchmark_name(category, sector)
     real = real_index_forward(name, t)
     if real is not None:
         value, source = real
         quality = "fund_nav" if source == "fund_nav" else "adj_pri_addback"
-        return dict(benchmark_fwd=value, benchmark_source=source,
-                    benchmark_quality=quality, peer_n=None)
+        return dict(benchmark_fwd=value, benchmark_source=source, benchmark_quality=quality, peer_n=None)
     med, n = peer_resolver.loo_median(code, t, fwd_lookup)
     if med is None:
-        return dict(benchmark_fwd=np.nan, benchmark_source="none",
-                    benchmark_quality="no_benchmark", peer_n=n)
-    return dict(benchmark_fwd=med, benchmark_source="peer_proxy",
-                benchmark_quality=peer_resolver.quality(code), peer_n=n)
+        return dict(benchmark_fwd=np.nan, benchmark_source="none", benchmark_quality="no_benchmark", peer_n=n)
+    return dict(
+        benchmark_fwd=med, benchmark_source="peer_proxy", benchmark_quality=peer_resolver.quality(code), peer_n=n
+    )
 
 
-def resolve_pure_peer(code: str, t: pd.Timestamp, peer_resolver: PeerProxyResolver,
-                       fwd_lookup: Dict[Tuple[str, pd.Timestamp], float]) -> dict:
+def resolve_pure_peer(
+    code: str, t: pd.Timestamp, peer_resolver: PeerProxyResolver, fwd_lookup: Dict[Tuple[str, pd.Timestamp], float]
+) -> dict:
     """Original design default (§1.3): peer-proxy only, never a real index."""
     med, n = peer_resolver.loo_median(code, t, fwd_lookup)
     if med is None:
-        return dict(benchmark_fwd=np.nan, benchmark_source="none",
-                    benchmark_quality="no_benchmark", peer_n=n)
-    return dict(benchmark_fwd=med, benchmark_source="peer_proxy",
-                benchmark_quality=peer_resolver.quality(code), peer_n=n)
+        return dict(benchmark_fwd=np.nan, benchmark_source="none", benchmark_quality="no_benchmark", peer_n=n)
+    return dict(
+        benchmark_fwd=med, benchmark_source="peer_proxy", benchmark_quality=peer_resolver.quality(code), peer_n=n
+    )

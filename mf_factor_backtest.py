@@ -47,10 +47,14 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from mf_cv import cpcv_folds, causal_holdout
+from mf_cv import causal_holdout, cpcv_folds
 from mf_model import (
-    COHORT_TARGETS, OUT_DIR, load_cohort_dataset, pooled_auc,
-    within_anchor_rank_auc, decile_stats,
+    COHORT_TARGETS,
+    OUT_DIR,
+    decile_stats,
+    load_cohort_dataset,
+    pooled_auc,
+    within_anchor_rank_auc,
 )
 from mf_pipeline import ScoringEngine, SEBICategory
 
@@ -68,21 +72,21 @@ DEFAULT_WEIGHTS: Dict[str, float] = {m: w for m, (w, _) in EQUITY_FACTORS.items(
 # None = genuinely untestable with the data on hand (mf_cache/phase_b/features.parquet
 # has no liquidity/impact-cost or expense-ratio column) -- NOT proxied, NOT invented.
 FEATURE_MAP: Dict[str, Optional[str]] = {
-    "rr3y_mean":              "cagr_3y",
-    "rr5y_mean":              "cagr_5y",
-    "sortino":                "sortino_3y",
-    "info_ratio":             "ir_3y",
-    "alpha":                  "excess_3y",
-    "upside_capture":         "upcap_3y",
-    "downside_capture":       "downcap_3y",
-    "max_drawdown":           "max_dd_3y",     # stored negative; direction +1 already
-                                                # means "less negative wins" (matches
-                                                # mf_pipeline.py:915 comment)
-    "beta":                   "beta_3y",        # pipeline beta is vs the declared
-                                                # benchmark (full history); the feature
-                                                # is vs the LOO peer composite (3y) —
-                                                # closest available counterpart
-    "expense_ratio":          None,             # UNTESTABLE — no expense-ratio feature
+    "rr3y_mean": "cagr_3y",
+    "rr5y_mean": "cagr_5y",
+    "sortino": "sortino_3y",
+    "info_ratio": "ir_3y",
+    "alpha": "excess_3y",
+    "upside_capture": "upcap_3y",
+    "downside_capture": "downcap_3y",
+    "max_drawdown": "max_dd_3y",  # stored negative; direction +1 already
+    # means "less negative wins" (matches
+    # mf_pipeline.py:915 comment)
+    "beta": "beta_3y",  # pipeline beta is vs the declared
+    # benchmark (full history); the feature
+    # is vs the LOO peer composite (3y) —
+    # closest available counterpart
+    "expense_ratio": None,  # UNTESTABLE — no expense-ratio feature
 }
 
 TESTABLE_WEIGHT = sum(w for m, w in DEFAULT_WEIGHTS.items() if FEATURE_MAP[m])
@@ -118,8 +122,7 @@ def score(weights: Dict[str, float], df: pd.DataFrame) -> pd.Series:
     for metric, w in available.items():
         feat_col = FEATURE_MAP[metric]
         direction = DIRECTIONS[metric]
-        pct = df.groupby(grp_keys)[feat_col].transform(
-            lambda s: _percentile_rank(s, direction))
+        pct = df.groupby(grp_keys)[feat_col].transform(lambda s: _percentile_rank(s, direction))
         composite += (w / weight_sum) * pct
 
     grp = composite.groupby(grp_keys)
@@ -140,9 +143,14 @@ def _factor_block_metrics(anchors: np.ndarray, y: np.ndarray, p: np.ndarray) -> 
     dec = decile_stats(anchors, y, p)
     lift = dec["top_decile_precision"] / base if base > 0 else float("nan")
     return dict(
-        n=int(len(y)), base_rate=base, negatives=int((~y.astype(bool)).sum()),
-        pooled_auc=pooled_auc(y, p), rank_auc=rank, rank_auc_cohorts=n_cohorts,
-        top_decile_precision=dec["top_decile_precision"], lift_over_base=lift,
+        n=int(len(y)),
+        base_rate=base,
+        negatives=int((~y.astype(bool)).sum()),
+        pooled_auc=pooled_auc(y, p),
+        rank_auc=rank,
+        rank_auc_cohorts=n_cohorts,
+        top_decile_precision=dec["top_decile_precision"],
+        lift_over_base=lift,
         bottom_decile_neg_capture=dec["bottom_decile_neg_capture"],
         total_negatives=dec["total_negatives"],
     )
@@ -163,23 +171,17 @@ def evaluate(weights: Dict[str, float]) -> dict:
 
         cpcv_blocks = {}
         for block, _train, test in cpcv_folds(df["anchor"]):
-            cpcv_blocks[block] = _factor_block_metrics(
-                anchors_all[test], y_all[test], p_all[test])
+            cpcv_blocks[block] = _factor_block_metrics(anchors_all[test], y_all[test], p_all[test])
 
         _train_h, test_h = causal_holdout(df["anchor"])
-        holdout_m = _factor_block_metrics(
-            anchors_all[test_h], y_all[test_h], p_all[test_h])
+        holdout_m = _factor_block_metrics(anchors_all[test_h], y_all[test_h], p_all[test_h])
 
         results["targets"][tname] = dict(
             cpcv_blocks=cpcv_blocks,
-            cpcv_mean_pooled_auc=float(np.nanmean(
-                [m["pooled_auc"] for m in cpcv_blocks.values()])),
-            cpcv_mean_rank_auc=float(np.nanmean(
-                [m["rank_auc"] for m in cpcv_blocks.values()])),
-            cpcv_mean_lift=float(np.nanmean(
-                [m["lift_over_base"] for m in cpcv_blocks.values()])),
-            cpcv_mean_precision=float(np.nanmean(
-                [m["top_decile_precision"] for m in cpcv_blocks.values()])),
+            cpcv_mean_pooled_auc=float(np.nanmean([m["pooled_auc"] for m in cpcv_blocks.values()])),
+            cpcv_mean_rank_auc=float(np.nanmean([m["rank_auc"] for m in cpcv_blocks.values()])),
+            cpcv_mean_lift=float(np.nanmean([m["lift_over_base"] for m in cpcv_blocks.values()])),
+            cpcv_mean_precision=float(np.nanmean([m["top_decile_precision"] for m in cpcv_blocks.values()])),
             holdout=holdout_m,
         )
     return results
@@ -205,18 +207,31 @@ def _fmt(v, nd=3):
     return f"{v:.{nd}f}" if isinstance(v, float) else str(v)
 
 
-_METRIC_HEADER = ("| block | n | base rate | neg | pooled AUC | rank-AUC (cohorts) | "
-                   "prec@top-dec | lift | bottom-dec neg capture |\n"
-                   "|---|---|---|---|---|---|---|---|---|")
+_METRIC_HEADER = (
+    "| block | n | base rate | neg | pooled AUC | rank-AUC (cohorts) | "
+    "prec@top-dec | lift | bottom-dec neg capture |\n"
+    "|---|---|---|---|---|---|---|---|---|"
+)
 
 
 def _metric_row(block: str, m: dict) -> str:
-    return ("| " + " | ".join([
-        block, str(m["n"]), _fmt(m["base_rate"]), str(m["negatives"]),
-        _fmt(m["pooled_auc"]), f"{_fmt(m['rank_auc'])} ({m['rank_auc_cohorts']})",
-        _fmt(m["top_decile_precision"]), _fmt(m["lift_over_base"], 2),
-        _fmt(m["bottom_decile_neg_capture"]),
-    ]) + " |")
+    return (
+        "| "
+        + " | ".join(
+            [
+                block,
+                str(m["n"]),
+                _fmt(m["base_rate"]),
+                str(m["negatives"]),
+                _fmt(m["pooled_auc"]),
+                f"{_fmt(m['rank_auc'])} ({m['rank_auc_cohorts']})",
+                _fmt(m["top_decile_precision"]),
+                _fmt(m["lift_over_base"], 2),
+                _fmt(m["bottom_decile_neg_capture"]),
+            ]
+        )
+        + " |"
+    )
 
 
 def write_report(results: dict) -> str:
@@ -225,13 +240,15 @@ def write_report(results: dict) -> str:
 
     add("# Factor backtest baseline — current ScoringEngine EQUITY weights")
     add("")
-    add(f"Generated {datetime.now(timezone.utc).date()}. Measures how well the "
+    add(
+        f"Generated {datetime.now(timezone.utc).date()}. Measures how well the "
         "CURRENT ScoringEngine.FACTOR_MAP[EQUITY] weights (mf_pipeline.py:907-918) "
         "rank funds within their own peer cohort, on the same purged CPCV blocks "
         "and causal holdout mf_model.py uses for the fitted elastic-net model. "
         "The factor score is a fixed formula (percentile-rank -> weight -> "
         "min-max rescale), not a fitted model: there is nothing to train, so "
-        "every fold here is evaluation-only.")
+        "every fold here is evaluation-only."
+    )
     add("")
 
     add("## Metric -> feature mapping")
@@ -241,10 +258,10 @@ def write_report(results: dict) -> str:
     for m, (w, d) in EQUITY_FACTORS.items():
         feat = FEATURE_MAP[m]
         status = "testable" if feat else "**UNTESTABLE — no counterpart in features.parquet**"
-        add(f"| {m} | {w:.3f} | {'+1 (higher better)' if d > 0 else '-1 (lower better)'} "
-            f"| {feat or '—'} | {status} |")
+        add(f"| {m} | {w:.3f} | {'+1 (higher better)' if d > 0 else '-1 (lower better)'} | {feat or '—'} | {status} |")
     add("")
-    add(f"Testable weight: **{TESTABLE_WEIGHT:.2f}** of 1.00. Untestable weight: "
+    add(
+        f"Testable weight: **{TESTABLE_WEIGHT:.2f}** of 1.00. Untestable weight: "
         f"**{UNTESTABLE_WEIGHT:.2f}** (`expense_ratio`) — "
         "mf_cache/phase_b/features.parquet carries no expense-ratio column, so "
         "it is dropped rather than proxied, and the testable metrics' weights "
@@ -252,28 +269,37 @@ def write_report(results: dict) -> str:
         "exactly as ScoringEngine.score_category renormalizes over `available` "
         "factors when a column is absent (mf_pipeline.py:969-977). This means "
         f"the backtest below is necessarily a test of {TESTABLE_WEIGHT:.0%} of "
-        "the current weight scheme, not 100% of it.")
+        "the current weight scheme, not 100% of it."
+    )
     add("")
 
     add("## Method")
     add("")
-    add("- Peer group for percentile-ranking = `(anchor, cohort_key)`, the "
+    add(
+        "- Peer group for percentile-ranking = `(anchor, cohort_key)`, the "
         "exact PeerProxyResolver grouping mf_labels.py used to build "
         "`y_cohort_q1` / `y_cohort_top_half` (category for diversified "
         "equity categories, sector for thematic funds with >=3 members, "
-        "pooled small-sector thematic otherwise).")
-    add("- Rows = mf_model.load_cohort_dataset() output verbatim (features + "
+        "pooled small-sector thematic otherwise)."
+    )
+    add(
+        "- Rows = mf_model.load_cohort_dataset() output verbatim (features + "
         "labels inner-joined, anchors >= 2014-01-31, cohort-eligible rows "
         "only) — the identical population the fitted elastic-net cohort "
-        "models were scored on.")
-    add("- CPCV blocks and the causal holdout are mf_cv.py's `cpcv_folds` / "
+        "models were scored on."
+    )
+    add(
+        "- CPCV blocks and the causal holdout are mf_cv.py's `cpcv_folds` / "
         "`causal_holdout` unchanged; only the TEST mask is used per block "
-        "(the factor score has no training step).")
-    add("- pooled AUC / within-anchor rank-AUC / precision@top-decile / lift "
+        "(the factor score has no training step)."
+    )
+    add(
+        "- pooled AUC / within-anchor rank-AUC / precision@top-decile / lift "
         "are mf_model.py's own metric functions (`pooled_auc`, "
         "`within_anchor_rank_auc`, `decile_stats`), reused verbatim so these "
         "numbers are on the identical footing as the fitted-model numbers "
-        "quoted below.")
+        "quoted below."
+    )
     add("")
 
     add("## Baseline results — current weights")
@@ -287,9 +313,11 @@ def write_report(results: dict) -> str:
         add(_METRIC_HEADER)
         for block, m in r["cpcv_blocks"].items():
             add(_metric_row(block, m))
-        add(f"| **mean** | | | | **{r['cpcv_mean_pooled_auc']:.3f}** | "
+        add(
+            f"| **mean** | | | | **{r['cpcv_mean_pooled_auc']:.3f}** | "
             f"**{r['cpcv_mean_rank_auc']:.3f}** | **{r['cpcv_mean_precision']:.3f}** | "
-            f"**{r['cpcv_mean_lift']:.2f}** | |")
+            f"**{r['cpcv_mean_lift']:.2f}** | |"
+        )
         add("")
         add("**Causal holdout (train <= 2019-07-31, test 2022-08-31..2023-07-31)**")
         add("")
@@ -299,45 +327,55 @@ def write_report(results: dict) -> str:
 
     add("## Comparison to the fitted elastic-net model (same splits, mf_model.py)")
     add("")
-    add("| target | base rate | factor CPCV AUC | enet CPCV AUC | factor holdout AUC | "
-        "enet holdout AUC | factor beats enet (CPCV) | factor beats enet (holdout) |")
+    add(
+        "| target | base rate | factor CPCV AUC | enet CPCV AUC | factor holdout AUC | "
+        "enet holdout AUC | factor beats enet (CPCV) | factor beats enet (holdout) |"
+    )
     add("|---|---|---|---|---|---|---|---|")
     for tname in COHORT_TARGETS:
         r = results["targets"][tname]
         ref = FITTED_MODEL_REFERENCE[tname]
-        add(f"| {tname} | {ref['base_rate']:.3f} | {r['cpcv_mean_pooled_auc']:.3f} | "
+        add(
+            f"| {tname} | {ref['base_rate']:.3f} | {r['cpcv_mean_pooled_auc']:.3f} | "
             f"{ref['cpcv_auc']:.3f} | {r['holdout']['pooled_auc']:.3f} | "
             f"{ref['holdout_auc']:.3f} | "
             f"{'YES' if r['cpcv_mean_pooled_auc'] > ref['cpcv_auc'] else 'no'} | "
-            f"{'YES' if r['holdout']['pooled_auc'] > ref['holdout_auc'] else 'no'} |")
+            f"{'YES' if r['holdout']['pooled_auc'] > ref['holdout_auc'] else 'no'} |"
+        )
     add("")
 
     add("## Verdict")
     add("")
-    add("CPCV (5 independent purged blocks) is the primary evidence here — it "
+    add(
+        "CPCV (5 independent purged blocks) is the primary evidence here — it "
         "averages out single-period regime noise. The causal holdout is one "
-        "evaluate-once block and carries more sampling noise on its own.")
+        "evaluate-once block and carries more sampling noise on its own."
+    )
     add("")
     for tname in COHORT_TARGETS:
         r = results["targets"][tname]
         cpcv_auc = r["cpcv_mean_pooled_auc"]
         ho_auc = r["holdout"]["pooled_auc"]
-        below_chance_blocks = sum(1 for m in r["cpcv_blocks"].values()
-                                   if m["pooled_auc"] < 0.50)
+        below_chance_blocks = sum(1 for m in r["cpcv_blocks"].values() if m["pooled_auc"] < 0.50)
         n_blocks = len(r["cpcv_blocks"])
-        add(f"- **{tname}**: CPCV mean pooled AUC **{cpcv_auc:.3f}** "
+        add(
+            f"- **{tname}**: CPCV mean pooled AUC **{cpcv_auc:.3f}** "
             f"({below_chance_blocks}/{n_blocks} individual blocks scored below "
             f"0.500), lift over base rate {r['cpcv_mean_lift']:.2f}x. Causal "
             f"holdout pooled AUC {ho_auc:.3f}. "
-            + ("The CPCV mean is *below* a coin flip — on average across "
-               "regimes the current weights rank funds slightly *worse* than "
-               "random within their cohort. The single holdout block being "
-               "above 0.5 does not overturn that; it is one block against "
-               "five that say otherwise."
-               if cpcv_auc < 0.50 else
-               "CPCV mean sits at essentially chance (~0.50)."))
+            + (
+                "The CPCV mean is *below* a coin flip — on average across "
+                "regimes the current weights rank funds slightly *worse* than "
+                "random within their cohort. The single holdout block being "
+                "above 0.5 does not overturn that; it is one block against "
+                "five that say otherwise."
+                if cpcv_auc < 0.50
+                else "CPCV mean sits at essentially chance (~0.50)."
+            )
+        )
     add("")
-    add("**Blunt bottom line:** at the current FACTOR_MAP[EQUITY] weights, the "
+    add(
+        "**Blunt bottom line:** at the current FACTOR_MAP[EQUITY] weights, the "
         "testable 85% of the composite score carries **no reliable "
         "within-cohort predictive signal** for either target under purged "
         "CPCV — cohort_q1 and cohort_top_half both average pooled AUC ~0.46, "
@@ -353,7 +391,8 @@ def write_report(results: dict) -> str:
         "evaluated purely on relative within-cohort rank, does not "
         "demonstrably beat a coin flip on this data. That is the baseline "
         "any proposed reweighting should be checked against with this same "
-        "harness before being adopted.")
+        "harness before being adopted."
+    )
     add("")
 
     text = "\n".join(lines) + "\n"
@@ -364,17 +403,20 @@ def write_report(results: dict) -> str:
 
 def main() -> None:
     df, _ = load_cohort_dataset()
-    print(f"cohort-eligible dataset: {len(df)} rows, anchors "
-          f"{df['anchor'].min().date()}..{df['anchor'].max().date()}")
-    print(f"testable weight = {TESTABLE_WEIGHT:.2f}, untestable = {UNTESTABLE_WEIGHT:.2f} "
-          "(days_to_liquidate_wavg, expense_ratio)")
+    print(f"cohort-eligible dataset: {len(df)} rows, anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}")
+    print(
+        f"testable weight = {TESTABLE_WEIGHT:.2f}, untestable = {UNTESTABLE_WEIGHT:.2f} "
+        "(days_to_liquidate_wavg, expense_ratio)"
+    )
     results = evaluate(DEFAULT_WEIGHTS)
     for tname in COHORT_TARGETS:
         r = results["targets"][tname]
-        print(f"[{tname}] CPCV mean pooled_auc={r['cpcv_mean_pooled_auc']:.3f} "
-              f"rank_auc={r['cpcv_mean_rank_auc']:.3f} lift={r['cpcv_mean_lift']:.2f} "
-              f"| holdout pooled_auc={r['holdout']['pooled_auc']:.3f} "
-              f"rank_auc={r['holdout']['rank_auc']:.3f}")
+        print(
+            f"[{tname}] CPCV mean pooled_auc={r['cpcv_mean_pooled_auc']:.3f} "
+            f"rank_auc={r['cpcv_mean_rank_auc']:.3f} lift={r['cpcv_mean_lift']:.2f} "
+            f"| holdout pooled_auc={r['holdout']['pooled_auc']:.3f} "
+            f"rank_auc={r['holdout']['rank_auc']:.3f}"
+        )
     write_report(results)
 
 

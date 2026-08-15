@@ -62,12 +62,21 @@ ALLOWED_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 # Columns that would let a hand-edited file assert SKILL rather than supply history.
 # MACS is computed from NAV; nothing here may shortcut it.
 _FORBIDDEN_COLUMNS = {
-    "macs", "manager_alpha_consistency_score", "score", "rating", "rank", "skill",
-    "alpha", "verdict", "label", "probability", "recommendation",
+    "macs",
+    "manager_alpha_consistency_score",
+    "score",
+    "rating",
+    "rank",
+    "skill",
+    "alpha",
+    "verdict",
+    "label",
+    "probability",
+    "recommendation",
 }
 
-SEVERITY_ERROR = "ERROR"      # row (or file) is DROPPED
-SEVERITY_WARN = "WARN"        # applied, but surfaced
+SEVERITY_ERROR = "ERROR"  # row (or file) is DROPPED
+SEVERITY_WARN = "WARN"  # applied, but surfaced
 
 
 @dataclass(frozen=True)
@@ -94,22 +103,33 @@ def validate(frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[Issue]]:
     cols = {str(c).strip().lower() for c in frame.columns}
     forbidden = cols & _FORBIDDEN_COLUMNS
     if forbidden:
-        issues.append(Issue(None, SEVERITY_ERROR,
-                            f"columns {sorted(forbidden)} would let this file ASSERT manager "
-                            "skill. It supplies history only (who ran what, when); skill is "
-                            "measured from NAV. Whole file rejected."))
+        issues.append(
+            Issue(
+                None,
+                SEVERITY_ERROR,
+                f"columns {sorted(forbidden)} would let this file ASSERT manager "
+                "skill. It supplies history only (who ran what, when); skill is "
+                "measured from NAV. Whole file rejected.",
+            )
+        )
         return empty, issues
     unknown = cols - set(ALLOWED_COLUMNS)
     if unknown:
-        issues.append(Issue(None, SEVERITY_ERROR,
-                            f"unknown columns {sorted(unknown)}; allowed: "
-                            f"{list(ALLOWED_COLUMNS)}. Whole file rejected rather than "
-                            "silently ignoring them."))
+        issues.append(
+            Issue(
+                None,
+                SEVERITY_ERROR,
+                f"unknown columns {sorted(unknown)}; allowed: "
+                f"{list(ALLOWED_COLUMNS)}. Whole file rejected rather than "
+                "silently ignoring them.",
+            )
+        )
         return empty, issues
     missing = set(REQUIRED_COLUMNS) - cols
     if missing:
-        issues.append(Issue(None, SEVERITY_ERROR,
-                            f"missing required column(s) {sorted(missing)}. Whole file rejected."))
+        issues.append(
+            Issue(None, SEVERITY_ERROR, f"missing required column(s) {sorted(missing)}. Whole file rejected.")
+        )
         return empty, issues
 
     df = frame.copy()
@@ -121,7 +141,7 @@ def validate(frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[Issue]]:
     keep: List[int] = []
     seen: Dict[Tuple[str, str, object], int] = {}
     for i, row in df.iterrows():
-        n = int(i) + 2                      # +2: 1-indexed, plus the header line
+        n = int(i) + 2  # +2: 1-indexed, plus the header line
         mgr = str(row.get("manager_name") or "").strip()
         sch = str(row.get("scheme_name") or "").strip()
         if not mgr or not sch:
@@ -131,24 +151,37 @@ def validate(frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[Issue]]:
             # Tenure and prior-fund notes are both computed FROM start_date; without
             # it the row cannot produce either, so it would sit in the file looking
             # like coverage while contributing nothing.
-            issues.append(Issue(n, SEVERITY_ERROR,
-                                f"{mgr} / {sch}: start_date missing or unparseable — the row "
-                                "cannot produce a tenure or a prior-fund note"))
+            issues.append(
+                Issue(
+                    n,
+                    SEVERITY_ERROR,
+                    f"{mgr} / {sch}: start_date missing or unparseable — the row "
+                    "cannot produce a tenure or a prior-fund note",
+                )
+            )
             continue
         end = row.get("end_date")
         if pd.notna(end) and end < row["start_date"]:
-            issues.append(Issue(n, SEVERITY_ERROR,
-                                f"{mgr} / {sch}: end_date {end.date()} precedes start_date "
-                                f"{row['start_date'].date()}"))
+            issues.append(
+                Issue(
+                    n,
+                    SEVERITY_ERROR,
+                    f"{mgr} / {sch}: end_date {end.date()} precedes start_date {row['start_date'].date()}",
+                )
+            )
             continue
         if not str(row.get("source_url") or "").strip():
-            issues.append(Issue(n, SEVERITY_WARN,
-                                f"{mgr} / {sch}: no source_url — every row should trace to a "
-                                "real AMC factsheet/SID, never be inferred"))
+            issues.append(
+                Issue(
+                    n,
+                    SEVERITY_WARN,
+                    f"{mgr} / {sch}: no source_url — every row should trace to a "
+                    "real AMC factsheet/SID, never be inferred",
+                )
+            )
         key = (mgr.lower(), sch.lower(), row["start_date"])
         if key in seen:
-            issues.append(Issue(n, SEVERITY_WARN,
-                                f"{mgr} / {sch}: duplicate of row {seen[key]} (same start_date)"))
+            issues.append(Issue(n, SEVERITY_WARN, f"{mgr} / {sch}: duplicate of row {seen[key]} (same start_date)"))
         else:
             seen[key] = n
         keep.append(int(i))
@@ -168,8 +201,13 @@ def load(path: Path = MANAGERS_PATH) -> Tuple[Optional[pd.DataFrame], List[Issue
         raw = pd.read_csv(path)
     except Exception as exc:  # noqa: BLE001 — a hand-edited CSV must not crash a batch run
         return pd.DataFrame(columns=list(ALLOWED_COLUMNS)), [
-            Issue(None, SEVERITY_ERROR, f"could not be read ({exc.__class__.__name__}: {exc}). "
-                                        "Manager rules are OFF — this is a broken file, not an absent one.")]
+            Issue(
+                None,
+                SEVERITY_ERROR,
+                f"could not be read ({exc.__class__.__name__}: {exc}). "
+                "Manager rules are OFF — this is a broken file, not an absent one.",
+            )
+        ]
     return validate(raw)
 
 
@@ -214,12 +252,15 @@ def _template(out_path: Path, limit: Optional[int] = None) -> None:
     guess a manager: unlike a sector, a manager's name appears nowhere in a scheme
     name, so there is nothing to read off and any fill would be invention."""
     import mf_labels
+
     manifest = mf_labels.load_manifest()
     if limit:
         manifest = manifest.head(limit)
     if out_path.resolve() == MANAGERS_PATH.resolve():
-        raise SystemExit(f"refusing to overwrite {MANAGERS_PATH} with a blank skeleton — "
-                         "that is hand-sourced, unbackfillable work. Pick another --out path.")
+        raise SystemExit(
+            f"refusing to overwrite {MANAGERS_PATH} with a blank skeleton — "
+            "that is hand-sourced, unbackfillable work. Pick another --out path."
+        )
     with out_path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(list(ALLOWED_COLUMNS))
@@ -236,8 +277,12 @@ def _selftest() -> None:
     def frame(rows):
         return pd.DataFrame(rows)
 
-    base = dict(manager_name="A Sharma", scheme_name="Some Equity Fund",
-                start_date="2020-01-01", source_url="https://amc.example/sid.pdf")
+    base = dict(
+        manager_name="A Sharma",
+        scheme_name="Some Equity Fund",
+        start_date="2020-01-01",
+        source_url="https://amc.example/sid.pdf",
+    )
 
     ok, issues = validate(frame([base]))
     assert len(ok) == 1 and not [i for i in issues if i.severity == SEVERITY_ERROR]
@@ -272,12 +317,22 @@ def _selftest() -> None:
 
     # THE ORDERING BUG THIS MODULE EXISTS TO FIX. The predecessor took the last row in
     # FILE ORDER as the current manager, so typing history oldest-last inverted it.
-    df, _ = validate(frame([
-        dict(manager_name="New Mgr", scheme_name="X Fund", start_date="2024-06-01",
-             end_date="", source_url="u"),
-        dict(manager_name="Old Mgr", scheme_name="X Fund", start_date="2016-01-01",
-             end_date="2024-05-31", source_url="u"),
-    ]))
+    df, _ = validate(
+        frame(
+            [
+                dict(
+                    manager_name="New Mgr", scheme_name="X Fund", start_date="2024-06-01", end_date="", source_url="u"
+                ),
+                dict(
+                    manager_name="Old Mgr",
+                    scheme_name="X Fund",
+                    start_date="2016-01-01",
+                    end_date="2024-05-31",
+                    source_url="u",
+                ),
+            ]
+        )
+    )
     cur = current_manager(df, "X Fund")
     assert cur is not None and cur["manager_name"] == "New Mgr", "must pick by date, not file order"
     # ...and the same file typed the other way round gives the same answer.
@@ -288,14 +343,29 @@ def _selftest() -> None:
     assert current_manager(df, "Nonexistent Fund") is None
 
     # prior_funds excludes the scheme being assessed and renders an open end honestly.
-    df3, _ = validate(frame([
-        dict(manager_name="A Sharma", scheme_name="Old Fund", start_date="2015-01-01",
-             end_date="2019-12-31", source_url="u"),
-        dict(manager_name="A Sharma", scheme_name="Live Fund", start_date="2020-01-01",
-             end_date="", source_url="u"),
-        dict(manager_name="A Sharma", scheme_name="The NFO", start_date="2026-01-01",
-             end_date="", source_url="u"),
-    ]))
+    df3, _ = validate(
+        frame(
+            [
+                dict(
+                    manager_name="A Sharma",
+                    scheme_name="Old Fund",
+                    start_date="2015-01-01",
+                    end_date="2019-12-31",
+                    source_url="u",
+                ),
+                dict(
+                    manager_name="A Sharma",
+                    scheme_name="Live Fund",
+                    start_date="2020-01-01",
+                    end_date="",
+                    source_url="u",
+                ),
+                dict(
+                    manager_name="A Sharma", scheme_name="The NFO", start_date="2026-01-01", end_date="", source_url="u"
+                ),
+            ]
+        )
+    )
     pf = prior_funds(df3, "A Sharma", "The NFO")
     assert set(pf) == {"Old Fund", "Live Fund"}
     assert pf["Live Fund"].endswith("present") and pf["Old Fund"].endswith("2019-12-31")
@@ -306,8 +376,10 @@ def _selftest() -> None:
     absent, issues = load(Path("mf_cache/__definitely_absent__.csv"))
     assert absent is None and issues == []
     assert current_manager(None, "X") is None and prior_funds(None, "A", "B") == {}
-    print("[selftest] absent file stays dormant; a BROKEN file reports issues instead of "
-          "impersonating an absent one — PASS")
+    print(
+        "[selftest] absent file stays dormant; a BROKEN file reports issues instead of "
+        "impersonating an absent one — PASS"
+    )
 
     print("[selftest] PASS — mf_managers validates hand-sourced history and refuses asserted skill")
 
@@ -316,9 +388,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--validate", action="store_true", help="validate the real managers.csv")
-    ap.add_argument("--template", action="store_true",
-                    help="write a blank, ready-to-fill skeleton seeded with the manifest's "
-                         "scheme names + AMFI codes")
+    ap.add_argument(
+        "--template",
+        action="store_true",
+        help="write a blank, ready-to-fill skeleton seeded with the manifest's scheme names + AMFI codes",
+    )
     ap.add_argument("--out", type=Path, default=Path("mf_cache/managers_template.csv"))
     ap.add_argument("--limit", type=int, default=None, help="with --template: first N funds only")
     a = ap.parse_args()
@@ -327,14 +401,18 @@ if __name__ == "__main__":
     elif a.validate:
         rows, issues = load()
         if rows is None:
-            print(f"{MANAGERS_PATH} does not exist — manager/tenure/NFO-proxy rules are DORMANT "
-                  f"(correctly: no free source publishes this).")
+            print(
+                f"{MANAGERS_PATH} does not exist — manager/tenure/NFO-proxy rules are DORMANT "
+                f"(correctly: no free source publishes this)."
+            )
             print("Start one with: python mf_managers.py --template --out mf_cache/managers_template.csv")
         else:
             for i in issues:
                 print(f"  {i}")
-            print(f"{len(rows)} valid row(s); "
-                  f"{sum(1 for i in issues if i.severity == SEVERITY_ERROR)} error(s), "
-                  f"{sum(1 for i in issues if i.severity == SEVERITY_WARN)} warning(s)")
+            print(
+                f"{len(rows)} valid row(s); "
+                f"{sum(1 for i in issues if i.severity == SEVERITY_ERROR)} error(s), "
+                f"{sum(1 for i in issues if i.severity == SEVERITY_WARN)} warning(s)"
+            )
     else:
         _selftest()

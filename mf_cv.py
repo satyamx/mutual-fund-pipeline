@@ -59,8 +59,7 @@ CAUSAL_TEST_START = pd.Timestamp("2022-08-31")
 CAUSAL_TEST_END = pd.Timestamp("2023-07-31")
 
 
-def purge_train_mask(anchors: pd.Series, test_start: pd.Timestamp,
-                     test_end: pd.Timestamp) -> np.ndarray:
+def purge_train_mask(anchors: pd.Series, test_start: pd.Timestamp, test_end: pd.Timestamp) -> np.ndarray:
     """True where a candidate training anchor SURVIVES purging vs the test span
     [test_start, test_end]: its window [a, a+3y] must close before test_start,
     or open after test_end + 3y + 1-month embargo."""
@@ -96,13 +95,11 @@ def causal_holdout(anchors: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
     a = pd.to_datetime(anchors).reset_index(drop=True)
     in_model = np.asarray(a >= MODEL_START)
     test = in_model & np.asarray((a >= CAUSAL_TEST_START) & (a <= CAUSAL_TEST_END))
-    train = (in_model & np.asarray(a <= CAUSAL_TRAIN_END)
-             & purge_train_mask(a, CAUSAL_TEST_START, CAUSAL_TEST_END))
+    train = in_model & np.asarray(a <= CAUSAL_TRAIN_END) & purge_train_mask(a, CAUSAL_TEST_START, CAUSAL_TEST_END)
     return train, test
 
 
-def purged_val_split(anchors: pd.Series, train_mask: np.ndarray,
-                     val_block: str) -> Tuple[np.ndarray, np.ndarray]:
+def purged_val_split(anchors: pd.Series, train_mask: np.ndarray, val_block: str) -> Tuple[np.ndarray, np.ndarray]:
     """Carve a validation slice (one block) OUT OF a training mask, purging the
     remaining training anchors against the validation span too. Used for
     hyperparameter selection and calibration — never touches any test data."""
@@ -130,7 +127,7 @@ def run_leakage_selftest(seed: int = 7) -> bool:
     # shared by every fund at the same anchor (the real dataset's structure).
     horizon = 36
     market = rng.normal(size=months + horizon)
-    fwd = np.array([market[t + 1: t + 1 + horizon].sum() for t in range(months)])
+    fwd = np.array([market[t + 1 : t + 1 + horizon].sum() for t in range(months)])
     # As-of-LEGITIMATE feature that merely identifies the anchor date (cumulative
     # past market). It has no causal forward signal — but under a random split
     # the model memorizes anchor -> majority label, because near-duplicate rows
@@ -142,9 +139,14 @@ def run_leakage_selftest(seed: int = 7) -> bool:
     for i in range(n_funds):
         eps = rng.normal(scale=1.0, size=months)
         for t in range(months):
-            rows.append(dict(anchor=anchor_grid[t],
-                             x_state=past_state[t] + rng.normal(scale=0.01),
-                             x_noise=rng.normal(), y=int(fwd[t] + eps[t] > 0)))
+            rows.append(
+                dict(
+                    anchor=anchor_grid[t],
+                    x_state=past_state[t] + rng.normal(scale=0.01),
+                    x_noise=rng.normal(),
+                    y=int(fwd[t] + eps[t] > 0),
+                )
+            )
     df = pd.DataFrame(rows)
     X = df[["x_state", "x_noise"]].to_numpy()
     y = df["y"].to_numpy()
@@ -154,8 +156,7 @@ def run_leakage_selftest(seed: int = 7) -> bool:
         m.fit(X[tr], y[tr])
         return roc_auc_score(y[te], m.predict_proba(X[te])[:, 1])
 
-    random_aucs = [_fit_auc(tr, te)
-                   for tr, te in KFold(5, shuffle=True, random_state=0).split(X)]
+    random_aucs = [_fit_auc(tr, te) for tr, te in KFold(5, shuffle=True, random_state=0).split(X)]
     cpcv_aucs = []
     for name, tr, te in cpcv_folds(df["anchor"]):
         if te.sum() and len(np.unique(y[te])) == 2 and tr.sum():

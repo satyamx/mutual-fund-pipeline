@@ -94,8 +94,7 @@ _SUBCATEGORY_MAP: Dict[str, str] = {
 # category itself — "Exchange Traded Funds (ETFs) - Equity ETF" and "Fund of Funds
 # Scheme (Domestic) - Fund of Funds Scheme (Domestic)". A character class excluding
 # ')' truncates those and makes 35 perfectly readable live rows look unreadable.
-_ENVELOPE_RE = re.compile(r"^(?P<family>.*?)\s*Schemes?\s*\((?P<inner>.*)\)\s*$",
-                          re.IGNORECASE)
+_ENVELOPE_RE = re.compile(r"^(?P<family>.*?)\s*Schemes?\s*\((?P<inner>.*)\)\s*$", re.IGNORECASE)
 
 # Splits `inner` into asset + sub on the FIRST " - " that has whitespace on BOTH
 # sides. The whitespace requirement matters: "ELSS- Tax Saver Fund" must NOT split
@@ -131,12 +130,13 @@ class CategoryParse:
     NOT the same coverage statement — a liquid fund is fully understood, not unmapped,
     and reporting it as a data gap would misdescribe ~9k funds to the app.
     """
-    category: Optional[str]      # canonical manifest category, or None
-    asset_class: Optional[str]   # e.g. "Equity Scheme" / "Debt Scheme", as AMFI wrote it
-    parsed: bool                 # AMFI's string was structurally readable
+
+    category: Optional[str]  # canonical manifest category, or None
+    asset_class: Optional[str]  # e.g. "Equity Scheme" / "Debt Scheme", as AMFI wrote it
+    parsed: bool  # AMFI's string was structurally readable
     is_equity: bool
     is_open_ended: bool
-    reason: str                  # human-readable, always populated
+    reason: str  # human-readable, always populated
 
 
 def normalize_category(category_raw: Optional[str]) -> CategoryParse:
@@ -157,8 +157,9 @@ def normalize_category(category_raw: Optional[str]) -> CategoryParse:
     if not m:
         # e.g. "IL&FS Mutual Fund (IDF)" — an AMC name where a category belongs.
         # This is the ONLY genuine parse failure: we cannot say what this fund is.
-        return CategoryParse(None, None, False, False, False,
-                             f"does not match AMFI's 'Family Schemes(...)' shape: {raw!r}")
+        return CategoryParse(
+            None, None, False, False, False, f"does not match AMFI's 'Family Schemes(...)' shape: {raw!r}"
+        )
 
     is_open = _norm(m.group("family")) == "open ended"
     parts = _ASSET_SUB_SPLIT_RE.split(m.group("inner").strip(), maxsplit=1)
@@ -166,9 +167,14 @@ def normalize_category(category_raw: Optional[str]) -> CategoryParse:
         # Readable, but a pre-2018 label ("Income"/"Growth"/"Gilt"/"ELSS") with no
         # modern SEBI sub-category. Mapping the old broad "Growth" onto one of the
         # 10 trained categories would be a guess, so it deliberately yields none.
-        return CategoryParse(None, None, True, False, is_open,
-                             f"legacy pre-2018 AMFI label {parts[0].strip()!r} — "
-                             "no SEBI sub-category to map")
+        return CategoryParse(
+            None,
+            None,
+            True,
+            False,
+            is_open,
+            f"legacy pre-2018 AMFI label {parts[0].strip()!r} — no SEBI sub-category to map",
+        )
 
     asset, sub_raw = parts[0].strip(), parts[1].strip()
     sub = _norm(sub_raw)
@@ -176,26 +182,26 @@ def normalize_category(category_raw: Optional[str]) -> CategoryParse:
 
     if not is_equity:
         # Fully understood — a debt/index/FoF/ETF scheme. Not a data gap.
-        return CategoryParse(None, asset, True, False, is_open,
-                             f"asset class {asset!r} is not equity")
+        return CategoryParse(None, asset, True, False, is_open, f"asset class {asset!r} is not equity")
     if not is_open:
         # Close-ended equity has a fixed maturity and no ongoing subscription; the
         # trained universe is entirely open-ended, so it is out of scope by construction.
-        return CategoryParse(None, asset, True, True, False,
-                             "close-ended/interval scheme — trained universe is open-ended only")
+        return CategoryParse(
+            None, asset, True, True, False, "close-ended/interval scheme — trained universe is open-ended only"
+        )
 
     canonical = _SUBCATEGORY_MAP.get(sub)
     if canonical is None:
-        return CategoryParse(None, asset, True, True, True,
-                             f"equity sub-category {sub_raw!r} has no canonical mapping")
+        return CategoryParse(None, asset, True, True, True, f"equity sub-category {sub_raw!r} has no canonical mapping")
     return CategoryParse(canonical, asset, True, True, True, "mapped")
 
 
 @dataclass(frozen=True)
 class UniverseVerdict:
     """Whether ONE fund may receive a cohort_q1 probability, and why."""
-    status: str                  # STATUS_* above
-    category: Optional[str]      # canonical category when parsed, else None
+
+    status: str  # STATUS_* above
+    category: Optional[str]  # canonical category when parsed, else None
     reason: str
 
     @property
@@ -224,9 +230,11 @@ def classify(category_raw: Optional[str], trained_categories: Iterable[str]) -> 
         return UniverseVerdict(STATUS_OUT_OF_UNIVERSE, None, parse.reason)
     if parse.category not in trained:
         return UniverseVerdict(
-            STATUS_OUT_OF_UNIVERSE, parse.category,
+            STATUS_OUT_OF_UNIVERSE,
+            parse.category,
             f"category {parse.category!r} is not in the trained universe "
-            f"({len(trained)} categories) — the cohort_q1 model never saw it")
+            f"({len(trained)} categories) — the cohort_q1 model never saw it",
+        )
     return UniverseVerdict(STATUS_TRAINED, parse.category, "in trained universe")
 
 
@@ -259,12 +267,10 @@ def plan_option(scheme_name: str) -> Tuple[str, str]:
     genuinely different series.
     """
     name = str(scheme_name)
-    plan = ("DIRECT" if _DIRECT_RE.search(name)
-            else "REGULAR" if _REGULAR_RE.search(name) else "UNKNOWN")
+    plan = "DIRECT" if _DIRECT_RE.search(name) else "REGULAR" if _REGULAR_RE.search(name) else "UNKNOWN"
     # Check IDCW first: "IDCW Growth Option" style names exist, and the payout
     # mechanic is what distinguishes the series, so it wins the tie.
-    option = ("IDCW" if _IDCW_RE.search(name)
-              else "GROWTH" if _GROWTH_RE.search(name) else "UNKNOWN")
+    option = "IDCW" if _IDCW_RE.search(name) else "GROWTH" if _GROWTH_RE.search(name) else "UNKNOWN"
     return plan, option
 
 
@@ -302,17 +308,21 @@ def canonical_candidates(master: pd.DataFrame, manifest: pd.DataFrame) -> pd.Dat
 
 def _selftest() -> None:
     # ---- 1. The two AMFI spellings of the same category must agree ------------
-    for raw in ("Open Ended Schemes(Equity Scheme - Large Cap Fund)",
-                "Open Ended Schemes(Equity Schemes - Large Cap Fund)"):
+    for raw in (
+        "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+        "Open Ended Schemes(Equity Schemes - Large Cap Fund)",
+    ):
         p = normalize_category(raw)
         assert p.category == "Large Cap", (raw, p)
         assert p.is_equity and p.is_open_ended
     print("[selftest] AMFI 'Equity Scheme' and 'Equity Schemes' both parse — PASS")
 
     # ---- 2. Three spellings collapse to ONE trained cohort -------------------
-    for raw in ("Open Ended Schemes(Equity Scheme - Sectoral/ Thematic)",
-                "Open Ended Schemes(Equity Schemes - Thematic Fund)",
-                "Open Ended Schemes(Equity Schemes - Sectoral Fund)"):
+    for raw in (
+        "Open Ended Schemes(Equity Scheme - Sectoral/ Thematic)",
+        "Open Ended Schemes(Equity Schemes - Thematic Fund)",
+        "Open Ended Schemes(Equity Schemes - Sectoral Fund)",
+    ):
         assert normalize_category(raw).category == "Sectoral/Thematic", raw
     # ...and Value/Contra pools two AMFI sub-categories into the manifest's one.
     assert normalize_category("Open Ended Schemes(Equity Scheme - Value Fund)").category == "Value/Contra"
@@ -321,8 +331,18 @@ def _selftest() -> None:
     print("[selftest] sectoral/thematic + value/contra + ELSS spelling variants collapse — PASS")
 
     # ---- 3. Non-equity and malformed rows never produce a category -----------
-    trained_10 = {"ELSS", "Flexi Cap", "Focused", "Large & Mid Cap", "Large Cap",
-                  "Mid Cap", "Multi Cap", "Sectoral/Thematic", "Small Cap", "Value/Contra"}
+    trained_10 = {
+        "ELSS",
+        "Flexi Cap",
+        "Focused",
+        "Large & Mid Cap",
+        "Large Cap",
+        "Mid Cap",
+        "Multi Cap",
+        "Sectoral/Thematic",
+        "Small Cap",
+        "Value/Contra",
+    }
     # A liquid fund is READ PERFECTLY — it is out of universe, NOT a data gap.
     # Conflating the two would misreport ~9k fully-understood funds as unmapped.
     debt = classify("Open Ended Schemes(Debt Scheme - Liquid Fund)", trained_10)
@@ -339,8 +359,12 @@ def _selftest() -> None:
         assert classify(bad, trained_10).status == STATUS_UNMAPPED, bad
 
     # Legacy pre-2018 labels are READABLE (no ' - ' split) -> out-of-universe, not a gap.
-    for legacy in ("Close Ended Schemes(Income)", "Open Ended Schemes(Gilt)",
-                   "Close Ended Schemes(ELSS)", "Interval Fund Schemes(Income)"):
+    for legacy in (
+        "Close Ended Schemes(Income)",
+        "Open Ended Schemes(Gilt)",
+        "Close Ended Schemes(ELSS)",
+        "Interval Fund Schemes(Income)",
+    ):
         v = classify(legacy, trained_10)
         assert v.status == STATUS_OUT_OF_UNIVERSE and "legacy" in v.reason, (legacy, v)
     # ...and the legacy pattern must NOT swallow the AMC-name row above.
@@ -348,19 +372,21 @@ def _selftest() -> None:
 
     # AMFI NESTS parentheses inside the category itself. A pattern that stops at the
     # first ')' truncates these and reports 35 readable live rows as unreadable.
-    for nested in ("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)",
-                   "Open Ended Schemes(Exchange Traded Funds (ETFs) - Debt ETF)",
-                   "Open Ended Schemes(Fund of Funds Scheme (Domestic) - "
-                   "Fund of Funds Scheme (Domestic))"):
+    for nested in (
+        "Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)",
+        "Open Ended Schemes(Exchange Traded Funds (ETFs) - Debt ETF)",
+        "Open Ended Schemes(Fund of Funds Scheme (Domestic) - Fund of Funds Scheme (Domestic))",
+    ):
         v = classify(nested, trained_10)
         assert v.status == STATUS_OUT_OF_UNIVERSE, (nested, v)
         assert normalize_category(nested).parsed, nested
     # An Equity ETF is equity-flavoured but passively tracks an index; the trained
     # universe is ACTIVE open-ended categories, so it must still be refused.
-    assert not classify("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)",
-                        trained_10).scoreable
-    print("[selftest] unreadable -> UNMAPPED; understood-but-untrained (debt/index) -> "
-          "OUT_OF_TRAINING_UNIVERSE, kept distinct — PASS")
+    assert not classify("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)", trained_10).scoreable
+    print(
+        "[selftest] unreadable -> UNMAPPED; understood-but-untrained (debt/index) -> "
+        "OUT_OF_TRAINING_UNIVERSE, kept distinct — PASS"
+    )
 
     # ---- 4. THE LOAD-BEARING CASE ------------------------------------------
     # Dividend Yield is a REAL equity category that PARSES cleanly but was never
@@ -382,11 +408,13 @@ def _selftest() -> None:
     # ---- 6. The gate follows the MANIFEST, not a frozen literal --------------
     # Retraining wider must widen the gate with no code edit here.
     wider = trained_10 | {"Dividend Yield"}
-    assert classify("Open Ended Schemes(Equity Scheme - Dividend Yield Fund)", wider).scoreable, \
+    assert classify("Open Ended Schemes(Equity Scheme - Dividend Yield Fund)", wider).scoreable, (
         "FAIL: gate must widen when the trained manifest widens"
+    )
     narrower = trained_10 - {"Small Cap"}
-    assert not classify("Open Ended Schemes(Equity Scheme - Small Cap Fund)", narrower).scoreable, \
+    assert not classify("Open Ended Schemes(Equity Scheme - Small Cap Fund)", narrower).scoreable, (
         "FAIL: gate must tighten when the trained manifest narrows"
+    )
     print("[selftest] gate tracks the manifest's category set in BOTH directions — PASS")
 
     # ---- 7. Plan/option split ------------------------------------------------
@@ -398,34 +426,52 @@ def _selftest() -> None:
     print("[selftest] plan/option parsed, unmarked legacy names stay UNKNOWN — PASS")
 
     # ---- 8. canonical_candidates: one row per scoreable Direct+Growth fund ----
-    master = pd.DataFrame([
-        # kept: trained category, Direct+Growth, one in the manifest and one not
-        ("100001", "Alpha Large Cap Fund - Direct Plan - Growth",
-         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
-        ("100002", "Beta Small Cap Fund - Direct Plan - Growth",
-         "Open Ended Schemes(Equity Scheme - Small Cap Fund)"),
-        # dropped: same fund's Regular and IDCW variants would inflate every cohort
-        ("100003", "Alpha Large Cap Fund - Regular Plan - Growth",
-         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
-        ("100004", "Alpha Large Cap Fund - Direct Plan - IDCW",
-         "Open Ended Schemes(Equity Scheme - Large Cap Fund)"),
-        # dropped: untrained category, even though it is Direct+Growth
-        ("100005", "Gamma Liquid Fund - Direct Plan - Growth",
-         "Open Ended Schemes(Debt Scheme - Liquid Fund)"),
-    ], columns=["amfi_code", "scheme_name", "category_raw"])
+    master = pd.DataFrame(
+        [
+            # kept: trained category, Direct+Growth, one in the manifest and one not
+            (
+                "100001",
+                "Alpha Large Cap Fund - Direct Plan - Growth",
+                "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+            ),
+            (
+                "100002",
+                "Beta Small Cap Fund - Direct Plan - Growth",
+                "Open Ended Schemes(Equity Scheme - Small Cap Fund)",
+            ),
+            # dropped: same fund's Regular and IDCW variants would inflate every cohort
+            (
+                "100003",
+                "Alpha Large Cap Fund - Regular Plan - Growth",
+                "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+            ),
+            (
+                "100004",
+                "Alpha Large Cap Fund - Direct Plan - IDCW",
+                "Open Ended Schemes(Equity Scheme - Large Cap Fund)",
+            ),
+            # dropped: untrained category, even though it is Direct+Growth
+            ("100005", "Gamma Liquid Fund - Direct Plan - Growth", "Open Ended Schemes(Debt Scheme - Liquid Fund)"),
+        ],
+        columns=["amfi_code", "scheme_name", "category_raw"],
+    )
     # 999999 makes Small Cap a TRAINED category without itself appearing in NAVAll —
     # so 100002 is a genuine out-of-manifest candidate rather than an untrained one.
-    manifest = pd.DataFrame([("100001", "Alpha Large Cap Fund - Direct Plan - Growth", "Large Cap"),
-                             ("999999", "Delta Small Cap Fund", "Small Cap")],
-                            columns=["amfi_code", "scheme_name", "category"])
+    manifest = pd.DataFrame(
+        [
+            ("100001", "Alpha Large Cap Fund - Direct Plan - Growth", "Large Cap"),
+            ("999999", "Delta Small Cap Fund", "Small Cap"),
+        ],
+        columns=["amfi_code", "scheme_name", "category"],
+    )
     cands = canonical_candidates(master, manifest)
-    assert list(cands["amfi_code"]) == ["100001", "100002"], \
+    assert list(cands["amfi_code"]) == ["100001", "100002"], (
         f"FAIL: expected only the Direct+Growth trained funds, got {list(cands['amfi_code'])}"
+    )
     assert list(cands["in_manifest"]) == [True, False], "FAIL: in_manifest flag is wrong"
     assert list(cands["category"]) == ["Large Cap", "Small Cap"]
     # A manifest fund absent from NAVAll must not be conjured into the candidate set.
-    assert "999999" not in set(cands["amfi_code"]), \
-        "FAIL: candidates must come from the live master, not the manifest"
+    assert "999999" not in set(cands["amfi_code"]), "FAIL: candidates must come from the live master, not the manifest"
     print("[selftest] canonical_candidates: one row per fund, plan/option and gate applied — PASS")
 
     print("[selftest] PASS — mf_universe parses AMFI honestly and refuses everything untrained")
@@ -434,6 +480,7 @@ def _selftest() -> None:
 def _report() -> None:
     """Run the gate over the REAL cached NAVAll + manifest and print the split."""
     import mf_labels
+
     df = pd.read_parquet("mf_cache/amfi_master.parquet")
     trained = trained_categories(mf_labels.load_manifest())
     print(f"trained categories ({len(trained)}): {sorted(trained)}\n")
@@ -461,8 +508,9 @@ def _report() -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--report", action="store_true",
-                    help="run the gate over the real cached NAVAll and print the split")
+    ap.add_argument(
+        "--report", action="store_true", help="run the gate over the real cached NAVAll and print the split"
+    )
     a = ap.parse_args()
     if a.report:
         _report()

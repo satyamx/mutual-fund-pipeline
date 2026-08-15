@@ -16,6 +16,7 @@ Self-test: `python mf_infer.py --selftest` re-fits the sklearn pipeline on the
 same cohort data and asserts this numpy path reproduces its probabilities
 bit-for-bit (atol 1e-9), proving the JSON round-trip is exact.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
-
 
 # The SHIPPED model, git-tracked at top-level model/ (2026-08-03) — deliberately
 # separate from mf_cache/phase_b/, which holds the regenerable research outputs
@@ -69,8 +69,7 @@ def _apply_calibration(p_raw: np.ndarray, cal: Dict[str, Any]) -> np.ndarray:
     ordering inside each step, and the merged map preserves it (23,058 distinct)
     while guaranteeing every knot is backed by >= MIN_CAL_BLOCK observations."""
     if cal["kind"] == "isotonic":
-        return np.interp(p_raw, np.asarray(cal["x"], dtype=float),
-                         np.asarray(cal["y"], dtype=float))
+        return np.interp(p_raw, np.asarray(cal["x"], dtype=float), np.asarray(cal["y"], dtype=float))
     z = _logit(p_raw)
     return _sigmoid(cal["coef"] * z + cal["intercept"])
 
@@ -82,8 +81,8 @@ class CohortInferencer:
     def __init__(self, artifact_path: Path = COHORT_ARTIFACT_PATH) -> None:
         if not artifact_path.exists():
             raise FileNotFoundError(
-                f"cohort artifact not found: {artifact_path} — run "
-                "`python mf_model.py --stage cohort` to build it.")
+                f"cohort artifact not found: {artifact_path} — run `python mf_model.py --stage cohort` to build it."
+            )
         self.artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
         self.features: list[str] = self.artifact["features"]
         self.models: Dict[str, Any] = self.artifact["models"]
@@ -103,7 +102,7 @@ class CohortInferencer:
         for i, c in enumerate(self.features):
             v = features.get(c, None)
             if v is None or (isinstance(v, float) and not np.isfinite(v)):
-                v = med[c]                      # impute exactly as Preprocessor.fit did
+                v = med[c]  # impute exactly as Preprocessor.fit did
             out[i] = (float(v) - mean[c]) / std[c]
         return out
 
@@ -148,8 +147,7 @@ def _selftest() -> None:
         X = df[feature_cols]
         pre = M.Preprocessor().fit(X[fit_mask])
         model = M.fit_enet(pre.transform(X[fit_mask]), y[fit_mask], M.PRIMARY_ENET)
-        cal = M.Calibrator().fit(
-            model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
+        cal = M.Calibrator().fit(model.predict_proba(pre.transform(X[calib_mask]))[:, 1], y[calib_mask])
         # sklearn probabilities on every cohort row
         p_sklearn = cal.predict(model.predict_proba(pre.transform(X))[:, 1])
         # numpy-path probabilities from the shipped JSON artifact
@@ -157,8 +155,7 @@ def _selftest() -> None:
         p_numpy = np.array([inf.predict(r, tname) for r in rows])
         err = float(np.max(np.abs(p_sklearn - p_numpy)))
         max_err = max(max_err, err)
-        print(f"[selftest] {tname:16s} n={len(rows)} max|Δp|={err:.2e} "
-              f"context={inf.signal_context(tname)}")
+        print(f"[selftest] {tname:16s} n={len(rows)} max|Δp|={err:.2e} context={inf.signal_context(tname)}")
         assert err < 1e-9, f"{tname}: numpy inference diverges from sklearn (max {err})"
 
     # ---- the SHIPPED payload may never claim certainty ----------------------
@@ -171,11 +168,12 @@ def _selftest() -> None:
     for tname in inf.targets:
         cal = inf.artifact["models"][tname]["calibration"]
         if cal.get("kind") != "isotonic":
-            continue          # Platt is asymptotic — it cannot emit 0 or 1
+            continue  # Platt is asymptotic — it cannot emit 0 or 1
         ys = [float(v) for v in cal["y"]]
         assert min(ys) > 0.0 and max(ys) < 1.0, (
             f"FAIL: {tname} calibration claims certainty (min={min(ys)}, max={max(ys)}) — "
-            "a 0 or 1 probability asserts more than this model can support")
+            "a 0 or 1 probability asserts more than this model can support"
+        )
         # Removing the 0 is not enough — the number that replaces it has to be
         # backed by real observations, which is what `support` records.
         support = cal.get("support")
@@ -183,26 +181,27 @@ def _selftest() -> None:
         assert min(support) >= M.MIN_CAL_BLOCK, (
             f"FAIL: {tname} has a calibration block of {min(support)} observations "
             f"(< MIN_CAL_BLOCK={M.MIN_CAL_BLOCK}) — its probability claims more "
-            "than its own support allows")
+            "than its own support allows"
+        )
         checked += 1
         if min(ys) < worst_min:
             worst_min, worst_support = min(ys), min(support)
     # Every isotonic target must have been reachable; a Platt-only artifact is
     # legitimate, so report that rather than indexing a 'y' key it does not have.
     if checked:
-        print(f"[selftest] shipped calibration bounded away from 0 and 1 "
-              f"(min={worst_min:.6f}, every block >= {M.MIN_CAL_BLOCK} obs, "
-              f"thinnest={worst_support}) — PASS")
+        print(
+            f"[selftest] shipped calibration bounded away from 0 and 1 "
+            f"(min={worst_min:.6f}, every block >= {M.MIN_CAL_BLOCK} obs, "
+            f"thinnest={worst_support}) — PASS"
+        )
     else:
-        print("[selftest] shipped calibration is Platt on every target — "
-              "asymptotic, cannot emit 0 or 1 — PASS")
+        print("[selftest] shipped calibration is Platt on every target — asymptotic, cannot emit 0 or 1 — PASS")
     print(f"[selftest] PASS — numpy inference reproduces sklearn (max|Δp|={max_err:.2e})")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--selftest", action="store_true",
-                    help="verify numpy inference == sklearn pipeline on cohort data")
+    ap.add_argument("--selftest", action="store_true", help="verify numpy inference == sklearn pipeline on cohort data")
     args = ap.parse_args()
     if args.selftest:
         _selftest()

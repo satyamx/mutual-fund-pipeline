@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 
 import mf_ledger
 
@@ -87,9 +86,10 @@ TOP_TIER_PCTL = 0.75
 class MetricHealth:
     """One graded signal. `status` in {GREEN, AMBER, RED, PENDING, UNAVAILABLE};
     `value`/`threshold`/`detail` are the evidence the app shows under the dot."""
+
     name: str
     status: str
-    label: str                       # short human sentence, app-renderable as-is
+    label: str  # short human sentence, app-renderable as-is
     value: Optional[float] = None
     threshold: Optional[str] = None
     detail: str = ""
@@ -111,23 +111,27 @@ def grade_input_drift(psi: Dict[str, Any]) -> MetricHealth:
     worst_str = ", ".join(f"{w['feature']}({w['psi']})" for w in worst[:3])
     thr = f"PSI: OK<{mf_ledger.PSI_MODERATE}, shift>{mf_ledger.PSI_SIGNIFICANT}"
     if st == "OK":
-        return MetricHealth("input_drift", GREEN,
-                            "Live feature distribution matches the training population.",
-                            psi.get("psi_max"), thr)
+        return MetricHealth(
+            "input_drift", GREEN, "Live feature distribution matches the training population.", psi.get("psi_max"), thr
+        )
     if st in ("MODERATE_SHIFT", "SIGNIFICANT_SHIFT"):
         # Capped at AMBER by design — drift is INVESTIGATE, never an auto-retrain/RED.
-        return MetricHealth("input_drift", AMBER,
-                            "Feature drift vs the training era — investigate, not an "
-                            "auto-retrain trigger.",
-                            psi.get("psi_max"), thr,
-                            detail=f"worst: {worst_str}" if worst_str else st)
+        return MetricHealth(
+            "input_drift",
+            AMBER,
+            "Feature drift vs the training era — investigate, not an auto-retrain trigger.",
+            psi.get("psi_max"),
+            thr,
+            detail=f"worst: {worst_str}" if worst_str else st,
+        )
     if st in ("REFERENCE_MISSING", "REFERENCE_STALE"):
-        return MetricHealth("input_drift", UNAVAILABLE,
-                            "Drift reference missing or stale — rebuild psi_reference "
-                            "(python mf_ledger.py --build-reference).",
-                            detail=st)
-    return MetricHealth("input_drift", UNAVAILABLE,
-                        "Not enough live funds to measure drift.", detail=str(st))
+        return MetricHealth(
+            "input_drift",
+            UNAVAILABLE,
+            "Drift reference missing or stale — rebuild psi_reference (python mf_ledger.py --build-reference).",
+            detail=st,
+        )
+    return MetricHealth("input_drift", UNAVAILABLE, "Not enough live funds to measure drift.", detail=str(st))
 
 
 def grade_stability(rs: Dict[str, Any]) -> MetricHealth:
@@ -135,18 +139,27 @@ def grade_stability(rs: Dict[str, Any]) -> MetricHealth:
     thr = f"Spearman: green>={STABILITY_GREEN}, red<{STABILITY_RED}"
     if st == "OK" and sp is not None:
         status = GREEN if sp >= STABILITY_GREEN else (RED if sp < STABILITY_RED else AMBER)
-        return MetricHealth("prediction_stability", status,
-                            "Predicted ranks are consistent run-to-run."
-                            if status == GREEN else
-                            "Predicted ranks are shifting between runs — inspect inputs.",
-                            sp, thr, detail=f"n_common={rs.get('n_common')}")
+        return MetricHealth(
+            "prediction_stability",
+            status,
+            "Predicted ranks are consistent run-to-run."
+            if status == GREEN
+            else "Predicted ranks are shifting between runs — inspect inputs.",
+            sp,
+            thr,
+            detail=f"n_common={rs.get('n_common')}",
+        )
     if st == "FIRST_RUN":
-        return MetricHealth("prediction_stability", PENDING,
-                            "First logged run — stability needs a prior run to compare.",
-                            threshold=thr)
-    return MetricHealth("prediction_stability", PENDING,
-                        "Too few funds overlap the previous run to grade stability.",
-                        threshold=thr, detail=f"n_common={rs.get('n_common')}")
+        return MetricHealth(
+            "prediction_stability", PENDING, "First logged run — stability needs a prior run to compare.", threshold=thr
+        )
+    return MetricHealth(
+        "prediction_stability",
+        PENDING,
+        "Too few funds overlap the previous run to grade stability.",
+        threshold=thr,
+        detail=f"n_common={rs.get('n_common')}",
+    )
 
 
 def grade_pipeline(coverage: Dict[str, Any]) -> MetricHealth:
@@ -157,11 +170,14 @@ def grade_pipeline(coverage: Dict[str, Any]) -> MetricHealth:
         return MetricHealth("pipeline_coverage", UNAVAILABLE, "No funds attempted.", threshold=thr)
     rate = n_err / n_total
     status = GREEN if rate < ERROR_RATE_GREEN else (RED if rate >= ERROR_RATE_RED else AMBER)
-    return MetricHealth("pipeline_coverage", status,
-                        f"{n_total - n_err}/{n_total} funds evaluated cleanly.",
-                        round(rate, 4), thr,
-                        detail=f"thin_cohort={coverage.get('n_thin_cohort', 0)}, "
-                               f"stale_nav={coverage.get('n_stale_nav', 0)}")
+    return MetricHealth(
+        "pipeline_coverage",
+        status,
+        f"{n_total - n_err}/{n_total} funds evaluated cleanly.",
+        round(rate, 4),
+        thr,
+        detail=f"thin_cohort={coverage.get('n_thin_cohort', 0)}, stale_nav={coverage.get('n_stale_nav', 0)}",
+    )
 
 
 def grade_outcome(outcome: Dict[str, Any]) -> MetricHealth:
@@ -171,37 +187,48 @@ def grade_outcome(outcome: Dict[str, Any]) -> MetricHealth:
     thr = f"lift: green>={LIFT_GREEN}, red<{LIFT_RED} (base rate = 1x)"
     if st in ("PENDING_MATURITY", "INSUFFICIENT_MATURED"):
         em = outcome.get("earliest_maturity")
-        return MetricHealth("outcome_skill", PENDING,
-                            "Outcome accuracy is not yet measurable — predictions need "
-                            f"~3y to mature{f' (earliest ~{em})' if em else ''}.",
-                            threshold=thr,
-                            detail=f"n_realized={outcome.get('n_realized', 0)} / "
-                                   f"need {mf_ledger.MIN_MATURED_FOR_IC}")
+        return MetricHealth(
+            "outcome_skill",
+            PENDING,
+            "Outcome accuracy is not yet measurable — predictions need "
+            f"~3y to mature{f' (earliest ~{em})' if em else ''}.",
+            threshold=thr,
+            detail=f"n_realized={outcome.get('n_realized', 0)} / need {mf_ledger.MIN_MATURED_FOR_IC}",
+        )
     lift = outcome.get("lift")
     if st == "OK" and lift is not None:
         status = GREEN if lift >= LIFT_GREEN else (RED if lift < LIFT_RED else AMBER)
-        return MetricHealth("outcome_skill", status,
-                            f"Realized lift {lift:.2f}x over the cohort base rate on "
-                            f"{outcome.get('n_realized')} matured predictions.",
-                            lift, thr,
-                            detail=f"realized_ic={outcome.get('realized_ic')}, "
-                                   f"effective_n={outcome.get('effective_n')}")
-    return MetricHealth("outcome_skill", UNAVAILABLE,
-                        "Outcome metrics unavailable.", threshold=thr, detail=str(st))
+        return MetricHealth(
+            "outcome_skill",
+            status,
+            f"Realized lift {lift:.2f}x over the cohort base rate on {outcome.get('n_realized')} matured predictions.",
+            lift,
+            thr,
+            detail=f"realized_ic={outcome.get('realized_ic')}, effective_n={outcome.get('effective_n')}",
+        )
+    return MetricHealth("outcome_skill", UNAVAILABLE, "Outcome metrics unavailable.", threshold=thr, detail=str(st))
 
 
 # ==============================================================================
 # Outcome metrics on the MATURED realizations (extends ledger.realized_summary
 # with lift/precision/calibration — all honestly PENDING until maturity)
 # ==============================================================================
-def outcome_metrics(realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
-                    predictions_path: Path = mf_ledger.PREDICTIONS_PATH) -> Dict[str, Any]:
+def outcome_metrics(
+    realizations_path: Path = mf_ledger.REALIZATIONS_PATH, predictions_path: Path = mf_ledger.PREDICTIONS_PATH
+) -> Dict[str, Any]:
     base = mf_ledger.realized_summary(realizations_path, predictions_path)
     out: Dict[str, Any] = dict(
-        status=base["status"], realized_ic=base["value"],
-        n_matured=base["n_matured"], n_realized=base["n_realized"],
-        effective_n=base["effective_n"], earliest_maturity=base["earliest_maturity"],
-        lift=None, precision_top=None, base_rate=None, calibration_gap=None)
+        status=base["status"],
+        realized_ic=base["value"],
+        n_matured=base["n_matured"],
+        n_realized=base["n_realized"],
+        effective_n=base["effective_n"],
+        earliest_maturity=base["earliest_maturity"],
+        lift=None,
+        precision_top=None,
+        base_rate=None,
+        calibration_gap=None,
+    )
     if base["status"] != "OK":
         return out  # PENDING/INSUFFICIENT — no fabricated lift
 
@@ -210,9 +237,11 @@ def outcome_metrics(realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
     # read would compute one lift over a mixture of models — a number describing
     # none of them, and exactly the laundered composite the honesty invariant bars.
     model_id = base.get("model_id")
-    rows = [r for r in mf_ledger.read_jsonl(realizations_path)
-            if r["status"] == "REALIZED"
-            and (model_id is None or r.get("model_id") == model_id)]
+    rows = [
+        r
+        for r in mf_ledger.read_jsonl(realizations_path)
+        if r["status"] == "REALIZED" and (model_id is None or r.get("model_id") == model_id)
+    ]
     if not rows:
         return out
     y = np.array([float(r["y_realized"]) for r in rows])
@@ -224,10 +253,10 @@ def outcome_metrics(realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
     out.update(
         base_rate=round(base_rate, 4),
         precision_top=None if precision_top is None else round(precision_top, 4),
-        lift=(None if not precision_top or base_rate == 0
-              else round(precision_top / base_rate, 3)),
+        lift=(None if not precision_top or base_rate == 0 else round(precision_top / base_rate, 3)),
         # reliability: does the mean predicted probability match the realized rate?
-        calibration_gap=round(float(abs(prob.mean() - base_rate)), 4))
+        calibration_gap=round(float(abs(prob.mean() - base_rate)), 4),
+    )
     return out
 
 
@@ -236,7 +265,7 @@ def outcome_metrics(realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
 # ==============================================================================
 @dataclass
 class ModelHealthReport:
-    status: str                              # overall roll-up over ACTIONABLE metrics
+    status: str  # overall roll-up over ACTIONABLE metrics
     headline: str
     metrics: List[Dict[str, Any]] = field(default_factory=list)
     outcome: Dict[str, Any] = field(default_factory=dict)
@@ -249,11 +278,13 @@ _DISCLAIMER = (
     "This panel reflects data-drift and pipeline health — NOT fund-outcome accuracy. "
     "The cohort signal is a weak, within-cohort ranking aid (phase_b_v2 training holdout "
     "AUC ~0.558, lift ~1.10x); its real-world accuracy cannot be measured until ~3 years "
-    "of logged predictions mature. 'Pending' means not-yet-measurable, not bad.")
+    "of logged predictions mature. 'Pending' means not-yet-measurable, not bad."
+)
 
 
-def build_report(monitoring: Dict[str, Any], coverage: Dict[str, Any],
-                 outcome: Dict[str, Any], model_id: Optional[str] = None) -> Dict[str, Any]:
+def build_report(
+    monitoring: Dict[str, Any], coverage: Dict[str, Any], outcome: Dict[str, Any], model_id: Optional[str] = None
+) -> Dict[str, Any]:
     """Pure: raw monitoring{} + coverage{} + outcome{} -> the app-renderable
     evaluation{} block. No orchestrator / NAV / sklearn dependency, so it is
     unit-testable on synthetic dicts."""
@@ -275,17 +306,24 @@ def build_report(monitoring: Dict[str, Any], coverage: Dict[str, Any],
     else:
         headline = "MONITORING ONLY — nothing actionable is measurable yet."
     report = ModelHealthReport(
-        status=overall, headline=headline,
-        metrics=[asdict(m) for m in metrics], outcome=outcome,
-        disclaimer=_DISCLAIMER, model_id=model_id,
-        note=monitoring.get("note", ""))
+        status=overall,
+        headline=headline,
+        metrics=[asdict(m) for m in metrics],
+        outcome=outcome,
+        disclaimer=_DISCLAIMER,
+        model_id=model_id,
+        note=monitoring.get("note", ""),
+    )
     return asdict(report)
 
 
-def build_report_from_ledger(monitoring: Dict[str, Any], coverage: Dict[str, Any],
-                             model_id: Optional[str] = None,
-                             realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
-                             predictions_path: Path = mf_ledger.PREDICTIONS_PATH) -> Dict[str, Any]:
+def build_report_from_ledger(
+    monitoring: Dict[str, Any],
+    coverage: Dict[str, Any],
+    model_id: Optional[str] = None,
+    realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
+    predictions_path: Path = mf_ledger.PREDICTIONS_PATH,
+) -> Dict[str, Any]:
     """Convenience wrapper mf_artifact.py calls: pulls the matured-outcome metrics
     from the ledger, then grades everything."""
     outcome = outcome_metrics(realizations_path, predictions_path)
@@ -294,11 +332,12 @@ def build_report_from_ledger(monitoring: Dict[str, Any], coverage: Dict[str, Any
 
 def render(report: Dict[str, Any]) -> str:
     dot = {GREEN: "🟢", AMBER: "🟡", RED: "🔴", PENDING: "⏳", UNAVAILABLE: "⚪"}
-    L = ["=" * 74,
-         f"  MODEL HEALTH: {dot[report['status']]} {report['status']}  "
-         f"(model {report.get('model_id') or 'n/a'})",
-         f"  {report['headline']}",
-         "=" * 74]
+    L = [
+        "=" * 74,
+        f"  MODEL HEALTH: {dot[report['status']]} {report['status']}  (model {report.get('model_id') or 'n/a'})",
+        f"  {report['headline']}",
+        "=" * 74,
+    ]
     for m in report["metrics"]:
         v = "" if m["value"] is None else f"  [{m['value']}]"
         L.append(f"  {dot[m['status']]} {m['name']:<20}{v}")
@@ -316,12 +355,21 @@ def render(report: Dict[str, Any]) -> str:
 def _selftest() -> None:
     # 1) Healthy leading indicators, outcome PENDING -> overall GREEN, NOT dragged
     #    down by the pending outcome.
-    mon = dict(psi=dict(status="OK", psi_max=0.03, worst=[]),
-               rank_stability=dict(status="OK", spearman=0.96, n_common=120),
-               note="n")
+    mon = dict(
+        psi=dict(status="OK", psi_max=0.03, worst=[]),
+        rank_stability=dict(status="OK", spearman=0.96, n_common=120),
+        note="n",
+    )
     cov = dict(n_total=136, n_errors=2, n_thin_cohort=5, n_stale_nav=0)
-    out = dict(status="PENDING_MATURITY", realized_ic=None, n_matured=0, n_realized=0,
-               effective_n=0, earliest_maturity="2029-03-31", lift=None)
+    out = dict(
+        status="PENDING_MATURITY",
+        realized_ic=None,
+        n_matured=0,
+        n_realized=0,
+        effective_n=0,
+        earliest_maturity="2029-03-31",
+        lift=None,
+    )
     rep = build_report(mon, cov, out, model_id="cohort_v1")
     assert rep["status"] == GREEN, rep["status"]
     names = {m["name"]: m["status"] for m in rep["metrics"]}
@@ -331,8 +379,7 @@ def _selftest() -> None:
     print(f"[selftest] healthy + pending outcome -> {rep['status']} (pending never reddens) — PASS")
 
     # 2) Feature drift SIGNIFICANT caps at AMBER (investigate, never RED)
-    mon2 = dict(mon, psi=dict(status="SIGNIFICANT_SHIFT", psi_max=0.41,
-                              worst=[dict(feature="vol_1y", psi=0.41)]))
+    mon2 = dict(mon, psi=dict(status="SIGNIFICANT_SHIFT", psi_max=0.41, worst=[dict(feature="vol_1y", psi=0.41)]))
     rep2 = build_report(mon2, cov, out)
     drift = next(m for m in rep2["metrics"] if m["name"] == "input_drift")
     assert drift["status"] == AMBER and rep2["status"] == AMBER, (drift["status"], rep2["status"])
@@ -343,25 +390,31 @@ def _selftest() -> None:
     cov3 = dict(n_total=100, n_errors=30, n_thin_cohort=0, n_stale_nav=0)
     rep3 = build_report(mon3, cov3, out)
     assert rep3["status"] == RED
-    assert {m["name"] for m in rep3["metrics"] if m["status"] == RED} == \
-        {"prediction_stability", "pipeline_coverage"}
+    assert {m["name"] for m in rep3["metrics"] if m["status"] == RED} == {"prediction_stability", "pipeline_coverage"}
     print("[selftest] unstable ranks + high error rate -> RED action-needed — PASS")
 
     # 4) A MATURED outcome that collapsed BELOW chance -> RED, and lift math is right.
     #    30 top-tier (pctl 0.9) funds mostly miss; 30 bottom (pctl 0.3) mostly hit ->
     #    the model ranked backwards. probability tracks pctl so the IC corr is defined.
-    real = ([dict(status="REALIZED", y_realized=(i % 5 == 0), cohort_percentile=0.9,
-                  probability=0.9) for i in range(30)]          # top-tier precision = 0.2
-            + [dict(status="REALIZED", y_realized=True, cohort_percentile=0.3,
-                    probability=0.3) for i in range(30)])       # base_rate = (6+30)/60 = 0.6
+    real = (
+        [
+            dict(status="REALIZED", y_realized=(i % 5 == 0), cohort_percentile=0.9, probability=0.9) for i in range(30)
+        ]  # top-tier precision = 0.2
+        + [dict(status="REALIZED", y_realized=True, cohort_percentile=0.3, probability=0.3) for i in range(30)]
+    )  # base_rate = (6+30)/60 = 0.6
     import tempfile
+
     tmp = Path(tempfile.mktemp(suffix=".jsonl"))
     tmp.write_text("\n".join(json.dumps(r) for r in real), encoding="utf-8")
     # a matching predictions file so realized_summary counts >= MIN_MATURED_FOR_IC -> OK.
     preds = Path(tempfile.mktemp(suffix=".jsonl"))
-    preds.write_text("\n".join(json.dumps(dict(amfi_code=f"F{i}", target="cohort_q1",
-                     anchor="2020-01-31", probability=0.5, run_id="r")) for i in range(60)),
-                     encoding="utf-8")
+    preds.write_text(
+        "\n".join(
+            json.dumps(dict(amfi_code=f"F{i}", target="cohort_q1", anchor="2020-01-31", probability=0.5, run_id="r"))
+            for i in range(60)
+        ),
+        encoding="utf-8",
+    )
     om = outcome_metrics(realizations_path=tmp, predictions_path=preds)
     assert om["status"] == "OK", om["status"]
     assert abs(om["base_rate"] - 0.6) < 1e-9, om
@@ -378,29 +431,36 @@ def _selftest() -> None:
     assert rep5["status"] == GREEN
     print("[selftest] stale drift reference -> UNAVAILABLE, overall stays GREEN — PASS")
 
-    print("[selftest] PASS — mf_eval grades leading indicators honestly, keeps 'pending' "
-          "separate from 'bad', caps drift at investigate, and only a matured-outcome "
-          "collapse turns the model RED")
+    print(
+        "[selftest] PASS — mf_eval grades leading indicators honestly, keeps 'pending' "
+        "separate from 'bad', caps drift at investigate, and only a matured-outcome "
+        "collapse turns the model RED"
+    )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Model-health evaluation over the ledger + artifact")
     ap.add_argument("--selftest", action="store_true", help="pure, data-free selftest")
-    ap.add_argument("--report", metavar="ARTIFACT.json[.gz]",
-                    help="render the model-health panel from an emitted artifact's "
-                         "monitoring{}+coverage{}, plus fresh ledger outcome metrics")
+    ap.add_argument(
+        "--report",
+        metavar="ARTIFACT.json[.gz]",
+        help="render the model-health panel from an emitted artifact's "
+        "monitoring{}+coverage{}, plus fresh ledger outcome metrics",
+    )
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     if args.selftest:
         _selftest()
     elif args.report:
         import gzip
+
         p = Path(args.report)
         opener = gzip.open if p.suffix == ".gz" else open
-        with opener(p, "rt", encoding="utf-8") as fh:   # type: ignore[operator]
+        with opener(p, "rt", encoding="utf-8") as fh:  # type: ignore[operator]
             art = json.load(fh)
         rep = art.get("evaluation") or build_report_from_ledger(
-            art.get("monitoring", {}), art.get("coverage", {}), art.get("model_id"))
+            art.get("monitoring", {}), art.get("coverage", {}), art.get("model_id")
+        )
         print(render(rep))
     else:
         ap.print_help()

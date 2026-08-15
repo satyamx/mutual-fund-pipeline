@@ -38,9 +38,8 @@ import logging
 import math
 import re
 import threading
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -58,16 +57,17 @@ LOGGER = logging.getLogger("MFPipeline")
 # ------------------------------------------------------------------------------
 # GLOBAL MARKET CONSTANTS (Indian market conventions)
 # ------------------------------------------------------------------------------
-TRADING_DAYS_PER_YEAR: int = 252          # NSE/BSE trading calendar approximation
-RISK_FREE_RATE_ANNUAL: float = 0.0675     # Proxy: ~91-day T-Bill / repo corridor
-DEFAULT_ADV_PARTICIPATION: float = 0.20   # Max % of ADV consumable per day on exit
-SEBI_SINGLE_ISSUER_LIMIT: float = 0.10    # 10% single-issuer debt exposure cap
-SEBI_GROUP_EXPOSURE_LIMIT: float = 0.20   # 20% corporate-group cap (pre board approval)
-EPISODIC_CHECK_INTERVAL: int = 10         # ValidationOrchestrator cadence
+TRADING_DAYS_PER_YEAR: int = 252  # NSE/BSE trading calendar approximation
+RISK_FREE_RATE_ANNUAL: float = 0.0675  # Proxy: ~91-day T-Bill / repo corridor
+DEFAULT_ADV_PARTICIPATION: float = 0.20  # Max % of ADV consumable per day on exit
+SEBI_SINGLE_ISSUER_LIMIT: float = 0.10  # 10% single-issuer debt exposure cap
+SEBI_GROUP_EXPOSURE_LIMIT: float = 0.20  # 20% corporate-group cap (pre board approval)
+EPISODIC_CHECK_INTERVAL: int = 10  # ValidationOrchestrator cadence
 
 
 class SEBICategory(str, Enum):
     """Top-level SEBI scheme categorisation buckets."""
+
     EQUITY = "Equity"
     DEBT = "Debt"
     HYBRID = "Hybrid"
@@ -107,7 +107,8 @@ class HybridSubCategory(str, Enum):
 
 class CreditRating(str, Enum):
     """Domestic long/short-term rating scale union (CRISIL / ICRA / CARE / IND-Ra)."""
-    SOVEREIGN = "SOV"      # G-Secs, SDLs, T-Bills
+
+    SOVEREIGN = "SOV"  # G-Secs, SDLs, T-Bills
     AAA = "AAA"
     AA_PLUS = "AA+"
     AA = "AA"
@@ -117,36 +118,42 @@ class CreditRating(str, Enum):
     A_MINUS = "A-"
     BBB = "BBB"
     BELOW_BBB = "<BBB"
-    A1_PLUS = "A1+"        # Short-term (CP/CD) top grade
+    A1_PLUS = "A1+"  # Short-term (CP/CD) top grade
     A1 = "A1"
     A2 = "A2"
     UNRATED = "UNRATED"
-    CASH = "CASH"          # TREPS / repo / net current assets
+    CASH = "CASH"  # TREPS / repo / net current assets
 
 
 # Internal numeric map — LOWER score == SAFER credit. Used by RiskStressTester.
 CREDIT_RATING_SCORE: Dict[CreditRating, float] = {
     CreditRating.SOVEREIGN: 0.0,
-    CreditRating.CASH:      0.0,
-    CreditRating.AAA:       1.0,
-    CreditRating.A1_PLUS:   1.0,
-    CreditRating.AA_PLUS:   2.0,
-    CreditRating.A1:        2.0,
-    CreditRating.AA:        3.0,
-    CreditRating.AA_MINUS:  4.0,
-    CreditRating.A2:        4.0,
-    CreditRating.A_PLUS:    5.0,
-    CreditRating.A:         6.0,
-    CreditRating.A_MINUS:   7.0,
-    CreditRating.BBB:       8.0,
+    CreditRating.CASH: 0.0,
+    CreditRating.AAA: 1.0,
+    CreditRating.A1_PLUS: 1.0,
+    CreditRating.AA_PLUS: 2.0,
+    CreditRating.A1: 2.0,
+    CreditRating.AA: 3.0,
+    CreditRating.AA_MINUS: 4.0,
+    CreditRating.A2: 4.0,
+    CreditRating.A_PLUS: 5.0,
+    CreditRating.A: 6.0,
+    CreditRating.A_MINUS: 7.0,
+    CreditRating.BBB: 8.0,
     CreditRating.BELOW_BBB: 10.0,
-    CreditRating.UNRATED:   9.0,
+    CreditRating.UNRATED: 9.0,
 }
 
 # Recognised TRI benchmark identifiers (Index/ETF tracking must resolve to TRI).
 TRI_BENCHMARKS: Tuple[str, ...] = (
-    "NIFTY 50 TRI", "NIFTY NEXT 50 TRI", "NIFTY 100 TRI", "NIFTY MIDCAP 150 TRI",
-    "NIFTY SMALLCAP 250 TRI", "NIFTY 500 TRI", "SENSEX TRI", "NIFTY BANK TRI",
+    "NIFTY 50 TRI",
+    "NIFTY NEXT 50 TRI",
+    "NIFTY 100 TRI",
+    "NIFTY MIDCAP 150 TRI",
+    "NIFTY SMALLCAP 250 TRI",
+    "NIFTY 500 TRI",
+    "SENSEX TRI",
+    "NIFTY BANK TRI",
 )
 ARBITRAGE_BENCHMARK: str = "NIFTY 50 ARBITRAGE INDEX"
 
@@ -156,6 +163,7 @@ ARBITRAGE_BENCHMARK: str = "NIFTY 50 ARBITRAGE INDEX"
 # ==============================================================================
 class FundMetadata(BaseModel):
     """SEBI/AMFI master record for a single scheme (direct-growth plan basis)."""
+
     model_config = ConfigDict(frozen=True, str_strip_whitespace=True)
 
     amfi_code: str = Field(..., min_length=4, max_length=8, description="AMFI scheme code")
@@ -192,8 +200,7 @@ class FundMetadata(BaseModel):
                 f"got {self.benchmark!r}. Allowed: {TRI_BENCHMARKS}"
             )
         # Indian nuance 2: Arbitrage funds must not hide behind debt benchmarks.
-        if self.sub_category == HybridSubCategory.ARBITRAGE.value and \
-                self.benchmark.upper() != ARBITRAGE_BENCHMARK:
+        if self.sub_category == HybridSubCategory.ARBITRAGE.value and self.benchmark.upper() != ARBITRAGE_BENCHMARK:
             raise ValueError(
                 f"Arbitrage scheme {self.scheme_name!r} must be benchmarked to "
                 f"{ARBITRAGE_BENCHMARK!r}, got {self.benchmark!r}"
@@ -203,6 +210,7 @@ class FundMetadata(BaseModel):
 
 class NAVSeries(BaseModel):
     """Validated NAV time-series payload for one scheme."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     amfi_code: str
@@ -236,6 +244,7 @@ class NAVSeries(BaseModel):
 
 class Holding(BaseModel):
     """One line item of a monthly portfolio disclosure."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     instrument: str = Field(..., min_length=2)
@@ -262,6 +271,7 @@ class Holding(BaseModel):
 
 class PortfolioDisclosure(BaseModel):
     """Full monthly disclosure for one scheme."""
+
     amfi_code: str
     as_of: date
     holdings: List[Holding] = Field(..., min_length=1)
@@ -311,7 +321,12 @@ class ValidationOrchestrator:
 
     NAV_PANEL_BASELINE: Dict[str, str] = {"index": "datetime64", "values": "float"}
     HOLDINGS_BASELINE: Tuple[str, ...] = (
-        "amfi_code", "as_of", "instrument", "weight", "asset_type", "rating",
+        "amfi_code",
+        "as_of",
+        "instrument",
+        "weight",
+        "asset_type",
+        "rating",
     )
 
     def __init__(self) -> None:
@@ -362,7 +377,8 @@ class ValidationOrchestrator:
     def audit_nav_panel(self, panel: pd.DataFrame, stage: str = "nav_panel") -> bool:
         ok = True
         if not isinstance(panel.index, pd.DatetimeIndex):
-            self._record(stage, "index_is_datetime", False, str(type(panel.index))); ok = False
+            self._record(stage, "index_is_datetime", False, str(type(panel.index)))
+            ok = False
         else:
             self._record(stage, "index_is_datetime", True)
             mono = panel.index.is_monotonic_increasing
@@ -370,9 +386,11 @@ class ValidationOrchestrator:
             ok &= bool(mono)
         vals = panel.to_numpy(dtype=float, na_value=np.nan)
         finite_or_nan = np.all(np.isnan(vals) | np.isfinite(vals))
-        self._record(stage, "no_inf_values", bool(finite_or_nan)); ok &= bool(finite_or_nan)
+        self._record(stage, "no_inf_values", bool(finite_or_nan))
+        ok &= bool(finite_or_nan)
         positive = bool(np.nanmin(vals) > 0) if vals.size else True
-        self._record(stage, "navs_strictly_positive", positive); ok &= positive
+        self._record(stage, "navs_strictly_positive", positive)
+        ok &= positive
         dead_cols = int(panel.isna().all().sum())
         self._record(stage, "no_all_nan_columns", dead_cols == 0, f"{dead_cols} dead columns")
         ok &= dead_cols == 0
@@ -386,8 +404,9 @@ class ValidationOrchestrator:
         self._record(stage, "weights_sum_band", in_band, f"range=[{wsum.min():.3f},{wsum.max():.3f}]")
         return (not missing) and in_band
 
-    def audit_benchmark_alignment(self, fund_returns: pd.Series, bench_returns: pd.Series,
-                                  stage: str = "alignment") -> bool:
+    def audit_benchmark_alignment(
+        self, fund_returns: pd.Series, bench_returns: pd.Series, stage: str = "alignment"
+    ) -> bool:
         joined = pd.concat([fund_returns, bench_returns], axis=1, join="inner").dropna()
         coverage = self.safe_divide(len(joined), max(len(fund_returns.dropna()), 1), fill=0.0)
         ok = bool(coverage >= 0.90)
@@ -403,7 +422,7 @@ class ValidationOrchestrator:
         """Call once per fund processed. Every 10th call triggers a full audit."""
         with self._lock:
             self._iteration += 1
-            fire = (self._iteration % EPISODIC_CHECK_INTERVAL == 0)
+            fire = self._iteration % EPISODIC_CHECK_INTERVAL == 0
         if fire:
             self.log.info("Episodic verification fired at iteration %d (%s)", self._iteration, context)
             for name, df in list(self._watched_frames.items()):
@@ -413,22 +432,22 @@ class ValidationOrchestrator:
                     self.audit_holdings(df, stage=f"episodic:{name}")
 
     # ---------------------- mutation verification ----------------------------
-    def guard_mutation(self, name: str, before: pd.DataFrame,
-                       mutate: Callable[[pd.DataFrame], pd.DataFrame]) -> pd.DataFrame:
+    def guard_mutation(
+        self, name: str, before: pd.DataFrame, mutate: Callable[[pd.DataFrame], pd.DataFrame]
+    ) -> pd.DataFrame:
         """Run a mutation with pre/post continuity checks."""
         pre_hash = self._checksum(before)
         pre_rows, pre_cols = before.shape
         after = mutate(before.copy())
         post_hash = self._checksum(after)
         changed = pre_hash != post_hash
-        self._record(f"mutation:{name}", "mutation_registered", True,
-                     f"changed={changed} rows {pre_rows}->{after.shape[0]}")
+        self._record(
+            f"mutation:{name}", "mutation_registered", True, f"changed={changed} rows {pre_rows}->{after.shape[0]}"
+        )
         if isinstance(after.index, pd.DatetimeIndex):
-            self._record(f"mutation:{name}", "post_mutation_dates_monotonic",
-                         bool(after.index.is_monotonic_increasing))
+            self._record(f"mutation:{name}", "post_mutation_dates_monotonic", bool(after.index.is_monotonic_increasing))
         row_ratio = self.safe_divide(after.shape[0], max(pre_rows, 1), fill=0.0)
-        self._record(f"mutation:{name}", "row_continuity>=50%", bool(row_ratio >= 0.5),
-                     f"ratio={row_ratio:.2f}")
+        self._record(f"mutation:{name}", "row_continuity>=50%", bool(row_ratio >= 0.5), f"ratio={row_ratio:.2f}")
         return after
 
     def summary(self) -> pd.DataFrame:
@@ -477,8 +496,7 @@ class IngestionEngine:
             except Exception as exc:  # noqa: BLE001 - quarantine bad master rows
                 failed += 1
                 self.log.warning("Metadata rejected (%s): %s", rec.get("amfi_code", "?"), exc)
-        self.validator._record("ingest:metadata", "records_validated", failed == 0,
-                               f"ok={ok} failed={failed}")
+        self.validator._record("ingest:metadata", "records_validated", failed == 0, f"ok={ok} failed={failed}")
         return self.metadata
 
     # ----------------------- AMFI text-dump parsing --------------------------
@@ -489,9 +507,7 @@ class IngestionEngine:
             m = self.AMFI_LINE.match(line.strip())
             if not m or m.group("nav") == "N.A.":
                 continue  # category headers, AMC banners, blank lines, suspended NAVs
-            rows.append((m.group("code"),
-                         pd.to_datetime(m.group("date"), format="%d-%b-%Y"),
-                         float(m.group("nav"))))
+            rows.append((m.group("code"), pd.to_datetime(m.group("date"), format="%d-%b-%Y"), float(m.group("nav"))))
         df = pd.DataFrame(rows, columns=["amfi_code", "date", "nav"])
         self.validator._record("ingest:amfi_dump", "lines_parsed", len(df) > 0, f"rows={len(df)}")
         return df
@@ -547,8 +563,7 @@ class QuantEngine:
     SUB_AGENT_B thread pool.
     """
 
-    def __init__(self, validator: ValidationOrchestrator,
-                 rf_annual: float = RISK_FREE_RATE_ANNUAL) -> None:
+    def __init__(self, validator: ValidationOrchestrator, rf_annual: float = RISK_FREE_RATE_ANNUAL) -> None:
         self.validator = validator
         self.rf_annual = rf_annual
         self.rf_daily = (1.0 + rf_annual) ** (1.0 / TRADING_DAYS_PER_YEAR) - 1.0
@@ -582,8 +597,7 @@ class QuantEngine:
         return float(rets.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR)) if len(rets) > 2 else np.nan
 
     # ----------------------- rolling returns (stepped) -----------------------
-    def rolling_returns(self, levels: pd.Series, window_years: int,
-                        step: str = "daily") -> pd.Series:
+    def rolling_returns(self, levels: pd.Series, window_years: int, step: str = "daily") -> pd.Series:
         """
         Stepped rolling CAGR — NOT point-to-point. For every observation date t,
         computes annualised return over [t - window, t]. `step='weekly'`
@@ -594,8 +608,7 @@ class QuantEngine:
         if len(levels) <= window:
             return pd.Series(dtype=float, name=f"roll_{window_years}y")
         gross = self.validator.safe_divide(levels.to_numpy()[window:], levels.to_numpy()[:-window])
-        ann = np.power(gross, 1.0 / window_years, where=np.isfinite(gross),
-                       out=np.full_like(gross, np.nan)) - 1.0
+        ann = np.power(gross, 1.0 / window_years, where=np.isfinite(gross), out=np.full_like(gross, np.nan)) - 1.0
         out = pd.Series(ann, index=levels.index[window:], name=f"roll_{window_years}y")
         if step == "weekly":
             out = out[out.index.dayofweek == 4]  # Friday steps
@@ -634,8 +647,7 @@ class QuantEngine:
         return float(self.validator.safe_divide(excess.mean(), vol) * math.sqrt(TRADING_DAYS_PER_YEAR))
 
     def sortino(self, fund_rets: pd.Series, mar_annual: Optional[float] = None) -> float:
-        mar_daily = ((1 + (self.rf_annual if mar_annual is None else mar_annual))
-                     ** (1 / TRADING_DAYS_PER_YEAR) - 1)
+        mar_daily = (1 + (self.rf_annual if mar_annual is None else mar_annual)) ** (1 / TRADING_DAYS_PER_YEAR) - 1
         excess = fund_rets.dropna() - mar_daily
         downside = np.minimum(excess.to_numpy(), 0.0)
         dd = math.sqrt(float(np.mean(np.square(downside))))
@@ -686,9 +698,9 @@ class QuantEngine:
         aligned = pd.concat([fund_weights, bench_weights], axis=1).fillna(0.0)
         return float(0.5 * (aligned.iloc[:, 0] - aligned.iloc[:, 1]).abs().sum())
 
-    def arbitrage_spread_velocity(self, fund_levels: pd.Series,
-                                  arb_index_levels: pd.Series,
-                                  lookback: int = 63) -> Dict[str, float]:
+    def arbitrage_spread_velocity(
+        self, fund_levels: pd.Series, arb_index_levels: pd.Series, lookback: int = 63
+    ) -> Dict[str, float]:
         """
         Indian nuance: arbitrage funds live off cash–futures spreads. We measure
         the rolling 3-month annualised active spread vs the Nifty 50 Arbitrage
@@ -697,15 +709,17 @@ class QuantEngine:
         """
         joined = pd.concat([fund_levels, arb_index_levels], axis=1, join="inner").dropna()
         rets = self.daily_returns(joined)
-        active = (rets.iloc[:, 0] - rets.iloc[:, 1])
+        active = rets.iloc[:, 0] - rets.iloc[:, 1]
         roll_spread = active.rolling(lookback).mean() * TRADING_DAYS_PER_YEAR
         roll_spread = roll_spread.dropna()
         if len(roll_spread) < lookback:
             return {"arb_spread_ann": np.nan, "arb_spread_velocity": np.nan}
         recent = roll_spread.iloc[-lookback:]
         slope, *_ = scistats.linregress(np.arange(len(recent)), recent.to_numpy())
-        return {"arb_spread_ann": float(roll_spread.iloc[-1]),
-                "arb_spread_velocity": float(slope * TRADING_DAYS_PER_YEAR)}
+        return {
+            "arb_spread_ann": float(roll_spread.iloc[-1]),
+            "arb_spread_velocity": float(slope * TRADING_DAYS_PER_YEAR),
+        }
 
     def max_drawdown(self, levels: pd.Series) -> float:
         levels = levels.dropna()
@@ -714,13 +728,16 @@ class QuantEngine:
         return float(np.nanmin(dd)) if dd.size else np.nan
 
     # ------------------------ full metric assembly ---------------------------
-    def compute_fund_metrics(self, meta: FundMetadata, fund_levels: pd.Series,
-                             bench_levels: pd.Series,
-                             arb_index_levels: Optional[pd.Series] = None) -> Dict[str, float]:
+    def compute_fund_metrics(
+        self,
+        meta: FundMetadata,
+        fund_levels: pd.Series,
+        bench_levels: pd.Series,
+        arb_index_levels: Optional[pd.Series] = None,
+    ) -> Dict[str, float]:
         fund_rets = self.daily_returns(fund_levels.dropna())
         bench_rets = self.daily_returns(bench_levels.dropna())
-        self.validator.audit_benchmark_alignment(fund_rets, bench_rets,
-                                                 stage=f"quant:{meta.amfi_code}")
+        self.validator.audit_benchmark_alignment(fund_rets, bench_rets, stage=f"quant:{meta.amfi_code}")
         beta, alpha = self.beta_alpha(fund_rets, bench_rets)
         ucr, dcr = self.capture_ratios(fund_rets, bench_rets)
         metrics: Dict[str, float] = {
@@ -764,10 +781,13 @@ class RiskStressTester:
 
     YIELD_SHOCKS_BPS: Tuple[int, ...] = (50, 100, 200)
 
-    def __init__(self, validator: ValidationOrchestrator,
-                 issuer_limit: float = SEBI_SINGLE_ISSUER_LIMIT,
-                 group_limit: float = SEBI_GROUP_EXPOSURE_LIMIT,
-                 adv_participation: float = DEFAULT_ADV_PARTICIPATION) -> None:
+    def __init__(
+        self,
+        validator: ValidationOrchestrator,
+        issuer_limit: float = SEBI_SINGLE_ISSUER_LIMIT,
+        group_limit: float = SEBI_GROUP_EXPOSURE_LIMIT,
+        adv_participation: float = DEFAULT_ADV_PARTICIPATION,
+    ) -> None:
         self.validator = validator
         self.issuer_limit = issuer_limit
         self.group_limit = group_limit
@@ -793,8 +813,9 @@ class RiskStressTester:
         sd = self.validator.safe_divide
         return {
             "modified_duration": float(sd(np.dot(w, debt["modified_duration"].to_numpy()), wsum)),
-            "macaulay_duration": float(sd(np.dot(w, debt["macaulay_duration"].fillna(
-                debt["modified_duration"]).to_numpy()), wsum)),
+            "macaulay_duration": float(
+                sd(np.dot(w, debt["macaulay_duration"].fillna(debt["modified_duration"]).to_numpy()), wsum)
+            ),
             "ytm": float(sd(np.dot(w, debt["ytm"].fillna(0.0).to_numpy()), wsum)),
         }
 
@@ -811,12 +832,16 @@ class RiskStressTester:
         """Single-issuer and corporate-group concentration surveillance."""
         debt = holdings[holdings["asset_type"] == "debt"]
         if debt.empty:
-            return {"max_issuer_weight": 0.0, "max_group_weight": 0.0,
-                    "issuer_breaches": 0, "group_breaches": 0, "top_group": None}
+            return {
+                "max_issuer_weight": 0.0,
+                "max_group_weight": 0.0,
+                "issuer_breaches": 0,
+                "group_breaches": 0,
+                "top_group": None,
+            }
         issuer_w = debt.groupby("instrument")["weight"].sum()
         grp = debt.assign(corporate_group=debt["corporate_group"].fillna("STANDALONE"))
-        group_w = grp[grp["corporate_group"] != "STANDALONE"] \
-            .groupby("corporate_group")["weight"].sum()
+        group_w = grp[grp["corporate_group"] != "STANDALONE"].groupby("corporate_group")["weight"].sum()
         max_group = float(group_w.max()) if len(group_w) else 0.0
         return {
             "max_issuer_weight": float(issuer_w.max()),
@@ -833,11 +858,9 @@ class RiskStressTester:
         consuming at most `adv_participation` of its average daily traded value,
         exposure-weighted; plus weighted-average market cap.
         """
-        eq = holdings[(holdings["asset_type"] == "equity")
-                      & holdings["avg_daily_traded_value_cr"].notna()]
+        eq = holdings[(holdings["asset_type"] == "equity") & holdings["avg_daily_traded_value_cr"].notna()]
         if eq.empty:
-            return {"wavg_market_cap_cr": np.nan, "days_to_liquidate_wavg": np.nan,
-                    "days_to_liquidate_p90": np.nan}
+            return {"wavg_market_cap_cr": np.nan, "days_to_liquidate_wavg": np.nan, "days_to_liquidate_p90": np.nan}
         position_value = eq["weight"].to_numpy() * aum_cr
         sellable_per_day = self.adv_participation * eq["avg_daily_traded_value_cr"].to_numpy()
         dtl = self.validator.safe_divide(position_value, sellable_per_day)
@@ -853,8 +876,7 @@ class RiskStressTester:
     # ----------------------------- hybrid ------------------------------------
     def hybrid_profile(self, holdings: pd.DataFrame) -> Dict[str, Any]:
         eq_w = float(holdings.loc[holdings["asset_type"] == "equity", "weight"].sum())
-        hedged_w = float(holdings.loc[(holdings["asset_type"] == "equity")
-                                      & holdings["is_hedged"], "weight"].sum())
+        hedged_w = float(holdings.loc[(holdings["asset_type"] == "equity") & holdings["is_hedged"], "weight"].sum())
         unhedged = eq_w - hedged_w
         sd = self.validator.safe_divide
         if unhedged >= 0.65:
@@ -883,8 +905,12 @@ class RiskStressTester:
             out.update(dur)
             out.update(self.yield_shock_pnl(dur["modified_duration"], debt_weight))
             out.update(self.concentration_flags(h))
-        if meta.category in (SEBICategory.EQUITY, SEBICategory.INDEX_ETF,
-                             SEBICategory.HYBRID, SEBICategory.SOLUTION_ORIENTED):
+        if meta.category in (
+            SEBICategory.EQUITY,
+            SEBICategory.INDEX_ETF,
+            SEBICategory.HYBRID,
+            SEBICategory.SOLUTION_ORIENTED,
+        ):
             out.update(self.liquidity_profile(h, meta.aum_cr))
         if meta.category in (SEBICategory.HYBRID, SEBICategory.SOLUTION_ORIENTED):
             out.update(self.hybrid_profile(h))
@@ -915,58 +941,58 @@ class ScoringEngine:
             # no pre-registered variant (this one included) measurably BEAT the
             # old weights' within-cohort rank AUC; all sit at ~0.46, i.e. the
             # fixed composite has no demonstrated within-cohort selection skill.
-            "rr3y_mean":            (0.135, +1),
-            "rr5y_mean":            (0.09,  +1),
-            "sortino":              (0.135, +1),
-            "info_ratio":           (0.135, +1),
-            "alpha":                (0.09,  +1),
-            "upside_capture":       (0.0675, +1),
-            "downside_capture":     (0.0675, -1),
-            "max_drawdown":         (0.045, +1),  # less-negative drawdown is better
+            "rr3y_mean": (0.135, +1),
+            "rr5y_mean": (0.09, +1),
+            "sortino": (0.135, +1),
+            "info_ratio": (0.135, +1),
+            "alpha": (0.09, +1),
+            "upside_capture": (0.0675, +1),
+            "downside_capture": (0.0675, -1),
+            "max_drawdown": (0.045, +1),  # less-negative drawdown is better
             # Robust Phase-B model finding (coefficients.json cohort runs):
             # beta_3y -0.902/-0.960, sign+magnitude stable across both cohort
             # targets — lower systematic risk ranks better within cohort.
-            "beta":                 (0.135, -1),
+            "beta": (0.135, -1),
             # days_to_liquidate_wavg dropped (was 0.10): investor liquidity is
             # LOCKED for the 7.5y horizon — exit friction is not a selection
             # criterion. expense_ratio raised 0.05 -> 0.10: the one a-priori
             # causal forward-looking factor (cost drag is arithmetic and does
             # not mean-revert); a 1% TER gap compounds to ~7.5% over 7.5y.
-            "expense_ratio":        (0.10, -1),
+            "expense_ratio": (0.10, -1),
         },
         SEBICategory.INDEX_ETF: {
-            "tracking_error":          (0.35, -1),
+            "tracking_error": (0.35, -1),
             "tracking_difference_tri": (0.30, +1),  # less negative TD vs TRI wins
-            "expense_ratio":           (0.20, -1),
-            "days_to_liquidate_wavg":  (0.15, -1),
+            "expense_ratio": (0.20, -1),
+            "days_to_liquidate_wavg": (0.15, -1),
         },
         SEBICategory.DEBT: {
-            "credit_risk_index":  (0.25, -1),
-            "ytm":                (0.15, +1),
-            "sharpe":             (0.15, +1),
-            "rr3y_mean":          (0.10, +1),
-            "max_group_weight":   (0.10, -1),
-            "max_issuer_weight":  (0.10, -1),
-            "stress_pnl_200bps":  (0.10, +1),   # smaller loss under +200bps wins
-            "expense_ratio":      (0.05, -1),
+            "credit_risk_index": (0.25, -1),
+            "ytm": (0.15, +1),
+            "sharpe": (0.15, +1),
+            "rr3y_mean": (0.10, +1),
+            "max_group_weight": (0.10, -1),
+            "max_issuer_weight": (0.10, -1),
+            "stress_pnl_200bps": (0.10, +1),  # smaller loss under +200bps wins
+            "expense_ratio": (0.05, -1),
         },
         SEBICategory.HYBRID: {
-            "sortino":            (0.20, +1),
-            "rr3y_mean":          (0.15, +1),
-            "alpha":              (0.15, +1),
-            "credit_risk_index":  (0.125, -1),
-            "max_drawdown":       (0.125, +1),
-            "downside_capture":   (0.10, -1),
-            "arb_spread_ann":     (0.10, +1),   # only populated for arbitrage peers
-            "expense_ratio":      (0.05, -1),
+            "sortino": (0.20, +1),
+            "rr3y_mean": (0.15, +1),
+            "alpha": (0.15, +1),
+            "credit_risk_index": (0.125, -1),
+            "max_drawdown": (0.125, +1),
+            "downside_capture": (0.10, -1),
+            "arb_spread_ann": (0.10, +1),  # only populated for arbitrage peers
+            "expense_ratio": (0.05, -1),
         },
         SEBICategory.SOLUTION_ORIENTED: {
-            "rr5y_mean":          (0.25, +1),
-            "sortino":            (0.20, +1),
-            "alpha":              (0.15, +1),
-            "max_drawdown":       (0.15, +1),
-            "credit_risk_index":  (0.15, -1),
-            "expense_ratio":      (0.10, -1),
+            "rr5y_mean": (0.25, +1),
+            "sortino": (0.20, +1),
+            "alpha": (0.15, +1),
+            "max_drawdown": (0.15, +1),
+            "credit_risk_index": (0.15, -1),
+            "expense_ratio": (0.10, -1),
         },
     }
 
@@ -984,12 +1010,14 @@ class ScoringEngine:
         if peers.empty:
             return peers
         factors = self.FACTOR_MAP[category]
-        available = {m: (w, d) for m, (w, d) in factors.items() if m in peers.columns
-                     and peers[m].notna().any()}
+        available = {m: (w, d) for m, (w, d) in factors.items() if m in peers.columns and peers[m].notna().any()}
         weight_sum = sum(w for w, _ in available.values())
-        self.validator._record(f"scoring:{category.value}", "factor_coverage",
-                               weight_sum >= 0.5,
-                               f"{len(available)}/{len(factors)} factors, wsum={weight_sum:.2f}")
+        self.validator._record(
+            f"scoring:{category.value}",
+            "factor_coverage",
+            weight_sum >= 0.5,
+            f"{len(available)}/{len(factors)} factors, wsum={weight_sum:.2f}",
+        )
         composite = pd.Series(0.0, index=peers.index)
         for metric, (weight, direction) in available.items():
             composite += (weight / weight_sum) * self._percentile_rank(peers[metric], direction)
@@ -1003,9 +1031,9 @@ class ScoringEngine:
     def score_universe(self, metrics: pd.DataFrame) -> pd.DataFrame:
         frames = [self.score_category(metrics, cat) for cat in SEBICategory]
         scored = pd.concat([f for f in frames if not f.empty], axis=0)
-        self.validator._record("scoring:universe", "all_funds_scored",
-                               len(scored) == len(metrics),
-                               f"{len(scored)}/{len(metrics)}")
+        self.validator._record(
+            "scoring:universe", "all_funds_scored", len(scored) == len(metrics), f"{len(scored)}/{len(metrics)}"
+        )
         in_band = scored["composite_score"].between(1, 100).all()
         self.validator._record("scoring:universe", "scores_in_1_100_band", bool(in_band))
         return scored
@@ -1028,31 +1056,33 @@ class PipelineOrchestrator:
 
     def __init__(self) -> None:
         self.validator = ValidationOrchestrator()
-        self.ingestion = IngestionEngine(self.validator)          # SUB-AGENT A
-        self.quant = QuantEngine(self.validator)                  # SUB-AGENT B
-        self.risk = RiskStressTester(self.validator)              # SUB-AGENT C
+        self.ingestion = IngestionEngine(self.validator)  # SUB-AGENT A
+        self.quant = QuantEngine(self.validator)  # SUB-AGENT B
+        self.risk = RiskStressTester(self.validator)  # SUB-AGENT C
         self.scoring = ScoringEngine(self.validator)
         self.log = logging.getLogger("MFPipeline.Orchestrator")
 
-    def _quant_task(self, meta: FundMetadata, nav_panel: pd.DataFrame,
-                    bench_panel: pd.DataFrame) -> Tuple[str, Dict[str, float]]:
+    def _quant_task(
+        self, meta: FundMetadata, nav_panel: pd.DataFrame, bench_panel: pd.DataFrame
+    ) -> Tuple[str, Dict[str, float]]:
         fund_levels = nav_panel[meta.amfi_code]
         bench_key = meta.benchmark.upper()
         if bench_key not in bench_panel.columns:
             raise KeyError(f"Benchmark {bench_key} missing for {meta.scheme_name}")
         arb = bench_panel.get(ARBITRAGE_BENCHMARK)
-        metrics = self.quant.compute_fund_metrics(meta, fund_levels,
-                                                  bench_panel[bench_key], arb)
+        metrics = self.quant.compute_fund_metrics(meta, fund_levels, bench_panel[bench_key], arb)
         return meta.amfi_code, metrics
 
-    def _risk_task(self, meta: FundMetadata,
-                   holdings: pd.DataFrame) -> Tuple[str, Dict[str, Any]]:
+    def _risk_task(self, meta: FundMetadata, holdings: pd.DataFrame) -> Tuple[str, Dict[str, Any]]:
         return meta.amfi_code, self.risk.run(meta, holdings)
 
-    def run(self, metadata_records: Sequence[Dict[str, Any]],
-            nav_payloads: Sequence[NAVSeries],
-            benchmark_levels: Dict[str, pd.Series],
-            disclosures: Sequence[PortfolioDisclosure]) -> pd.DataFrame:
+    def run(
+        self,
+        metadata_records: Sequence[Dict[str, Any]],
+        nav_payloads: Sequence[NAVSeries],
+        benchmark_levels: Dict[str, pd.Series],
+        disclosures: Sequence[PortfolioDisclosure],
+    ) -> pd.DataFrame:
 
         # ---- SUB-AGENT A: ingestion (parallel over independent feeds) --------
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="SUB_AGENT_A") as pool_a:
@@ -1064,19 +1094,23 @@ class PipelineOrchestrator:
             holdings = fut_hold.result()
         nav_panel = self.ingestion.build_nav_panel(nav_payloads)
         universe = [m for code, m in metadata.items() if code in nav_panel.columns]
-        self.log.info("Ingestion complete: %d funds, %d benchmark series, %d holding rows",
-                      len(universe), bench_panel.shape[1], len(holdings))
+        self.log.info(
+            "Ingestion complete: %d funds, %d benchmark series, %d holding rows",
+            len(universe),
+            bench_panel.shape[1],
+            len(holdings),
+        )
 
         # ---- SUB-AGENT B + C: fan out quant & risk concurrently --------------
         quant_out: Dict[str, Dict[str, float]] = {}
         risk_out: Dict[str, Dict[str, Any]] = {}
         errors: List[str] = []
-        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="SUB_AGENT_B") as pool_b, \
-             ThreadPoolExecutor(max_workers=4, thread_name_prefix="SUB_AGENT_C") as pool_c:
-            futs = {pool_b.submit(self._quant_task, m, nav_panel, bench_panel): ("quant", m)
-                    for m in universe}
-            futs.update({pool_c.submit(self._risk_task, m, holdings): ("risk", m)
-                         for m in universe})
+        with (
+            ThreadPoolExecutor(max_workers=8, thread_name_prefix="SUB_AGENT_B") as pool_b,
+            ThreadPoolExecutor(max_workers=4, thread_name_prefix="SUB_AGENT_C") as pool_c,
+        ):
+            futs = {pool_b.submit(self._quant_task, m, nav_panel, bench_panel): ("quant", m) for m in universe}
+            futs.update({pool_c.submit(self._risk_task, m, holdings): ("risk", m) for m in universe})
             for fut in as_completed(futs):
                 kind, meta = futs[fut]
                 try:
@@ -1086,17 +1120,20 @@ class PipelineOrchestrator:
                     errors.append(f"{kind}:{meta.amfi_code}:{exc}")
                     self.log.error("Task failed %s %s: %s", kind, meta.amfi_code, exc)
                 self.validator.register_iteration(context=f"{kind}:{meta.amfi_code}")
-        self.validator._record("orchestrator", "zero_task_failures", not errors,
-                               "; ".join(errors[:5]))
+        self.validator._record("orchestrator", "zero_task_failures", not errors, "; ".join(errors[:5]))
 
         # ---- assemble the master metric matrix --------------------------------
         rows = []
         for m in universe:
             row: Dict[str, Any] = {
-                "amfi_code": m.amfi_code, "scheme_name": m.scheme_name,
-                "amc": m.amc_name, "category": m.category.value,
-                "sub_category": m.sub_category, "benchmark": m.benchmark,
-                "aum_cr": m.aum_cr, "expense_ratio": m.expense_ratio,
+                "amfi_code": m.amfi_code,
+                "scheme_name": m.scheme_name,
+                "amc": m.amc_name,
+                "category": m.category.value,
+                "sub_category": m.sub_category,
+                "benchmark": m.benchmark,
+                "aum_cr": m.aum_cr,
+                "expense_ratio": m.expense_ratio,
             }
             row.update(quant_out.get(m.amfi_code, {}))
             row.update(risk_out.get(m.amfi_code, {}))
@@ -1105,8 +1142,7 @@ class PipelineOrchestrator:
 
         # ---- scoring -----------------------------------------------------------
         scored = self.scoring.score_universe(matrix)
-        self.log.info("Pipeline complete. Validation failures: %d",
-                      self.validator.failure_count)
+        self.log.info("Pipeline complete. Validation failures: %d", self.validator.failure_count)
         return scored
 
 
@@ -1121,17 +1157,20 @@ class PipelineOrchestrator:
 # identical.
 # ==============================================================================
 
-def _gbm_levels(rng: np.random.Generator, dates: pd.DatetimeIndex,
-                mu: float, sigma: float, start: float = 100.0) -> pd.Series:
+
+def _gbm_levels(
+    rng: np.random.Generator, dates: pd.DatetimeIndex, mu: float, sigma: float, start: float = 100.0
+) -> pd.Series:
     n = len(dates)
     dt = 1.0 / TRADING_DAYS_PER_YEAR
-    shocks = rng.normal((mu - 0.5 * sigma ** 2) * dt, sigma * math.sqrt(dt), size=n - 1)
+    shocks = rng.normal((mu - 0.5 * sigma**2) * dt, sigma * math.sqrt(dt), size=n - 1)
     levels = start * np.exp(np.concatenate([[0.0], np.cumsum(shocks)]))
     return pd.Series(levels, index=dates)
 
 
-def _driven_levels(rng: np.random.Generator, bench: pd.Series, beta: float,
-                   ann_alpha: float, idio_vol: float, start: float) -> pd.Series:
+def _driven_levels(
+    rng: np.random.Generator, bench: pd.Series, beta: float, ann_alpha: float, idio_vol: float, start: float
+) -> pd.Series:
     """Fund path driven by its benchmark: r_f = α/252 + β·r_b + ε (realistic
     correlation structure so betas, tracking error and capture ratios behave)."""
     b_rets = bench.pct_change().fillna(0.0).to_numpy()
@@ -1148,8 +1187,10 @@ def build_synthetic_universe(seed: int = 42):
 
     # ---------------- benchmarks (all TRI where relevant) ---------------------
     bench_specs = {
-        "NIFTY 50 TRI": (0.125, 0.165), "NIFTY NEXT 50 TRI": (0.135, 0.20),
-        "NIFTY MIDCAP 150 TRI": (0.155, 0.22), "NIFTY SMALLCAP 250 TRI": (0.16, 0.26),
+        "NIFTY 50 TRI": (0.125, 0.165),
+        "NIFTY NEXT 50 TRI": (0.135, 0.20),
+        "NIFTY MIDCAP 150 TRI": (0.155, 0.22),
+        "NIFTY SMALLCAP 250 TRI": (0.16, 0.26),
         "NIFTY 500 TRI": (0.13, 0.17),
         "CRISIL COMPOSITE BOND INDEX": (0.070, 0.02),
         "CRISIL SHORT TERM BOND INDEX": (0.068, 0.012),
@@ -1158,23 +1199,47 @@ def build_synthetic_universe(seed: int = 42):
     }
     benchmarks = {k: _gbm_levels(rng, dates, mu, sig) for k, (mu, sig) in bench_specs.items()}
 
-    groups = ["HDFC Group", "Tata Group", "Adani Group", "Birla Group", "Bajaj Group",
-              "Shriram Group", "Piramal Group", None, None, None]
-    ratings_pool = [CreditRating.SOVEREIGN, CreditRating.AAA, CreditRating.AA_PLUS,
-                    CreditRating.AA, CreditRating.AA_MINUS, CreditRating.A_PLUS,
-                    CreditRating.A1_PLUS, CreditRating.A]
+    groups = [
+        "HDFC Group",
+        "Tata Group",
+        "Adani Group",
+        "Birla Group",
+        "Bajaj Group",
+        "Shriram Group",
+        "Piramal Group",
+        None,
+        None,
+        None,
+    ]
+    ratings_pool = [
+        CreditRating.SOVEREIGN,
+        CreditRating.AAA,
+        CreditRating.AA_PLUS,
+        CreditRating.AA,
+        CreditRating.AA_MINUS,
+        CreditRating.A_PLUS,
+        CreditRating.A1_PLUS,
+        CreditRating.A,
+    ]
 
     def equity_holdings(n_stocks: int, cap_band: str) -> List[Holding]:
         raw = rng.dirichlet(np.ones(n_stocks) * 3.0) * 0.97
-        caps = {"large": (40_000, 6_00_000, 80, 900), "mid": (12_000, 45_000, 15, 120),
-                "small": (1_500, 14_000, 2, 25)}[cap_band]
-        hs = [Holding(instrument=f"{cap_band.title()}Co {i:02d}", weight=float(w),
-                      asset_type="equity",
-                      market_cap_cr=float(rng.uniform(caps[0], caps[1])),
-                      avg_daily_traded_value_cr=float(rng.uniform(caps[2], caps[3])))
-              for i, w in enumerate(raw)]
-        hs.append(Holding(instrument="TREPS/Cash", weight=0.03, asset_type="cash",
-                          rating=CreditRating.CASH))
+        caps = {
+            "large": (40_000, 6_00_000, 80, 900),
+            "mid": (12_000, 45_000, 15, 120),
+            "small": (1_500, 14_000, 2, 25),
+        }[cap_band]
+        hs = [
+            Holding(
+                instrument=f"{cap_band.title()}Co {i:02d}",
+                weight=float(w),
+                asset_type="equity",
+                market_cap_cr=float(rng.uniform(caps[0], caps[1])),
+                avg_daily_traded_value_cr=float(rng.uniform(caps[2], caps[3])),
+            )
+            for i, w in enumerate(raw)
+        ]
+        hs.append(Holding(instrument="TREPS/Cash", weight=0.03, asset_type="cash", rating=CreditRating.CASH))
         return hs
 
     def debt_holdings(n_bonds: int, risk_tilt: float, md_center: float) -> List[Holding]:
@@ -1183,13 +1248,19 @@ def build_synthetic_universe(seed: int = 42):
         for i, w in enumerate(raw):
             rating = ratings_pool[min(int(rng.exponential(risk_tilt)), len(ratings_pool) - 1)]
             md = float(np.clip(rng.normal(md_center, md_center * 0.3), 0.05, 15))
-            hs.append(Holding(
-                instrument=f"Bond Issuer {i:02d}", weight=float(w), asset_type="debt",
-                rating=rating, corporate_group=str(rng.choice(groups)) if rng.random() < 0.6 else None,
-                modified_duration=md, macaulay_duration=md * 1.07,
-                ytm=float(0.065 + 0.004 * CREDIT_RATING_SCORE[rating] + rng.normal(0, 0.002))))
-        hs.append(Holding(instrument="TREPS/Cash", weight=0.05, asset_type="cash",
-                          rating=CreditRating.CASH))
+            hs.append(
+                Holding(
+                    instrument=f"Bond Issuer {i:02d}",
+                    weight=float(w),
+                    asset_type="debt",
+                    rating=rating,
+                    corporate_group=str(rng.choice(groups)) if rng.random() < 0.6 else None,
+                    modified_duration=md,
+                    macaulay_duration=md * 1.07,
+                    ytm=float(0.065 + 0.004 * CREDIT_RATING_SCORE[rating] + rng.normal(0, 0.002)),
+                )
+            )
+        hs.append(Holding(instrument="TREPS/Cash", weight=0.05, asset_type="cash", rating=CreditRating.CASH))
         return hs
 
     def hybrid_holdings(eq_w: float, hedged_frac: float) -> List[Holding]:
@@ -1197,10 +1268,16 @@ def build_synthetic_universe(seed: int = 42):
         n_eq = 12
         eq_raw = rng.dirichlet(np.ones(n_eq)) * eq_w
         for i, w in enumerate(eq_raw):
-            hs.append(Holding(instrument=f"HybridEq {i:02d}", weight=float(w),
-                              asset_type="equity", is_hedged=bool(rng.random() < hedged_frac),
-                              market_cap_cr=float(rng.uniform(30_000, 4_00_000)),
-                              avg_daily_traded_value_cr=float(rng.uniform(60, 700))))
+            hs.append(
+                Holding(
+                    instrument=f"HybridEq {i:02d}",
+                    weight=float(w),
+                    asset_type="equity",
+                    is_hedged=bool(rng.random() < hedged_frac),
+                    market_cap_cr=float(rng.uniform(30_000, 4_00_000)),
+                    avg_daily_traded_value_cr=float(rng.uniform(60, 700)),
+                )
+            )
         debt_w = 0.97 - eq_w
         for h in debt_holdings(8, 0.8, 2.5):
             hs.append(h.model_copy(update={"weight": max(h.weight * debt_w / 1.0, 1e-4)}))
@@ -1211,91 +1288,177 @@ def build_synthetic_universe(seed: int = 42):
     amcs = ["Alpha AMC", "Bharat AMC", "Chola AMC", "Deccan AMC", "Everest AMC"]
     code = 100001
 
-    def add_fund(name, cat, sub, bench, beta, ann_alpha, idio_vol, holdings,
-                 ter: Optional[float] = None):
+    def add_fund(name, cat, sub, bench, beta, ann_alpha, idio_vol, holdings, ter: Optional[float] = None):
         nonlocal code
         ter = float(rng.uniform(0.004, 0.0225)) if ter is None else ter
-        metadata_records.append(dict(
-            amfi_code=str(code), isin=f"INF{rng.integers(0, 10**9):09d}",
-            scheme_name=name, amc_name=str(rng.choice(amcs)), category=cat,
-            sub_category=sub, benchmark=bench,
-            aum_cr=float(rng.uniform(400, 45_000)),
-            expense_ratio=ter,
-            inception_date=date(2015, 1, 1)))
-        levels = _driven_levels(rng, benchmarks[bench], beta, ann_alpha - ter,
-                                idio_vol, start=float(rng.uniform(10, 300)))
-        nav_payloads.append(NAVSeries(amfi_code=str(code),
-                                      dates=[d.date() for d in dates],
-                                      navs=levels.tolist()))
-        disclosures.append(PortfolioDisclosure(amfi_code=str(code),
-                                               as_of=date(2026, 5, 31), holdings=holdings))
+        metadata_records.append(
+            dict(
+                amfi_code=str(code),
+                isin=f"INF{rng.integers(0, 10**9):09d}",
+                scheme_name=name,
+                amc_name=str(rng.choice(amcs)),
+                category=cat,
+                sub_category=sub,
+                benchmark=bench,
+                aum_cr=float(rng.uniform(400, 45_000)),
+                expense_ratio=ter,
+                inception_date=date(2015, 1, 1),
+            )
+        )
+        levels = _driven_levels(
+            rng, benchmarks[bench], beta, ann_alpha - ter, idio_vol, start=float(rng.uniform(10, 300))
+        )
+        nav_payloads.append(NAVSeries(amfi_code=str(code), dates=[d.date() for d in dates], navs=levels.tolist()))
+        disclosures.append(PortfolioDisclosure(amfi_code=str(code), as_of=date(2026, 5, 31), holdings=holdings))
         code += 1
 
     # -- Equity (12): active funds — beta ≈ 0.9-1.1, α spread, real idio noise ---
     for i in range(4):
-        add_fund(f"Large Cap Fund {i+1}", SEBICategory.EQUITY, "Large Cap",
-                 "NIFTY 50 TRI", rng.uniform(0.90, 1.08), rng.uniform(-0.02, 0.035),
-                 rng.uniform(0.03, 0.06), equity_holdings(30, "large"))
+        add_fund(
+            f"Large Cap Fund {i + 1}",
+            SEBICategory.EQUITY,
+            "Large Cap",
+            "NIFTY 50 TRI",
+            rng.uniform(0.90, 1.08),
+            rng.uniform(-0.02, 0.035),
+            rng.uniform(0.03, 0.06),
+            equity_holdings(30, "large"),
+        )
     for i in range(4):
-        add_fund(f"Mid Cap Fund {i+1}", SEBICategory.EQUITY, "Mid Cap",
-                 "NIFTY MIDCAP 150 TRI", rng.uniform(0.92, 1.10), rng.uniform(-0.02, 0.05),
-                 rng.uniform(0.05, 0.09), equity_holdings(40, "mid"))
+        add_fund(
+            f"Mid Cap Fund {i + 1}",
+            SEBICategory.EQUITY,
+            "Mid Cap",
+            "NIFTY MIDCAP 150 TRI",
+            rng.uniform(0.92, 1.10),
+            rng.uniform(-0.02, 0.05),
+            rng.uniform(0.05, 0.09),
+            equity_holdings(40, "mid"),
+        )
     for i in range(4):
-        add_fund(f"Small Cap Fund {i+1}", SEBICategory.EQUITY, "Small Cap",
-                 "NIFTY SMALLCAP 250 TRI", rng.uniform(0.90, 1.12), rng.uniform(-0.03, 0.06),
-                 rng.uniform(0.06, 0.11), equity_holdings(55, "small"))
+        add_fund(
+            f"Small Cap Fund {i + 1}",
+            SEBICategory.EQUITY,
+            "Small Cap",
+            "NIFTY SMALLCAP 250 TRI",
+            rng.uniform(0.90, 1.12),
+            rng.uniform(-0.03, 0.06),
+            rng.uniform(0.06, 0.11),
+            equity_holdings(55, "small"),
+        )
 
     # -- Index / ETF (6): β=1, α = -drag, tiny idio noise -> low TE, negative TD --
     for i in range(3):
-        add_fund(f"Nifty 50 Index Fund {i+1}", SEBICategory.INDEX_ETF, "Index Fund",
-                 "NIFTY 50 TRI", 1.0, -rng.uniform(0.0002, 0.0015),
-                 rng.uniform(0.001, 0.006), equity_holdings(50, "large"),
-                 ter=float(rng.uniform(0.0005, 0.0035)))
+        add_fund(
+            f"Nifty 50 Index Fund {i + 1}",
+            SEBICategory.INDEX_ETF,
+            "Index Fund",
+            "NIFTY 50 TRI",
+            1.0,
+            -rng.uniform(0.0002, 0.0015),
+            rng.uniform(0.001, 0.006),
+            equity_holdings(50, "large"),
+            ter=float(rng.uniform(0.0005, 0.0035)),
+        )
     for i in range(3):
-        add_fund(f"Nifty Next 50 ETF {i+1}", SEBICategory.INDEX_ETF, "ETF",
-                 "NIFTY NEXT 50 TRI", 1.0, -rng.uniform(0.0002, 0.0020),
-                 rng.uniform(0.001, 0.008), equity_holdings(50, "large"),
-                 ter=float(rng.uniform(0.0005, 0.0045)))
+        add_fund(
+            f"Nifty Next 50 ETF {i + 1}",
+            SEBICategory.INDEX_ETF,
+            "ETF",
+            "NIFTY NEXT 50 TRI",
+            1.0,
+            -rng.uniform(0.0002, 0.0020),
+            rng.uniform(0.001, 0.008),
+            equity_holdings(50, "large"),
+            ter=float(rng.uniform(0.0005, 0.0045)),
+        )
 
     # -- Debt (12) ----------------------------------------------------------------
     for i in range(4):
-        add_fund(f"Corporate Bond Fund {i+1}", SEBICategory.DEBT, "Corporate Bond",
-                 "CRISIL COMPOSITE BOND INDEX", rng.uniform(0.85, 1.05),
-                 rng.uniform(-0.004, 0.008), rng.uniform(0.002, 0.006),
-                 debt_holdings(20, 0.7, 3.0), ter=float(rng.uniform(0.002, 0.007)))
+        add_fund(
+            f"Corporate Bond Fund {i + 1}",
+            SEBICategory.DEBT,
+            "Corporate Bond",
+            "CRISIL COMPOSITE BOND INDEX",
+            rng.uniform(0.85, 1.05),
+            rng.uniform(-0.004, 0.008),
+            rng.uniform(0.002, 0.006),
+            debt_holdings(20, 0.7, 3.0),
+            ter=float(rng.uniform(0.002, 0.007)),
+        )
     for i in range(4):
-        add_fund(f"Credit Risk Fund {i+1}", SEBICategory.DEBT, "Credit Risk",
-                 "CRISIL COMPOSITE BOND INDEX", rng.uniform(0.80, 1.05),
-                 rng.uniform(0.004, 0.018), rng.uniform(0.006, 0.014),
-                 debt_holdings(16, 2.2, 2.2), ter=float(rng.uniform(0.006, 0.016)))
+        add_fund(
+            f"Credit Risk Fund {i + 1}",
+            SEBICategory.DEBT,
+            "Credit Risk",
+            "CRISIL COMPOSITE BOND INDEX",
+            rng.uniform(0.80, 1.05),
+            rng.uniform(0.004, 0.018),
+            rng.uniform(0.006, 0.014),
+            debt_holdings(16, 2.2, 2.2),
+            ter=float(rng.uniform(0.006, 0.016)),
+        )
     for i in range(4):
-        add_fund(f"Short Duration Fund {i+1}", SEBICategory.DEBT, "Short Duration",
-                 "CRISIL SHORT TERM BOND INDEX", rng.uniform(0.85, 1.05),
-                 rng.uniform(-0.003, 0.005), rng.uniform(0.001, 0.004),
-                 debt_holdings(22, 0.6, 1.4), ter=float(rng.uniform(0.002, 0.006)))
+        add_fund(
+            f"Short Duration Fund {i + 1}",
+            SEBICategory.DEBT,
+            "Short Duration",
+            "CRISIL SHORT TERM BOND INDEX",
+            rng.uniform(0.85, 1.05),
+            rng.uniform(-0.003, 0.005),
+            rng.uniform(0.001, 0.004),
+            debt_holdings(22, 0.6, 1.4),
+            ter=float(rng.uniform(0.002, 0.006)),
+        )
 
     # -- Hybrid (8) -----------------------------------------------------------------
     for i in range(3):
-        add_fund(f"Aggressive Hybrid Fund {i+1}", SEBICategory.HYBRID, "Aggressive Hybrid",
-                 "CRISIL HYBRID 35+65 AGGRESSIVE INDEX", rng.uniform(0.90, 1.05),
-                 rng.uniform(-0.015, 0.03), rng.uniform(0.02, 0.05),
-                 hybrid_holdings(0.70, 0.05))
+        add_fund(
+            f"Aggressive Hybrid Fund {i + 1}",
+            SEBICategory.HYBRID,
+            "Aggressive Hybrid",
+            "CRISIL HYBRID 35+65 AGGRESSIVE INDEX",
+            rng.uniform(0.90, 1.05),
+            rng.uniform(-0.015, 0.03),
+            rng.uniform(0.02, 0.05),
+            hybrid_holdings(0.70, 0.05),
+        )
     for i in range(2):
-        add_fund(f"Conservative Hybrid Fund {i+1}", SEBICategory.HYBRID, "Conservative Hybrid",
-                 "CRISIL HYBRID 35+65 AGGRESSIVE INDEX", rng.uniform(0.30, 0.45),
-                 rng.uniform(0.01, 0.03), rng.uniform(0.01, 0.02),
-                 hybrid_holdings(0.20, 0.05))
+        add_fund(
+            f"Conservative Hybrid Fund {i + 1}",
+            SEBICategory.HYBRID,
+            "Conservative Hybrid",
+            "CRISIL HYBRID 35+65 AGGRESSIVE INDEX",
+            rng.uniform(0.30, 0.45),
+            rng.uniform(0.01, 0.03),
+            rng.uniform(0.01, 0.02),
+            hybrid_holdings(0.20, 0.05),
+        )
     for i in range(3):
-        add_fund(f"Arbitrage Fund {i+1}", SEBICategory.HYBRID, "Arbitrage",
-                 "NIFTY 50 ARBITRAGE INDEX", rng.uniform(0.85, 1.0),
-                 rng.uniform(-0.004, 0.006), rng.uniform(0.001, 0.004),
-                 hybrid_holdings(0.68, 0.98), ter=float(rng.uniform(0.002, 0.01)))
+        add_fund(
+            f"Arbitrage Fund {i + 1}",
+            SEBICategory.HYBRID,
+            "Arbitrage",
+            "NIFTY 50 ARBITRAGE INDEX",
+            rng.uniform(0.85, 1.0),
+            rng.uniform(-0.004, 0.006),
+            rng.uniform(0.001, 0.004),
+            hybrid_holdings(0.68, 0.98),
+            ter=float(rng.uniform(0.002, 0.01)),
+        )
 
     # -- Solution Oriented (2) ---------------------------------------------------------
     for i, nm in enumerate(["Retirement Fund", "Children's Gift Fund"]):
-        add_fund(nm, SEBICategory.SOLUTION_ORIENTED, "Retirement/Children",
-                 "NIFTY 500 TRI", rng.uniform(0.55, 0.75), rng.uniform(-0.01, 0.02),
-                 rng.uniform(0.02, 0.04), hybrid_holdings(0.55, 0.05))
+        add_fund(
+            nm,
+            SEBICategory.SOLUTION_ORIENTED,
+            "Retirement/Children",
+            "NIFTY 500 TRI",
+            rng.uniform(0.55, 0.75),
+            rng.uniform(-0.01, 0.02),
+            rng.uniform(0.02, 0.04),
+            hybrid_holdings(0.55, 0.05),
+        )
 
     return metadata_records, nav_payloads, benchmarks, disclosures
 
@@ -1330,8 +1493,17 @@ def main() -> None:
 
     pd.set_option("display.width", 220)
     pd.set_option("display.max_columns", 12)
-    show = ["scheme_name", "category", "sub_category", "composite_score", "peer_rank",
-            "sortino", "alpha", "tracking_error", "credit_risk_index"]
+    show = [
+        "scheme_name",
+        "category",
+        "sub_category",
+        "composite_score",
+        "peer_rank",
+        "sortino",
+        "alpha",
+        "tracking_error",
+        "credit_risk_index",
+    ]
     for cat in SEBICategory:
         block = scored[scored["category"] == cat.value]
         if block.empty:
@@ -1341,8 +1513,7 @@ def main() -> None:
 
     print("\n================ VALIDATION SUMMARY ================")
     print(orch.validator.summary().to_string())
-    print(f"\nTotal validation checks: {len(orch.validator.records)} | "
-          f"failures: {orch.validator.failure_count}")
+    print(f"\nTotal validation checks: {len(orch.validator.records)} | failures: {orch.validator.failure_count}")
 
     out_path = CACHE / "mf_universe_scored.csv"
     scored.to_csv(out_path)

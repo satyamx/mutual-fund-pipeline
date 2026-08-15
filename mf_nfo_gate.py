@@ -47,23 +47,23 @@ TRADING_DAYS_PER_YEAR = 252
 
 
 class Eligibility(str, Enum):
-    PRE_LAUNCH = "PRE_LAUNCH"      # NFO open / not yet allotted -> no NAV exists at all
-    NEWBORN = "NEWBORN"            # allotted but < 6 months -> no meaningful statistics
-    YOUNG = "YOUNG"                # 6m - 3y -> partial: short-window metrics only
-    EVALUABLE = "EVALUABLE"        # >= 3y -> full pipeline
+    PRE_LAUNCH = "PRE_LAUNCH"  # NFO open / not yet allotted -> no NAV exists at all
+    NEWBORN = "NEWBORN"  # allotted but < 6 months -> no meaningful statistics
+    YOUNG = "YOUNG"  # 6m - 3y -> partial: short-window metrics only
+    EVALUABLE = "EVALUABLE"  # >= 3y -> full pipeline
 
 
 # Minimum history each analytic genuinely requires. These are not style choices:
 # a 3-year rolling-return series needs 3 years of NAV, full stop.
 REQUIREMENTS: Dict[str, int] = {
-    "nav_basic_stats":      60,                          # ~3 months
-    "beta_alpha":           60,
-    "sharpe_sortino":      126,                          # ~6 months
-    "max_drawdown":        126,
-    "rolling_3y":          3 * TRADING_DAYS_PER_YEAR,
-    "rolling_5y":          5 * TRADING_DAYS_PER_YEAR,
-    "manager_alpha_score": 3 * TRADING_DAYS_PER_YEAR,    # needs t-3y disclosure + prices
-    "sebi_true_to_label":  1,                            # needs ONE portfolio disclosure
+    "nav_basic_stats": 60,  # ~3 months
+    "beta_alpha": 60,
+    "sharpe_sortino": 126,  # ~6 months
+    "max_drawdown": 126,
+    "rolling_3y": 3 * TRADING_DAYS_PER_YEAR,
+    "rolling_5y": 5 * TRADING_DAYS_PER_YEAR,
+    "manager_alpha_score": 3 * TRADING_DAYS_PER_YEAR,  # needs t-3y disclosure + prices
+    "sebi_true_to_label": 1,  # needs ONE portfolio disclosure
 }
 
 
@@ -89,28 +89,42 @@ class EligibilityGate:
     NEWBORN_DAYS = 182
     YOUNG_DAYS = 3 * 365
 
-    def assess(self, scheme_name: str, nav: Optional[pd.Series],
-               allotment_date: Optional[date] = None,
-               has_disclosure: bool = False,
-               today: Optional[date] = None) -> EligibilityVerdict:
+    def assess(
+        self,
+        scheme_name: str,
+        nav: Optional[pd.Series],
+        allotment_date: Optional[date] = None,
+        has_disclosure: bool = False,
+        today: Optional[date] = None,
+    ) -> EligibilityVerdict:
         today = today or date.today()
         n = 0 if nav is None else int(nav.dropna().shape[0])
 
         if allotment_date is None and n == 0:
             return EligibilityVerdict(
-                scheme_name, Eligibility.PRE_LAUNCH, 0, None, None,
+                scheme_name,
+                Eligibility.PRE_LAUNCH,
+                0,
+                None,
+                None,
                 blocked=list(REQUIREMENTS),
                 reason="No NAV series and no allotment date: the scheme does not yet exist "
-                       "as a priced instrument. Nothing in this pipeline is computable.")
+                "as a priced instrument. Nothing in this pipeline is computable.",
+            )
 
         if allotment_date is not None and allotment_date > today:
             days = (allotment_date - today).days
             return EligibilityVerdict(
-                scheme_name, Eligibility.PRE_LAUNCH, 0, None, allotment_date,
+                scheme_name,
+                Eligibility.PRE_LAUNCH,
+                0,
+                None,
+                allotment_date,
                 blocked=list(REQUIREMENTS),
                 reason=f"NFO not yet allotted (allotment in {days} days, on "
-                       f"{allotment_date}). First NAV is the ₹10 face value, which "
-                       f"carries zero information. REFUSING to score.")
+                f"{allotment_date}). First NAV is the ₹10 face value, which "
+                f"carries zero information. REFUSING to score.",
+            )
 
         age = (today - allotment_date).days if allotment_date else None
 
@@ -125,22 +139,25 @@ class EligibilityGate:
 
         if age is not None and age < self.NEWBORN_DAYS:
             status = Eligibility.NEWBORN
-            reason = (f"Allotted {allotment_date} — {age} days old ({n} NAV observations). "
-                      f"Statistics on this sample are noise, not signal. Volatility, beta "
-                      f"and Sharpe are not estimable; no portfolio has been disclosed yet "
-                      f"(first disclosure lands ~10 days after the first month-end). "
-                      f"REFUSING to score.")
+            reason = (
+                f"Allotted {allotment_date} — {age} days old ({n} NAV observations). "
+                f"Statistics on this sample are noise, not signal. Volatility, beta "
+                f"and Sharpe are not estimable; no portfolio has been disclosed yet "
+                f"(first disclosure lands ~10 days after the first month-end). "
+                f"REFUSING to score."
+            )
         elif age is not None and age < self.YOUNG_DAYS:
             status = Eligibility.YOUNG
-            reason = (f"{age} days old. Short-window metrics available; 3y/5y rolling "
-                      f"returns and the Manager Alpha Consistency Score are NOT. "
-                      f"Any composite is provisional.")
+            reason = (
+                f"{age} days old. Short-window metrics available; 3y/5y rolling "
+                f"returns and the Manager Alpha Consistency Score are NOT. "
+                f"Any composite is provisional."
+            )
         else:
             status = Eligibility.EVALUABLE
             reason = f"{n} NAV observations — full pipeline available."
 
-        return EligibilityVerdict(scheme_name, status, n, age, allotment_date,
-                                  available, blocked, reason)
+        return EligibilityVerdict(scheme_name, status, n, age, allotment_date, available, blocked, reason)
 
 
 # ==============================================================================
@@ -167,8 +184,7 @@ class NFODossier:
         L.append(f"  >>> NO RECOMMENDATION ISSUED — status: {self.verdict.status.value}")
         L.append(f"      {self.verdict.reason}")
         L.append("")
-        L.append(f"  Blocked analytics ({len(self.verdict.blocked)}): "
-                 f"{', '.join(self.verdict.blocked)}")
+        L.append(f"  Blocked analytics ({len(self.verdict.blocked)}): {', '.join(self.verdict.blocked)}")
         if self.verdict.available:
             L.append(f"  Available: {', '.join(self.verdict.available)}")
         L.append("")
@@ -200,11 +216,18 @@ class NFOAssessor:
     exist, and that false equivalence is precisely what we are guarding against.
     """
 
-    def assess(self, scheme_name: str, amc: str, managers: List[str], category: str,
-               benchmark: str, verdict: EligibilityVerdict,
-               manager_prior_funds: Optional[Dict[str, Any]] = None,
-               structural: Optional[Dict[str, Any]] = None,
-               considerations: Optional[List[str]] = None) -> NFODossier:
+    def assess(
+        self,
+        scheme_name: str,
+        amc: str,
+        managers: List[str],
+        category: str,
+        benchmark: str,
+        verdict: EligibilityVerdict,
+        manager_prior_funds: Optional[Dict[str, Any]] = None,
+        structural: Optional[Dict[str, Any]] = None,
+        considerations: Optional[List[str]] = None,
+    ) -> NFODossier:
         base = [
             "An NFO's honest prior is its SEBI category's base rate, not its brochure. "
             "Ask what the median fund in this category actually delivered.",
@@ -214,6 +237,14 @@ class NFOAssessor:
             "year 4 will still be available in year 4, by which point it will have the "
             "track record this pipeline actually needs.",
         ]
-        return NFODossier(scheme_name, amc, managers, category, benchmark, verdict,
-                          manager_prior_funds or {}, structural or {},
-                          (considerations or []) + base)
+        return NFODossier(
+            scheme_name,
+            amc,
+            managers,
+            category,
+            benchmark,
+            verdict,
+            manager_prior_funds or {},
+            structural or {},
+            (considerations or []) + base,
+        )

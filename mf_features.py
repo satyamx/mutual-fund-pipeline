@@ -55,8 +55,15 @@ RF_DAILY = (1.0 + RF_ANNUAL) ** (1.0 / TRADING_DAYS) - 1.0
 
 # Level-type features that additionally get a within-anchor z-score (§2.4).
 LEVEL_FEATURES = [
-    "cagr_1y", "cagr_3y", "cagr_5y", "mom_6m", "mom_12m_ex1m",
-    "excess_1y", "excess_3y", "sector_mom_12m", "sector_rel_strength",
+    "cagr_1y",
+    "cagr_3y",
+    "cagr_5y",
+    "mom_6m",
+    "mom_12m_ex1m",
+    "excess_1y",
+    "excess_3y",
+    "sector_mom_12m",
+    "sector_rel_strength",
 ]
 
 
@@ -155,9 +162,9 @@ class FeatureEngine:
     returns, so slicing the precomputed series at t is identical to building
     them from a panel truncated at t — verified by --selftest)."""
 
-    MIN_LOO_PEERS = 2          # same floor as the label benchmark (§1.3)
-    MIN_JOINT_OBS = 60         # QuantEngine convention for beta/TE
-    MIN_JOINT_YEARS = 2.75     # same coverage floor as forward_return()
+    MIN_LOO_PEERS = 2  # same floor as the label benchmark (§1.3)
+    MIN_JOINT_OBS = 60  # QuantEngine convention for beta/TE
+    MIN_JOINT_YEARS = 2.75  # same coverage floor as forward_return()
     MIN_PERSIST_CHECKPOINTS = 8
 
     def __init__(self, manifest: pd.DataFrame, nav_panel: dict[str, pd.Series]):
@@ -167,7 +174,7 @@ class FeatureEngine:
 
         # ---- LOO peer composites (trailing twin of the label benchmark) -----
         self.comp_level: dict[str, pd.Series] = {}
-        self.joint: dict[str, pd.DataFrame] = {}   # fund vs composite daily returns
+        self.joint: dict[str, pd.DataFrame] = {}  # fund vs composite daily returns
         for gkey, codes in self.resolver.groups.items():
             rets = _returns_frame(codes, nav_panel)
             if rets.empty:
@@ -201,8 +208,7 @@ class FeatureEngine:
         return self.resolver._group_key(code)
 
     def _relative_stats(self, code: str, t: pd.Timestamp) -> dict[str, float]:
-        out = dict(beta_3y=np.nan, te_3y=np.nan, ir_3y=np.nan,
-                   upcap_3y=np.nan, downcap_3y=np.nan)
+        out = dict(beta_3y=np.nan, te_3y=np.nan, ir_3y=np.nan, upcap_3y=np.nan, downcap_3y=np.nan)
         joint = self.joint.get(code)
         if joint is None:
             return out
@@ -223,6 +229,7 @@ class FeatureEngine:
         if te > 1e-12:
             out["ir_3y"] = float((_ann_return(f) - _ann_return(b)) / te)
         up, down = b > 0, b < 0
+
         # up/down-capture share the same geo-mean(fund)/geo-mean(bench) form over
         # the mask'd periods; factor it out so the two only differ by the mask.
         # Guards are preserved exactly: <=10 obs or |den|<=1e-12 => NaN (the seed).
@@ -232,12 +239,12 @@ class FeatureEngine:
             num = float(np.prod(1.0 + f[mask]) ** (1.0 / mask.sum()) - 1.0)
             den = float(np.prod(1.0 + b[mask]) ** (1.0 / mask.sum()) - 1.0)
             return num / den if abs(den) > 1e-12 else np.nan
+
         out["upcap_3y"] = _capture(up)
         out["downcap_3y"] = _capture(down)
         return out
 
-    def _excess_persist(self, series: pd.Series, comp: pd.Series | None,
-                        t: pd.Timestamp) -> float:
+    def _excess_persist(self, series: pd.Series, comp: pd.Series | None, t: pd.Timestamp) -> float:
         """Share of trailing 12 quarterly checkpoints with trailing-1y excess > 0."""
         if comp is None:
             return np.nan
@@ -280,8 +287,7 @@ class FeatureEngine:
             f["current_dd"] = np.nan
 
         f["mom_6m"] = _simple_return(series, t - pd.DateOffset(months=6), t)
-        f["mom_12m_ex1m"] = _simple_return(series, t - pd.DateOffset(months=12),
-                                           t - pd.DateOffset(months=1))
+        f["mom_12m_ex1m"] = _simple_return(series, t - pd.DateOffset(months=12), t - pd.DateOffset(months=1))
 
         vals = series.to_numpy()
         w = 3 * TRADING_DAYS
@@ -384,8 +390,7 @@ def run_asof_selftest(anchors=("2016-03-31", "2018-06-29", "2021-12-31")) -> boo
     ok = True
     for anchor in anchors:
         t = pd.Timestamp(anchor)
-        codes = [c for c in manifest["amfi_code"] if c in nav_panel
-                 and len(nav_panel[c].loc[:t]) >= 5]
+        codes = [c for c in manifest["amfi_code"] if c in nav_panel and len(nav_panel[c].loc[:t]) >= 5]
         pairs = pd.DataFrame({"amfi_code": codes, "anchor": t})
         base = assemble_panel(FeatureEngine(manifest, nav_panel), pairs)
         for bump in (1.2, 0.8):
@@ -395,14 +400,18 @@ def run_asof_selftest(anchors=("2016-03-31", "2018-06-29", "2021-12-31")) -> boo
                 s2[s2.index > t] *= bump
                 perturbed[code] = s2
             pert = assemble_panel(FeatureEngine(manifest, perturbed), pairs)
-            same = base.drop(columns=["amfi_code", "anchor"]).round(12).equals(
-                pert.drop(columns=["amfi_code", "anchor"]).round(12))
-            print(f"anchor {anchor} bump {bump}: "
-                  f"{'IDENTICAL — no lookahead' if same else 'MISMATCH — LOOKAHEAD BUG'}")
+            same = (
+                base.drop(columns=["amfi_code", "anchor"])
+                .round(12)
+                .equals(pert.drop(columns=["amfi_code", "anchor"]).round(12))
+            )
+            print(f"anchor {anchor} bump {bump}: {'IDENTICAL — no lookahead' if same else 'MISMATCH — LOOKAHEAD BUG'}")
             if not same:
-                bad = [c for c in base.columns
-                       if c not in ("amfi_code", "anchor")
-                       and not base[c].round(12).equals(pert[c].round(12))]
+                bad = [
+                    c
+                    for c in base.columns
+                    if c not in ("amfi_code", "anchor") and not base[c].round(12).equals(pert[c].round(12))
+                ]
                 print("  differing columns:", bad)
                 ok = False
     return ok
@@ -410,8 +419,9 @@ def run_asof_selftest(anchors=("2016-03-31", "2018-06-29", "2021-12-31")) -> boo
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--selftest", action="store_true",
-                    help="anti-lookahead test: perturb post-t NAVs, assert identical features")
+    ap.add_argument(
+        "--selftest", action="store_true", help="anti-lookahead test: perturb post-t NAVs, assert identical features"
+    )
     args = ap.parse_args()
     if args.selftest:
         sys.exit(0 if run_asof_selftest() else 1)

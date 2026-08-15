@@ -68,7 +68,6 @@ import numpy as np
 import pandas as pd
 
 from mf_benchmarks import forward_return
-from mf_datasources import CACHE
 from mf_infer import COHORT_ARTIFACT_PATH, MODEL_DIR
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
 from mf_live_score import build_live_panel
@@ -105,17 +104,36 @@ PSI_REFERENCE_PATH = MODEL_DIR / "psi_reference.json"
 # of time, not informative about the LIVE population being unusual, and would
 # have permanently dominated psi_max/worst[] with a non-actionable signal).
 PSI_FEATURES = [
-    "cagr_1y", "cagr_3y", "cagr_5y", "vol_1y", "vol_3y", "sharpe_3y", "sortino_3y",
-    "max_dd_3y", "current_dd", "mom_6m", "mom_12m_ex1m", "rr3y_neg_share",
-    "excess_1y", "excess_3y", "beta_3y", "te_3y", "ir_3y", "upcap_3y", "downcap_3y",
-    "excess_persist", "sector_mom_12m", "sector_vol_1y", "sector_rel_strength",
+    "cagr_1y",
+    "cagr_3y",
+    "cagr_5y",
+    "vol_1y",
+    "vol_3y",
+    "sharpe_3y",
+    "sortino_3y",
+    "max_dd_3y",
+    "current_dd",
+    "mom_6m",
+    "mom_12m_ex1m",
+    "rr3y_neg_share",
+    "excess_1y",
+    "excess_3y",
+    "beta_3y",
+    "te_3y",
+    "ir_3y",
+    "upcap_3y",
+    "downcap_3y",
+    "excess_persist",
+    "sector_mom_12m",
+    "sector_vol_1y",
+    "sector_rel_strength",
 ]
 PSI_BINS = 10
-PSI_MIN_UNIVERSE = 50          # below this, a decile histogram is noise, not a drift signal
-PSI_MIN_FINITE = 30            # per-feature: skip rather than compute on a thin sample
-PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25   # standard PSI rule-of-thumb thresholds
+PSI_MIN_UNIVERSE = 50  # below this, a decile histogram is noise, not a drift signal
+PSI_MIN_FINITE = 30  # per-feature: skip rather than compute on a thin sample
+PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25  # standard PSI rule-of-thumb thresholds
 
-MATURITY = pd.DateOffset(years=3)     # matches forward_return's own `years=3` default
+MATURITY = pd.DateOffset(years=3)  # matches forward_return's own `years=3` default
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
@@ -166,13 +184,11 @@ def _dedupe_key_of(row: dict, dedupe_key: tuple) -> Optional[tuple]:
         # a future/older schema_version) must not crash the whole append — skip
         # it for dedupe purposes rather than letting one odd historical row take
         # down every subsequent batch run.
-        LOGGER.warning("Ledger row missing dedupe key %s — treating as unmatchable: %r",
-                       dedupe_key, row)
+        LOGGER.warning("Ledger row missing dedupe key %s — treating as unmatchable: %r", dedupe_key, row)
         return None
 
 
-def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH,
-                       dedupe_key: tuple = DEDUPE_KEY) -> int:
+def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY) -> int:
     """Append-only, idempotent on `dedupe_key`, crash-safe (seals a torn tail
     before writing, fsyncs after). Returns the number of NEW rows written."""
     if not rows:
@@ -210,8 +226,7 @@ def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH,
     return len(to_write)
 
 
-def load_predictions(path: Path = PREDICTIONS_PATH,
-                     dedupe_key: tuple = DEDUPE_KEY) -> List[dict]:
+def load_predictions(path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY) -> List[dict]:
     """`read_jsonl` plus the ledger's own uniqueness invariant, enforced on READ.
 
     Every consumer of the prediction ledger wants "one row per prediction", which
@@ -237,8 +252,11 @@ def load_predictions(path: Path = PREDICTIONS_PATH,
         seen.add(k)
         out.append(r)
     if dropped:
-        LOGGER.info("Prediction ledger: %d duplicate row(s) collapsed on %s "
-                    "(append-only file, deduped on read).", dropped, dedupe_key)
+        LOGGER.info(
+            "Prediction ledger: %d duplicate row(s) collapsed on %s (append-only file, deduped on read).",
+            dropped,
+            dedupe_key,
+        )
     return out
 
 
@@ -247,34 +265,52 @@ def ledger_stats(path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
     if not rows:
         return dict(rows_total=0, first_anchor=None, last_anchor=None, n_runs=0)
     anchors = sorted(r["anchor"] for r in rows)
-    return dict(rows_total=len(rows), first_anchor=anchors[0], last_anchor=anchors[-1],
-               n_runs=len({r["run_id"] for r in rows}))
+    return dict(
+        rows_total=len(rows), first_anchor=anchors[0], last_anchor=anchors[-1], n_runs=len({r["run_id"] for r in rows})
+    )
 
 
 # ==============================================================================
 # Building a prediction row from a score_live() OK result
 # ==============================================================================
-def build_row(amfi_code: str, cohort_signal: Optional[dict], *, run_id: str,
-             pipeline_sha: str, model_id: Optional[str]) -> Optional[dict]:
+def build_row(
+    amfi_code: str, cohort_signal: Optional[dict], *, run_id: str, pipeline_sha: str, model_id: Optional[str]
+) -> Optional[dict]:
     """None for any non-OK cohort_signal — a THIN_COHORT/STALE_NAV/NOT_IN_UNIVERSE
     result is not a prediction and can never be realized; those gaps already
     live honestly in the artifact's own coverage{}, not duplicated here."""
     if cohort_signal is None or cohort_signal.get("status") != "OK":
         return None
     row = dict(
-        schema_version=SCHEMA_VERSION, run_id=run_id,
-        logged_at=datetime.now(timezone.utc).isoformat(), pipeline_sha=pipeline_sha,
-        model_id=model_id, target=cohort_signal["target"], amfi_code=amfi_code,
-        anchor=cohort_signal["anchor"], probability=cohort_signal["probability"],
+        schema_version=SCHEMA_VERSION,
+        run_id=run_id,
+        logged_at=datetime.now(timezone.utc).isoformat(),
+        pipeline_sha=pipeline_sha,
+        model_id=model_id,
+        target=cohort_signal["target"],
+        amfi_code=amfi_code,
+        anchor=cohort_signal["anchor"],
+        probability=cohort_signal["probability"],
         cohort_percentile=cohort_signal["cohort_percentile"],
-        cohort_key=cohort_signal["cohort_key"], cohort_n=cohort_signal["cohort_n"],
-        universe_n=cohort_signal["universe_n"], cohort_codes=cohort_signal["cohort_codes"],
+        cohort_key=cohort_signal["cohort_key"],
+        cohort_n=cohort_signal["cohort_n"],
+        universe_n=cohort_signal["universe_n"],
+        cohort_codes=cohort_signal["cohort_codes"],
         signal_context=cohort_signal["signal_context"],
-        imputed_features=cohort_signal["imputed_features"], features=cohort_signal["features"],
+        imputed_features=cohort_signal["imputed_features"],
+        features=cohort_signal["features"],
     )
-    canonical = json.dumps(dict(amfi_code=amfi_code, target=row["target"], anchor=row["anchor"],
-                               model_id=model_id, probability=row["probability"],
-                               features=row["features"]), sort_keys=True)
+    canonical = json.dumps(
+        dict(
+            amfi_code=amfi_code,
+            target=row["target"],
+            anchor=row["anchor"],
+            model_id=model_id,
+            probability=row["probability"],
+            features=row["features"],
+        ),
+        sort_keys=True,
+    )
     row["row_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return row
 
@@ -282,8 +318,7 @@ def build_row(amfi_code: str, cohort_signal: Optional[dict], *, run_id: str,
 # ==============================================================================
 # rank_stability — a model-behavior QA proxy, NOT a skill/outcome metric
 # ==============================================================================
-def _previous_run_rows(all_rows: List[dict], current_run_id: str,
-                       model_id: Optional[str] = None) -> List[dict]:
+def _previous_run_rows(all_rows: List[dict], current_run_id: str, model_id: Optional[str] = None) -> List[dict]:
     """The newest run OTHER than this one, optionally restricted to one model.
 
     Restricting matters: this feeds rank_stability, which reports run-to-run
@@ -304,8 +339,7 @@ def rank_stability(current_rows: List[dict], previous_rows: List[dict]) -> Dict[
         return dict(status="FIRST_RUN", spearman=None, n_common=0, prev_run_id=None, note=note)
     # model_id is in the key so a probability is never compared against one from a
     # different model — that would grade an intended model change as instability.
-    prev_by_key = {(r["amfi_code"], r["target"], r.get("model_id")): r["probability"]
-                   for r in previous_rows}
+    prev_by_key = {(r["amfi_code"], r["target"], r.get("model_id")): r["probability"] for r in previous_rows}
     cur, prev = [], []
     for r in current_rows:
         key = (r["amfi_code"], r["target"], r.get("model_id"))
@@ -313,11 +347,17 @@ def rank_stability(current_rows: List[dict], previous_rows: List[dict]) -> Dict[
             cur.append(r["probability"])
             prev.append(prev_by_key[key])
     if len(cur) < MIN_COMMON_FOR_STABILITY:
-        return dict(status="INSUFFICIENT_OVERLAP", spearman=None, n_common=len(cur),
-                   prev_run_id=previous_rows[0]["run_id"], note=note)
+        return dict(
+            status="INSUFFICIENT_OVERLAP",
+            spearman=None,
+            n_common=len(cur),
+            prev_run_id=previous_rows[0]["run_id"],
+            note=note,
+        )
     spearman = float(pd.Series(cur).rank().corr(pd.Series(prev).rank()))
-    return dict(status="OK", spearman=round(spearman, 4), n_common=len(cur),
-               prev_run_id=previous_rows[0]["run_id"], note=note)
+    return dict(
+        status="OK", spearman=round(spearman, 4), n_common=len(cur), prev_run_id=previous_rows[0]["run_id"], note=note
+    )
 
 
 # ==============================================================================
@@ -354,8 +394,9 @@ def build_psi_reference(out: Path = PSI_REFERENCE_PATH) -> dict:
 
     df, _ = M.load_cohort_dataset()
     artifact = json.loads(COHORT_ARTIFACT_PATH.read_text(encoding="utf-8"))
-    ref: Dict[str, Any] = dict(model_id=artifact["version"],
-                               created=datetime.now(timezone.utc).isoformat(), features={})
+    ref: Dict[str, Any] = dict(
+        model_id=artifact["version"], created=datetime.now(timezone.utc).isoformat(), features={}
+    )
     for col in PSI_FEATURES:
         vals = df[col].to_numpy(dtype=float)
         edges = _decile_edges(vals)
@@ -364,7 +405,8 @@ def build_psi_reference(out: Path = PSI_REFERENCE_PATH) -> dict:
         ref["features"][col] = dict(
             edges=[float(e) for e in edges],
             bin_props=[float(p) for p in _bin_proportions(vals, edges)],
-            missing_rate=float(np.mean(~np.isfinite(vals))))
+            missing_rate=float(np.mean(~np.isfinite(vals))),
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(ref, indent=1), encoding="utf-8")
     return ref
@@ -388,42 +430,72 @@ def compute_psi(live_features: Dict[str, np.ndarray], reference: dict) -> Dict[s
         ref_p = np.clip(np.array(ref_f["bin_props"]), 1e-4, None)
         per_feature[col] = float(np.sum((cur - ref_p) * np.log(cur / ref_p)))
     if not per_feature:
-        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
-                   worst=[], n_features=0, skipped_features=skipped)
+        return dict(
+            status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None, worst=[], n_features=0, skipped_features=skipped
+        )
     psi_max = max(per_feature.values())
-    status = ("SIGNIFICANT_SHIFT" if psi_max > PSI_SIGNIFICANT else
-             "MODERATE_SHIFT" if psi_max > PSI_MODERATE else "OK")
+    status = "SIGNIFICANT_SHIFT" if psi_max > PSI_SIGNIFICANT else "MODERATE_SHIFT" if psi_max > PSI_MODERATE else "OK"
     worst = sorted(per_feature.items(), key=lambda kv: -kv[1])[:3]
-    return dict(status=status, psi_max=round(psi_max, 4),
-               psi_mean=round(float(np.mean(list(per_feature.values()))), 4),
-               worst=[dict(feature=f, psi=round(v, 4)) for f, v in worst],
-               n_features=len(per_feature), skipped_features=skipped)
+    return dict(
+        status=status,
+        psi_max=round(psi_max, 4),
+        psi_mean=round(float(np.mean(list(per_feature.values()))), 4),
+        worst=[dict(feature=f, psi=round(v, 4)) for f, v in worst],
+        n_features=len(per_feature),
+        skipped_features=skipped,
+    )
 
 
-def compute_psi_live(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series], engine,
-                     today: pd.Timestamp, model_id: Optional[str],
-                     reference_path: Path = PSI_REFERENCE_PATH) -> Dict[str, Any]:
+def compute_psi_live(
+    manifest: pd.DataFrame,
+    nav_panel: Dict[str, pd.Series],
+    engine,
+    today: pd.Timestamp,
+    model_id: Optional[str],
+    reference_path: Path = PSI_REFERENCE_PATH,
+) -> Dict[str, Any]:
     """Builds ONE fresh live panel at the universe's latest common anchor and
     compares it to the shipped training reference — no ledger needed; this is
     computable from day one, unlike realized_ic."""
     if not reference_path.exists():
-        return dict(status="REFERENCE_MISSING", psi_max=None, psi_mean=None,
-                   worst=[], n_features=0, skipped_features=[])
+        return dict(
+            status="REFERENCE_MISSING", psi_max=None, psi_mean=None, worst=[], n_features=0, skipped_features=[]
+        )
     reference = json.loads(reference_path.read_text(encoding="utf-8"))
     if model_id is not None and reference.get("model_id") != model_id:
-        return dict(status="REFERENCE_STALE", psi_max=None, psi_mean=None,
-                   worst=[], n_features=0, skipped_features=[],
-                   reference_model_id=reference.get("model_id"))
+        return dict(
+            status="REFERENCE_STALE",
+            psi_max=None,
+            psi_mean=None,
+            worst=[],
+            n_features=0,
+            skipped_features=[],
+            reference_model_id=reference.get("model_id"),
+        )
 
     last_dates = [s.dropna().index.max() for s in nav_panel.values() if len(s.dropna())]
     if not last_dates:
-        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
-                   worst=[], n_features=0, skipped_features=[], universe_n=0)
+        return dict(
+            status="INSUFFICIENT_DATA",
+            psi_max=None,
+            psi_mean=None,
+            worst=[],
+            n_features=0,
+            skipped_features=[],
+            universe_n=0,
+        )
     t = min(max(last_dates), pd.Timestamp(today).normalize())
     _, panel = build_live_panel(manifest, nav_panel, t, engine=engine)
     if len(panel) < PSI_MIN_UNIVERSE:
-        return dict(status="INSUFFICIENT_DATA", psi_max=None, psi_mean=None,
-                   worst=[], n_features=0, skipped_features=[], universe_n=len(panel))
+        return dict(
+            status="INSUFFICIENT_DATA",
+            psi_max=None,
+            psi_mean=None,
+            worst=[],
+            n_features=0,
+            skipped_features=[],
+            universe_n=len(panel),
+        )
 
     live_features = {c: panel[c].to_numpy(dtype=float) for c in PSI_FEATURES if c in panel.columns}
     result = compute_psi(live_features, reference)
@@ -458,7 +530,9 @@ def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
         status, y_realized = "REALIZED", bool(own_fwd.value >= q75)
 
     return dict(
-        schema_version=SCHEMA_VERSION, amfi_code=row["amfi_code"], target=row["target"],
+        schema_version=SCHEMA_VERSION,
+        amfi_code=row["amfi_code"],
+        target=row["target"],
         anchor=row["anchor"],
         # Carried through so an outcome can be attributed to the model that made
         # the call. Two models may predict the same fund at the same anchor against
@@ -466,19 +540,24 @@ def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
         # pooling the outcomes would average two different questions.
         model_id=row.get("model_id"),
         realized_at=datetime.now(timezone.utc).isoformat(),
-        status=status, y_realized=y_realized,
+        status=status,
+        y_realized=y_realized,
         own_r_fwd=own_fwd.value if own_fwd is not None else None,
-        n_peer_r_fwd=len(peer_fwds), probability=row["probability"],
+        n_peer_r_fwd=len(peer_fwds),
+        probability=row["probability"],
         cohort_percentile=row["cohort_percentile"],
     )
 
 
-def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
-                                predictions_path: Path = PREDICTIONS_PATH,
-                                realizations_path: Path = REALIZATIONS_PATH,
-                                manifest: Optional[pd.DataFrame] = None,
-                                nav_panel: Optional[Dict[str, pd.Series]] = None,
-                                superseded_path: Path = SUPERSEDED_PATH) -> Dict[str, Any]:
+def realize_matured_predictions(
+    *,
+    today: Optional[pd.Timestamp] = None,
+    predictions_path: Path = PREDICTIONS_PATH,
+    realizations_path: Path = REALIZATIONS_PATH,
+    manifest: Optional[pd.DataFrame] = None,
+    nav_panel: Optional[Dict[str, pd.Series]] = None,
+    superseded_path: Path = SUPERSEDED_PATH,
+) -> Dict[str, Any]:
     """Offline job — run periodically (e.g. monthly cron), NOT from the live
     batch path. Idempotent: already-realized rows are skipped, and so are
     predictions from any model named in `superseded_path`."""
@@ -523,14 +602,16 @@ def realize_matured_predictions(*, today: Optional[pd.Timestamp] = None,
             continue
         new_rows.append(_realize_one(row, nav_panel))
     if n_superseded:
-        LOGGER.info("Skipped %d prediction(s) from superseded model(s): %s",
-                    n_superseded, ", ".join(sorted(retired)))
+        LOGGER.info("Skipped %d prediction(s) from superseded model(s): %s", n_superseded, ", ".join(sorted(retired)))
 
-    n_appended = append_predictions(new_rows, path=realizations_path,
-                                    dedupe_key=DEDUPE_KEY)
-    return dict(n_predictions=len(predictions), n_pending=n_pending,
-               n_matured_this_run=len(new_rows), n_newly_realized=n_appended,
-               n_superseded_skipped=n_superseded)
+    n_appended = append_predictions(new_rows, path=realizations_path, dedupe_key=DEDUPE_KEY)
+    return dict(
+        n_predictions=len(predictions),
+        n_pending=n_pending,
+        n_matured_this_run=len(new_rows),
+        n_newly_realized=n_appended,
+        n_superseded_skipped=n_superseded,
+    )
 
 
 def load_superseded(path: Path = SUPERSEDED_PATH) -> Dict[str, dict]:
@@ -553,8 +634,9 @@ def load_superseded(path: Path = SUPERSEDED_PATH) -> Dict[str, dict]:
     return {str(k): (v if isinstance(v, dict) else {}) for k, v in data.items()}
 
 
-def current_model_id(predictions_path: Path = PREDICTIONS_PATH,
-                     superseded_path: Path = SUPERSEDED_PATH) -> Optional[str]:
+def current_model_id(
+    predictions_path: Path = PREDICTIONS_PATH, superseded_path: Path = SUPERSEDED_PATH
+) -> Optional[str]:
     """The model_id of the most recent NON-superseded prediction run.
 
     Outcome reporting is scoped to ONE model. The ledger deliberately holds
@@ -571,10 +653,12 @@ def current_model_id(predictions_path: Path = PREDICTIONS_PATH,
     return latest.get("model_id")
 
 
-def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
-                     predictions_path: Path = PREDICTIONS_PATH,
-                     model_id: Optional[str] = None,
-                     superseded_path: Path = SUPERSEDED_PATH) -> Dict[str, Any]:
+def realized_summary(
+    realizations_path: Path = REALIZATIONS_PATH,
+    predictions_path: Path = PREDICTIONS_PATH,
+    model_id: Optional[str] = None,
+    superseded_path: Path = SUPERSEDED_PATH,
+) -> Dict[str, Any]:
     """`model_id` scopes every count and the IC to one model; None means "the
     model behind the newest predictions". Pooling models here would average two
     different questions — each row froze its own cohort_codes, so even
@@ -583,8 +667,7 @@ def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
     model_id = model_id or current_model_id(predictions_path, superseded_path)
     if model_id is not None:
         preds = [r for r in preds if r.get("model_id") == model_id]
-    rows = [r for r in read_jsonl(realizations_path)
-            if model_id is None or r.get("model_id") == model_id]
+    rows = [r for r in read_jsonl(realizations_path) if model_id is None or r.get("model_id") == model_id]
     realized = [r for r in rows if r["status"] == "REALIZED"]
     dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
     thin = sum(1 for r in rows if r["status"] == "THIN_AT_REALIZATION")
@@ -603,18 +686,31 @@ def realized_summary(realizations_path: Path = REALIZATIONS_PATH,
         ys = pd.Series([float(r["y_realized"]) for r in realized])
         status, value = "OK", round(float(probs.rank().corr(ys.rank())), 4)
 
-    return dict(status=status, value=value, n_matured=len(rows), n_realized=len(realized),
-               n_dead_or_gap=dead, n_thin_at_realization=thin,
-               effective_n=round(len(realized) / 30) if realized else 0,
-               earliest_maturity=earliest_maturity, model_id=model_id)
+    return dict(
+        status=status,
+        value=value,
+        n_matured=len(rows),
+        n_realized=len(realized),
+        n_dead_or_gap=dead,
+        n_thin_at_realization=thin,
+        effective_n=round(len(realized) / 30) if realized else 0,
+        earliest_maturity=earliest_maturity,
+        model_id=model_id,
+    )
 
 
 # ==============================================================================
 # monitoring{} assembly — the single entry point mf_artifact.py calls
 # ==============================================================================
-def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict], psi: dict,
-                     predictions_path: Path = PREDICTIONS_PATH,
-                     realizations_path: Path = REALIZATIONS_PATH) -> Dict[str, Any]:
+def monitoring_block(
+    *,
+    run_id: str,
+    rows_appended: int,
+    current_rows: List[dict],
+    psi: dict,
+    predictions_path: Path = PREDICTIONS_PATH,
+    realizations_path: Path = REALIZATIONS_PATH,
+) -> Dict[str, Any]:
     """`current_rows`: the rows THIS run scored (in memory, before dedup) — NOT
     re-derived by looking up run_id in the ledger file. Rows unchanged from a
     prior run are deliberately NOT re-appended (append-only + dedupe), so they
@@ -630,14 +726,18 @@ def monitoring_block(*, run_id: str, rows_appended: int, current_rows: List[dict
         # last_anchor is what tells you the pipeline is still tracking time.
         # first_anchor never moves once the ledger is seeded, so it can only ever
         # answer "when did this start", never "is this still alive".
-        ledger=dict(rows_total=stats["rows_total"], rows_appended_this_run=rows_appended,
-                   first_anchor=stats["first_anchor"], last_anchor=stats["last_anchor"],
-                   path=str(predictions_path)),
+        ledger=dict(
+            rows_total=stats["rows_total"],
+            rows_appended_this_run=rows_appended,
+            first_anchor=stats["first_anchor"],
+            last_anchor=stats["last_anchor"],
+            path=str(predictions_path),
+        ),
         realized_ic=realized_summary(realizations_path, predictions_path),
         psi=psi,
         rank_stability=rank_stability(current_rows, previous),
         note="realized_ic is structurally unmeasurable before the first logged anchor + "
-             "~3y; no interim proxy is published (untested horizon).",
+        "~3y; no interim proxy is published (untested horizon).",
     )
 
 
@@ -654,15 +754,23 @@ def _selftest() -> None:
         real_path = tmpdir / "realizations.jsonl"
 
         # ---- append/read round-trip + idempotency --------------------------
-        cs_ok = dict(status="OK", target="cohort_q1", probability=0.4, cohort_percentile=0.6,
-                    cohort_key="('category', 'Flexi Cap')", cohort_n=10, universe_n=130,
-                    anchor="2020-01-31", cohort_codes=["A", "B", "C", "D"],
-                    signal_context={"holdout_auc": 0.578, "base_rate": 0.323},
-                    imputed_features=[], features={"cagr_1y": 0.1, "vol_1y": None})
+        cs_ok = dict(
+            status="OK",
+            target="cohort_q1",
+            probability=0.4,
+            cohort_percentile=0.6,
+            cohort_key="('category', 'Flexi Cap')",
+            cohort_n=10,
+            universe_n=130,
+            anchor="2020-01-31",
+            cohort_codes=["A", "B", "C", "D"],
+            signal_context={"holdout_auc": 0.578, "base_rate": 0.323},
+            imputed_features=[],
+            features={"cagr_1y": 0.1, "vol_1y": None},
+        )
         row = build_row("A", cs_ok, run_id="run1", pipeline_sha="deadbeef", model_id="test_v1")
         assert row is not None and row["amfi_code"] == "A" and "row_hash" in row
-        assert build_row("A", dict(status="THIN_COHORT"), run_id="run1",
-                        pipeline_sha="x", model_id="m") is None
+        assert build_row("A", dict(status="THIN_COHORT"), run_id="run1", pipeline_sha="x", model_id="m") is None
         n = append_predictions([row], path=pred_path)
         assert n == 1
         n2 = append_predictions([row], path=pred_path)
@@ -675,7 +783,7 @@ def _selftest() -> None:
         # anchor) in a single call and wrote both, because `existing` was a
         # snapshot of the file taken before the loop.
         dup_path = tmpdir / "intra_batch.jsonl"
-        twin = dict(row, logged_at="2026-08-03T19:22:26+00:00")   # same key, later stamp
+        twin = dict(row, logged_at="2026-08-03T19:22:26+00:00")  # same key, later stamp
         n_dup = append_predictions([row, twin], path=dup_path)
         assert n_dup == 1, f"FAIL: one key twice in ONE batch must write once, wrote {n_dup}"
         assert len(read_jsonl(dup_path)) == 1
@@ -702,13 +810,14 @@ def _selftest() -> None:
         v1 = build_row("A", cs_ok, run_id="r1", pipeline_sha="x", model_id="phase_b_v1_cohort")
         v2 = build_row("A", cs_ok, run_id="r2", pipeline_sha="x", model_id="phase_b_v2_cohort")
         assert append_predictions([v1], path=two_model_path) == 1
-        assert append_predictions([v2], path=two_model_path) == 1, \
+        assert append_predictions([v2], path=two_model_path) == 1, (
             "FAIL: a second model at the same (fund, target, anchor) must still be logged"
-        assert append_predictions([v2], path=two_model_path) == 0, \
+        )
+        assert append_predictions([v2], path=two_model_path) == 0, (
             "FAIL: re-appending the same model's row must still be a no-op"
+        )
         got = load_predictions(two_model_path)
-        assert len(got) == 2 and {r["model_id"] for r in got} == {
-            "phase_b_v1_cohort", "phase_b_v2_cohort"}, got
+        assert len(got) == 2 and {r["model_id"] for r in got} == {"phase_b_v1_cohort", "phase_b_v2_cohort"}, got
         print("[selftest] two models may log the same fund+anchor, and only re-runs dedupe — PASS")
 
         # ---- outcome reporting is scoped to ONE model ------------------------
@@ -717,64 +826,96 @@ def _selftest() -> None:
         # `none_sup` keeps this hermetic: without it the assertion reads the REAL
         # ledger/superseded_models.json and changes meaning as models retire.
         none_sup = tmpdir / "no_superseded.json"
-        assert current_model_id(two_model_path, none_sup) == "phase_b_v2_cohort", \
+        assert current_model_id(two_model_path, none_sup) == "phase_b_v2_cohort", (
             "FAIL: current_model_id must follow the newest run, not the first row"
+        )
         scoped = tmpdir / "scoped_real.jsonl"
         with open(scoped, "w", encoding="utf-8") as fh:
             for mid, yreal in (("phase_b_v1_cohort", True), ("phase_b_v2_cohort", False)):
-                fh.write(json.dumps(dict(
-                    schema_version=SCHEMA_VERSION, amfi_code="A", target="cohort_q1",
-                    anchor="2020-01-31", model_id=mid, status="REALIZED",
-                    y_realized=yreal, probability=0.4, cohort_percentile=0.9,
-                    own_r_fwd=0.1, n_peer_r_fwd=9)) + "\n")
+                fh.write(
+                    json.dumps(
+                        dict(
+                            schema_version=SCHEMA_VERSION,
+                            amfi_code="A",
+                            target="cohort_q1",
+                            anchor="2020-01-31",
+                            model_id=mid,
+                            status="REALIZED",
+                            y_realized=yreal,
+                            probability=0.4,
+                            cohort_percentile=0.9,
+                            own_r_fwd=0.1,
+                            n_peer_r_fwd=9,
+                        )
+                    )
+                    + "\n"
+                )
         summ = realized_summary(scoped, two_model_path, superseded_path=none_sup)
-        assert summ["model_id"] == "phase_b_v2_cohort" and summ["n_realized"] == 1, \
+        assert summ["model_id"] == "phase_b_v2_cohort" and summ["n_realized"] == 1, (
             f"FAIL: realized_summary must scope to one model, got {summ}"
-        assert realized_summary(scoped, two_model_path,
-                                model_id="phase_b_v1_cohort")["n_realized"] == 1
+        )
+        assert realized_summary(scoped, two_model_path, model_id="phase_b_v1_cohort")["n_realized"] == 1
         print("[selftest] realized_summary scopes to one model_id, never pools — PASS")
 
         # ---- rank_stability compares runs, not models ------------------------
         v1_run = [dict(v1, run_id="r1")]
         v2_run = [dict(v2, run_id="r2")]
         prev = _previous_run_rows(v1_run + v2_run, "r2", model_id="phase_b_v2_cohort")
-        assert prev == [], \
-            "FAIL: the previous run of a DIFFERENT model must not count as a previous run"
-        assert rank_stability(v2_run, prev)["status"] == "FIRST_RUN", \
+        assert prev == [], "FAIL: the previous run of a DIFFERENT model must not count as a previous run"
+        assert rank_stability(v2_run, prev)["status"] == "FIRST_RUN", (
             "FAIL: a model's first run must report FIRST_RUN, not a cross-model comparison"
+        )
         print("[selftest] rank_stability never compares across model_id — PASS")
 
         # ---- legacy realization rows are not realized twice ------------------
         legacy_real = tmpdir / "legacy_real.jsonl"
-        with open(legacy_real, "w", encoding="utf-8") as fh:      # pre-model_id schema
-            fh.write(json.dumps(dict(amfi_code="A", target="cohort_q1",
-                                     anchor="2020-01-31", status="REALIZED",
-                                     y_realized=True, probability=0.4,
-                                     cohort_percentile=0.9)) + "\n")
+        with open(legacy_real, "w", encoding="utf-8") as fh:  # pre-model_id schema
+            fh.write(
+                json.dumps(
+                    dict(
+                        amfi_code="A",
+                        target="cohort_q1",
+                        anchor="2020-01-31",
+                        status="REALIZED",
+                        y_realized=True,
+                        probability=0.4,
+                        cohort_percentile=0.9,
+                    )
+                )
+                + "\n"
+            )
         res = realize_matured_predictions(
-            today=pd.Timestamp("2099-01-01"), predictions_path=two_model_path,
-            realizations_path=legacy_real, manifest=pd.DataFrame(),
-            nav_panel={})
+            today=pd.Timestamp("2099-01-01"),
+            predictions_path=two_model_path,
+            realizations_path=legacy_real,
+            manifest=pd.DataFrame(),
+            nav_panel={},
+        )
         assert res["n_matured_this_run"] == 0, (
-            "FAIL: a pre-model_id realization row must still count as already "
-            f"realized, got {res}")
+            f"FAIL: a pre-model_id realization row must still count as already realized, got {res}"
+        )
         print("[selftest] legacy realization rows are matched, not re-realized — PASS")
 
         # ---- superseded models: rows retained, never graded -------------------
         sup_path = tmpdir / "superseded.json"
-        sup_path.write_text(json.dumps(
-            {"phase_b_v2_cohort": {"superseded_by": "phase_b_v3_cohort"}}), encoding="utf-8")
-        assert current_model_id(two_model_path, sup_path) == "phase_b_v1_cohort", \
+        sup_path.write_text(json.dumps({"phase_b_v2_cohort": {"superseded_by": "phase_b_v3_cohort"}}), encoding="utf-8")
+        assert current_model_id(two_model_path, sup_path) == "phase_b_v1_cohort", (
             "FAIL: a superseded model must never be the model outcomes are scoped to"
+        )
         empty_real = tmpdir / "no_real.jsonl"
         res = realize_matured_predictions(
-            today=pd.Timestamp("2099-01-01"), predictions_path=two_model_path,
-            realizations_path=empty_real, manifest=pd.DataFrame(), nav_panel={},
-            superseded_path=sup_path)
+            today=pd.Timestamp("2099-01-01"),
+            predictions_path=two_model_path,
+            realizations_path=empty_real,
+            manifest=pd.DataFrame(),
+            nav_panel={},
+            superseded_path=sup_path,
+        )
         assert res["n_superseded_skipped"] == 1, f"FAIL: superseded row not skipped: {res}"
         # ...and the rows themselves are untouched — this is a declaration, not a delete.
-        assert len(load_predictions(two_model_path)) == 2, \
+        assert len(load_predictions(two_model_path)) == 2, (
             "FAIL: superseding must not remove rows from the append-only ledger"
+        )
         # A malformed declaration must degrade to "nothing superseded", never raise.
         bad = tmpdir / "bad.json"
         bad.write_text("{not json", encoding="utf-8")
@@ -783,7 +924,7 @@ def _selftest() -> None:
 
         # ---- torn-tail recovery ---------------------------------------------
         with open(pred_path, "a", encoding="utf-8") as fh:
-            fh.write('{"amfi_code": "B", "target": "cohort_q1"')   # deliberately truncated
+            fh.write('{"amfi_code": "B", "target": "cohort_q1"')  # deliberately truncated
         recovered = read_jsonl(pred_path)
         assert len(recovered) == 1, "FAIL: torn trailing line should be skipped, not crash"
         row2 = build_row("B", cs_ok, run_id="run1", pipeline_sha="deadbeef", model_id="test_v1")
@@ -797,24 +938,29 @@ def _selftest() -> None:
         malformed_path = tmpdir / "malformed.jsonl"
         with open(malformed_path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"amfi_code": "X", "no_target_or_anchor_here": True}) + "\n")
-        n4 = append_predictions([row], path=malformed_path)   # 'row' has a real dedupe key
+        n4 = append_predictions([row], path=malformed_path)  # 'row' has a real dedupe key
         assert n4 == 1, "FAIL: a malformed pre-existing row must not block appending a valid new one"
         print("[selftest] malformed row (missing dedupe key) doesn't crash append — PASS")
 
         # ---- maturity gate + honest degradation (THIN_AT_REALIZATION, DEAD) -
         far_future_row = dict(row2, amfi_code="C", anchor="2026-01-01")
         append_predictions([far_future_row], path=pred_path)
-        summary = realize_matured_predictions(today=pd.Timestamp("2026-06-01"),
-                                              predictions_path=pred_path,
-                                              realizations_path=real_path,
-                                              manifest=load_manifest(),
-                                              nav_panel={})   # empty nav_panel -> all matured rows degrade honestly
+        summary = realize_matured_predictions(
+            today=pd.Timestamp("2026-06-01"),
+            predictions_path=pred_path,
+            realizations_path=real_path,
+            manifest=load_manifest(),
+            nav_panel={},
+        )  # empty nav_panel -> all matured rows degrade honestly
         assert summary["n_pending"] == 1, "FAIL: 2026-01-01 anchor should still be PENDING in mid-2026"
         realized_rows = read_jsonl(real_path)
-        assert all(r["status"] == "DEAD_OR_GAP" for r in realized_rows), \
+        assert all(r["status"] == "DEAD_OR_GAP" for r in realized_rows), (
             "FAIL: with no NAV data at all, every matured row must degrade to DEAD_OR_GAP, never guessed"
-        print(f"[selftest] maturity gate (n_pending={summary['n_pending']}) + "
-              f"honest DEAD_OR_GAP degradation on empty NAV data — PASS")
+        )
+        print(
+            f"[selftest] maturity gate (n_pending={summary['n_pending']}) + "
+            f"honest DEAD_OR_GAP degradation on empty NAV data — PASS"
+        )
 
         # ---- IC gate: insufficient matured -> null, never fabricated --------
         s = realized_summary(real_path, pred_path)
@@ -829,6 +975,7 @@ def _selftest() -> None:
     # SAME cohort membership mf_labels.add_cohort_targets used, and assert
     # bit-agreement with the stored ground truth.
     from mf_benchmarks import PeerProxyResolver
+
     manifest = load_manifest()
     nav_panel = load_nav_panel(manifest)
     labels = pd.read_parquet("mf_cache/phase_b/labels.parquet")
@@ -841,33 +988,47 @@ def _selftest() -> None:
     resolver = PeerProxyResolver(manifest)
     gkey = resolver._group_key(code)
     assert str(gkey) == stored["cohort_key"], "FAIL: cohort_key convention drifted from labels.parquet"
-    fake_row = dict(amfi_code=code, target="cohort_q1", anchor=str(anchor.date()),
-                    cohort_codes=resolver.groups[gkey], probability=0.5, cohort_percentile=0.5)
+    fake_row = dict(
+        amfi_code=code,
+        target="cohort_q1",
+        anchor=str(anchor.date()),
+        cohort_codes=resolver.groups[gkey],
+        probability=0.5,
+        cohort_percentile=0.5,
+    )
     realized = _realize_one(fake_row, nav_panel)
     assert realized["status"] == "REALIZED"
-    assert realized["n_peer_r_fwd"] == int(stored["cohort_n"]), \
+    assert realized["n_peer_r_fwd"] == int(stored["cohort_n"]), (
         f"FAIL: peer R_fwd count {realized['n_peer_r_fwd']} != stored cohort_n {stored['cohort_n']}"
+    )
     assert abs(realized["own_r_fwd"] - float(stored["R_fwd"])) < 1e-9
-    assert realized["y_realized"] == bool(stored["y_cohort_q1"]), \
+    assert realized["y_realized"] == bool(stored["y_cohort_q1"]), (
         "FAIL: realized y disagrees with the stored training label for the same (fund, anchor)"
-    print(f"[selftest] Test D (realization replay @ {anchor.date()}, fund {code}): "
-          f"matches stored labels.parquet exactly — PASS")
+    )
+    print(
+        f"[selftest] Test D (realization replay @ {anchor.date()}, fund {code}): "
+        f"matches stored labels.parquet exactly — PASS"
+    )
 
     # ---- PSI: null case (live == reference itself) and shock case ----------
     import mf_model as M
+
     df, _ = M.load_cohort_dataset()
     reference = build_psi_reference(out=Path(tempfile.mktemp(suffix=".json")))
     same_features = {c: df[c].to_numpy(dtype=float) for c in PSI_FEATURES if c in df.columns}
     psi_same = compute_psi(same_features, reference)
-    assert psi_same["status"] == "OK" and psi_same["psi_max"] < 0.02, \
+    assert psi_same["status"] == "OK" and psi_same["psi_max"] < 0.02, (
         f"FAIL: identical distribution should score near-zero PSI, got {psi_same}"
+    )
     print(f"[selftest] PSI null case (live==reference): psi_max={psi_same['psi_max']} — PASS")
 
     shocked = dict(same_features)
     shocked["vol_1y"] = shocked["vol_1y"] * 1.8 + 0.05
     shocked["cagr_3y"] = shocked["cagr_3y"] + 0.15
     psi_shock = compute_psi(shocked, reference)
-    assert psi_shock["status"] == "SIGNIFICANT_SHIFT", f"FAIL: shocked features should trip SIGNIFICANT_SHIFT: {psi_shock}"
+    assert psi_shock["status"] == "SIGNIFICANT_SHIFT", (
+        f"FAIL: shocked features should trip SIGNIFICANT_SHIFT: {psi_shock}"
+    )
     shocked_names = {w["feature"] for w in psi_shock["worst"]}
     assert "vol_1y" in shocked_names or "cagr_3y" in shocked_names
     print(f"[selftest] PSI shock case: psi_max={psi_shock['psi_max']} status={psi_shock['status']} — PASS")
@@ -877,30 +1038,38 @@ def _selftest() -> None:
     print("[selftest] PSI insufficient-data case honestly null — PASS")
 
     # ---- rank_stability: first run / identical run / permuted run ----------
-    r1 = [dict(amfi_code=f"F{i}", target="cohort_q1", probability=0.5 + 0.01 * i, run_id="run1")
-         for i in range(25)]
+    r1 = [dict(amfi_code=f"F{i}", target="cohort_q1", probability=0.5 + 0.01 * i, run_id="run1") for i in range(25)]
     assert rank_stability(r1, [])["status"] == "FIRST_RUN"
     r2_same = [dict(r, run_id="run2") for r in r1]
     stab_same = rank_stability(r2_same, r1)
     assert stab_same["status"] == "OK" and stab_same["spearman"] > 0.99
-    r2_shuffled = [dict(r2_same[i], probability=r2_same[(i * 7 + 3) % len(r2_same)]["probability"])
-                  for i in range(len(r2_same))]
+    r2_shuffled = [
+        dict(r2_same[i], probability=r2_same[(i * 7 + 3) % len(r2_same)]["probability"]) for i in range(len(r2_same))
+    ]
     stab_shuf = rank_stability(r2_shuffled, r1)
     assert stab_shuf["status"] == "OK" and stab_shuf["spearman"] < 0.9
-    print(f"[selftest] rank_stability: first_run=FIRST_RUN, identical={stab_same['spearman']}, "
-          f"shuffled={stab_shuf['spearman']} — PASS")
+    print(
+        f"[selftest] rank_stability: first_run=FIRST_RUN, identical={stab_same['spearman']}, "
+        f"shuffled={stab_shuf['spearman']} — PASS"
+    )
 
-    print("[selftest] PASS — ledger append/read is crash-safe and idempotent, realization "
-          "replays real stored training labels exactly, PSI/rank_stability degrade honestly")
+    print(
+        "[selftest] PASS — ledger append/read is crash-safe and idempotent, realization "
+        "replays real stored training labels exactly, PSI/rank_stability degrade honestly"
+    )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--build-reference", action="store_true",
-                    help="(re)build psi_reference.json from the cohort model's training rows")
-    ap.add_argument("--realize", action="store_true",
-                    help="join matured ledger predictions against fresh NAV data (offline job)")
+    ap.add_argument(
+        "--build-reference",
+        action="store_true",
+        help="(re)build psi_reference.json from the cohort model's training rows",
+    )
+    ap.add_argument(
+        "--realize", action="store_true", help="join matured ledger predictions against fresh NAV data (offline job)"
+    )
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     if args.selftest:

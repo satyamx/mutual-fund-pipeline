@@ -29,10 +29,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from mf_datasources import CACHE, MFAPIAdapter
 from mf_benchmarks import (
-    PeerProxyResolver, forward_return, resolve_hybrid, resolve_pure_peer,
+    PeerProxyResolver,
+    forward_return,
+    resolve_hybrid,
+    resolve_pure_peer,
 )
+from mf_datasources import CACHE, MFAPIAdapter
 
 OUT_DIR = CACHE / "phase_b"
 LABELS_PATH = OUT_DIR / "labels.parquet"
@@ -76,8 +79,7 @@ def load_nav_panel(manifest: pd.DataFrame) -> dict[str, pd.Series]:
     return panel
 
 
-def build_fwd_panel(manifest: pd.DataFrame, nav_panel: dict[str, pd.Series]
-                     ) -> dict[tuple[str, pd.Timestamp], float]:
+def build_fwd_panel(manifest: pd.DataFrame, nav_panel: dict[str, pd.Series]) -> dict[tuple[str, pd.Timestamp], float]:
     """R_fwd(code, t) for every fund/anchor with a valid 3y-forward window."""
     fwd = {}
     for code in manifest["amfi_code"]:
@@ -105,24 +107,40 @@ def build_labels(manifest: pd.DataFrame, fwd_panel: dict) -> pd.DataFrame:
             cond_b = r_fwd >= ABSOLUTE_THRESHOLD
 
             hybrid = resolve_hybrid(code, category, sector, t, peer_resolver, fwd_panel)
-            cond_a = bool((r_fwd - hybrid["benchmark_fwd"]) >= EXCESS_THRESHOLD) \
-                if pd.notna(hybrid["benchmark_fwd"]) else False
+            cond_a = (
+                bool((r_fwd - hybrid["benchmark_fwd"]) >= EXCESS_THRESHOLD)
+                if pd.notna(hybrid["benchmark_fwd"])
+                else False
+            )
             y = cond_a or cond_b
 
             peer = resolve_pure_peer(code, t, peer_resolver, fwd_panel)
-            cond_a_peer = bool((r_fwd - peer["benchmark_fwd"]) >= EXCESS_THRESHOLD) \
-                if pd.notna(peer["benchmark_fwd"]) else False
+            cond_a_peer = (
+                bool((r_fwd - peer["benchmark_fwd"]) >= EXCESS_THRESHOLD) if pd.notna(peer["benchmark_fwd"]) else False
+            )
             y_peer = cond_a_peer or cond_b
 
-            rows.append(dict(
-                amfi_code=code, scheme_name=row["scheme_name"], category=category,
-                sector=sector, anchor=t, anchor_year=t.year,
-                R_fwd=r_fwd, condB=cond_b,
-                benchmark_fwd=hybrid["benchmark_fwd"], benchmark_source=hybrid["benchmark_source"],
-                benchmark_quality=hybrid["benchmark_quality"], condA=cond_a, y=y,
-                benchmark_fwd_peer=peer["benchmark_fwd"], benchmark_quality_peer=peer["benchmark_quality"],
-                condA_peer=cond_a_peer, y_peer=y_peer,
-            ))
+            rows.append(
+                dict(
+                    amfi_code=code,
+                    scheme_name=row["scheme_name"],
+                    category=category,
+                    sector=sector,
+                    anchor=t,
+                    anchor_year=t.year,
+                    R_fwd=r_fwd,
+                    condB=cond_b,
+                    benchmark_fwd=hybrid["benchmark_fwd"],
+                    benchmark_source=hybrid["benchmark_source"],
+                    benchmark_quality=hybrid["benchmark_quality"],
+                    condA=cond_a,
+                    y=y,
+                    benchmark_fwd_peer=peer["benchmark_fwd"],
+                    benchmark_quality_peer=peer["benchmark_quality"],
+                    condA_peer=cond_a_peer,
+                    y_peer=y_peer,
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -132,24 +150,34 @@ def build_labels(manifest: pd.DataFrame, fwd_panel: dict) -> pd.DataFrame:
 def _rate_table(df: pd.DataFrame) -> pd.DataFrame:
     by_year = df.groupby("anchor_year").agg(
         n=("y", "size"),
-        y_hybrid=("y", "mean"), y_peer=("y_peer", "mean"),
-        condA_hybrid=("condA", "mean"), condA_peer=("condA_peer", "mean"),
+        y_hybrid=("y", "mean"),
+        y_peer=("y_peer", "mean"),
+        condA_hybrid=("condA", "mean"),
+        condA_peer=("condA_peer", "mean"),
         condB=("condB", "mean"),
         negatives_hybrid=("y", lambda s: int((~s).sum())),
         negatives_peer=("y_peer", lambda s: int((~s).sum())),
     )
-    overall = pd.DataFrame([dict(
-        n=len(df), y_hybrid=df["y"].mean(), y_peer=df["y_peer"].mean(),
-        condA_hybrid=df["condA"].mean(), condA_peer=df["condA_peer"].mean(),
-        condB=df["condB"].mean(),
-        negatives_hybrid=int((~df["y"]).sum()), negatives_peer=int((~df["y_peer"]).sum()),
-    )], index=["OVERALL"])
+    overall = pd.DataFrame(
+        [
+            dict(
+                n=len(df),
+                y_hybrid=df["y"].mean(),
+                y_peer=df["y_peer"].mean(),
+                condA_hybrid=df["condA"].mean(),
+                condA_peer=df["condA_peer"].mean(),
+                condB=df["condB"].mean(),
+                negatives_hybrid=int((~df["y"]).sum()),
+                negatives_peer=int((~df["y_peer"]).sum()),
+            )
+        ],
+        index=["OVERALL"],
+    )
     return pd.concat([by_year, overall])
 
 
 def _coverage_table(df: pd.DataFrame) -> pd.DataFrame:
-    cov = df["benchmark_source"].value_counts().reindex(
-        ["fund_nav", "adj_pri", "peer_proxy", "none"], fill_value=0)
+    cov = df["benchmark_source"].value_counts().reindex(["fund_nav", "adj_pri", "peer_proxy", "none"], fill_value=0)
     cov_pct = (cov / len(df) * 100).round(1)
     return pd.DataFrame({"n_samples": cov, "pct": cov_pct})
 
@@ -159,9 +187,11 @@ def write_report(df: pd.DataFrame) -> str:
     cov = _coverage_table(df)
 
     def fmt_rate_row(idx, r):
-        return (f"| {idx} | {int(r.n)} | {r.y_hybrid:.3f} | {r.y_peer:.3f} | "
-                f"{r.condA_hybrid:.3f} | {r.condA_peer:.3f} | {r.condB:.3f} | "
-                f"{int(r.negatives_hybrid)} | {int(r.negatives_peer)} |")
+        return (
+            f"| {idx} | {int(r.n)} | {r.y_hybrid:.3f} | {r.y_peer:.3f} | "
+            f"{r.condA_hybrid:.3f} | {r.condA_peer:.3f} | {r.condB:.3f} | "
+            f"{int(r.negatives_hybrid)} | {int(r.negatives_peer)} |"
+        )
 
     lines = [
         "# Phase B base-rate sensitivity: peer-proxy vs bias-aware hybrid benchmark",
@@ -227,8 +257,9 @@ def write_report(df: pd.DataFrame) -> str:
 # with fewer than COHORT_MIN_SIZE funds carrying a valid R_fwd are excluded
 # (both target columns are pd.NA for that row) rather than guessed.
 # ==============================================================================
-def add_cohort_targets(df: pd.DataFrame, manifest: pd.DataFrame,
-                       min_size: int = COHORT_MIN_SIZE) -> tuple[pd.DataFrame, dict]:
+def add_cohort_targets(
+    df: pd.DataFrame, manifest: pd.DataFrame, min_size: int = COHORT_MIN_SIZE
+) -> tuple[pd.DataFrame, dict]:
     peer_resolver = PeerProxyResolver(manifest)
     cohort_key = {code: peer_resolver._group_key(code) for code in manifest["amfi_code"]}
 
@@ -247,7 +278,8 @@ def add_cohort_targets(df: pd.DataFrame, manifest: pd.DataFrame,
     df.loc[~eligible, ["y_cohort_q1", "y_cohort_top_half"]] = pd.NA
 
     stats = dict(
-        n_total=int(len(df)), n_dropped=int((~eligible).sum()),
+        n_total=int(len(df)),
+        n_dropped=int((~eligible).sum()),
         n_kept=int(eligible.sum()),
         base_rate_q1=float(df.loc[eligible, "y_cohort_q1"].mean()),
         base_rate_top_half=float(df.loc[eligible, "y_cohort_top_half"].mean()),
@@ -264,11 +296,13 @@ def regenerate_with_cohort_targets() -> pd.DataFrame:
     df, stats = add_cohort_targets(df, manifest)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(LABELS_PATH, index=False)
-    print(f"cohort targets added -> {LABELS_PATH}: "
-          f"kept={stats['n_kept']} dropped={stats['n_dropped']} "
-          f"(min cohort size {COHORT_MIN_SIZE} funds with valid R_fwd); "
-          f"base rate y_cohort_q1={stats['base_rate_q1']:.3f} "
-          f"y_cohort_top_half={stats['base_rate_top_half']:.3f}")
+    print(
+        f"cohort targets added -> {LABELS_PATH}: "
+        f"kept={stats['n_kept']} dropped={stats['n_dropped']} "
+        f"(min cohort size {COHORT_MIN_SIZE} funds with valid R_fwd); "
+        f"base rate y_cohort_q1={stats['base_rate_q1']:.3f} "
+        f"y_cohort_top_half={stats['base_rate_top_half']:.3f}"
+    )
     return df
 
 
@@ -288,10 +322,13 @@ def main() -> pd.DataFrame:
 
 if __name__ == "__main__":
     import argparse
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cohort-only", action="store_true",
-                    help="add within-cohort targets to the existing labels.parquet "
-                         "(reuses cached R_fwd; no NAV rebuild)")
+    ap.add_argument(
+        "--cohort-only",
+        action="store_true",
+        help="add within-cohort targets to the existing labels.parquet (reuses cached R_fwd; no NAV rebuild)",
+    )
     args = ap.parse_args()
     if args.cohort_only:
         regenerate_with_cohort_targets()

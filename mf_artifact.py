@@ -86,7 +86,7 @@ import pandas as pd
 
 import mf_eval
 import mf_ledger
-import mf_live_score          # STATUSES_WITH_IMPUTATION — imported, never restated
+import mf_live_score  # STATUSES_WITH_IMPUTATION — imported, never restated
 from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator
 from mf_datasources import CACHE
 from mf_labels import load_manifest
@@ -137,9 +137,14 @@ _COHORT_STATUS_FLAG = {
 
 def _git_sha() -> str:
     try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent,
-                              capture_output=True, text=True, check=True,
-                              timeout=5).stdout.strip()
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
     except Exception:  # noqa: BLE001 — a missing/broken git binary must not crash the batch run
         return "unknown"
 
@@ -200,14 +205,14 @@ def _data_flags(dossier, cohort_signal: Optional[Dict[str, Any]], eligibility: s
     return flags
 
 
-def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
-                      is_default_profile: bool) -> Optional[Dict[str, Any]]:
+def build_fund_record(
+    result: Dict[str, Any], profile: InvestorProfile, is_default_profile: bool
+) -> Optional[Dict[str, Any]]:
     """One evaluate() result -> the per-fund contract dict, or None (logged) if
     the evaluation itself failed — a failed fund is dropped from the artifact
     entirely rather than emitted with fabricated fields."""
     if "error" in result:
-        LOGGER.warning("Dropping %r from artifact — evaluation failed: %s",
-                       result.get("query"), result["error"])
+        LOGGER.warning("Dropping %r from artifact — evaluation failed: %s", result.get("query"), result["error"])
         return None
 
     d = result["dossier"]
@@ -229,19 +234,24 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
         sector=d.declared_sector,
         eligibility=sr.eligibility,
         facts=dict(
-            cagr=_finite_or_none(f["cagr"]), vol=_finite_or_none(f["vol_1y"]),
-            max_dd=_finite_or_none(f["max_dd_3y"]), sortino=_finite_or_none(f["sortino_3y"]),
-            benchmark=d.benchmark, expense=_finite_or_none(d.expense_ratio)),
+            cagr=_finite_or_none(f["cagr"]),
+            vol=_finite_or_none(f["vol_1y"]),
+            max_dd=_finite_or_none(f["max_dd_3y"]),
+            sortino=_finite_or_none(f["sortino_3y"]),
+            benchmark=d.benchmark,
+            expense=_finite_or_none(d.expense_ratio),
+        ),
         signal_a=dict(
             # sub_scores can be NaN for a NEWBORN/YOUNG fund (Agent C runs
             # unconditionally, no eligibility gate) — guard the same way every
             # other numeric leaf is guarded, so one degraded fund's NaN can't
             # trip write_artifact()'s allow_nan=False over the WHOLE batch.
             sub_scores={k: _finite_or_none(v) for k, v in ps["sub_scores"].items()},
-            verdict=rec["verdict"], verdict_color=rec["verdict_color"],
-            verdict_caveat=rec["verdict_caveat"], metric_colors=rec["metric_colors"],
-            verdict_basis=dict(is_default_profile=is_default_profile,
-                               profile=profile.model_dump(mode="json")),
+            verdict=rec["verdict"],
+            verdict_color=rec["verdict_color"],
+            verdict_caveat=rec["verdict_caveat"],
+            metric_colors=rec["metric_colors"],
+            verdict_basis=dict(is_default_profile=is_default_profile, profile=profile.model_dump(mode="json")),
             # --- D4 option C: everything the app needs to re-derive the verdict for
             # the REAL user's profile without reimplementing the verdict rule.
             # The profile enters the rule through one term only (utility < the cutoff
@@ -282,9 +292,9 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
             # grading confidence on this field would then show maximum confidence
             # for a NOT_IN_UNIVERSE record, inverting the point of the field.
             n_imputed=(len(cs["imputed_features"]) if _measured else None),
-            imputed_fraction=(round(len(cs["imputed_features"]) / _inf_feats, 4)
-                              if _measured and _inf_feats else None),
-            imputed_features=(list(cs["imputed_features"]) if _measured else None)),
+            imputed_fraction=(round(len(cs["imputed_features"]) / _inf_feats, 4) if _measured and _inf_feats else None),
+            imputed_features=(list(cs["imputed_features"]) if _measured else None),
+        ),
         # Nested payloads this module doesn't enumerate leaf-by-leaf — guarded
         # wholesale so one NaN can't take out the entire batch write. See _json_safe.
         alerts_b=_json_safe([dataclasses.asdict(a) for a in sr.alerts]),
@@ -298,10 +308,13 @@ def build_fund_record(result: Dict[str, Any], profile: InvestorProfile,
     )
 
 
-def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] = None,
-                   profile: Optional[InvestorProfile] = None,
-                   ledger_path: Path = mf_ledger.PREDICTIONS_PATH,
-                   realizations_path: Path = mf_ledger.REALIZATIONS_PATH) -> Dict[str, Any]:
+def build_artifact(
+    scheme_names: List[str],
+    orch: Optional[MasterOrchestrator] = None,
+    profile: Optional[InvestorProfile] = None,
+    ledger_path: Path = mf_ledger.PREDICTIONS_PATH,
+    realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
+) -> Dict[str, Any]:
     """Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
     RealNAVStore fund cache and cohort-scoring resources build once) against
     `profile` (defaults to InvestorProfile()'s own baseline), and assembles the
@@ -326,26 +339,36 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
             errors.append(dict(query=name, error=result.get("error", "unknown")))
             continue
         records.append(rec)
-        row = mf_ledger.build_row(rec["amfi_code"], result.get("cohort_signal"),
-                                  run_id=run_id, pipeline_sha=pipeline_sha,
-                                  model_id=orch.cohort_model_id)
+        row = mf_ledger.build_row(
+            rec["amfi_code"],
+            result.get("cohort_signal"),
+            run_id=run_id,
+            pipeline_sha=pipeline_sha,
+            model_id=orch.cohort_model_id,
+        )
         if row is not None:
             ledger_rows.append(row)
     n_appended = mf_ledger.append_predictions(ledger_rows, path=ledger_path)
 
     live_res = orch.cohort_live_resources()
-    psi = (mf_ledger.compute_psi_live(live_res[0], live_res[1], live_res[3], TODAY,
-                                      orch.cohort_model_id)
-          if live_res is not None else
-          dict(status="UNAVAILABLE", psi_max=None, psi_mean=None, worst=[],
-              n_features=0, skipped_features=[]))
-    monitoring = mf_ledger.monitoring_block(run_id=run_id, rows_appended=n_appended,
-                                            current_rows=ledger_rows, psi=psi,
-                                            predictions_path=ledger_path,
-                                            realizations_path=realizations_path)
+    psi = (
+        mf_ledger.compute_psi_live(live_res[0], live_res[1], live_res[3], TODAY, orch.cohort_model_id)
+        if live_res is not None
+        else dict(status="UNAVAILABLE", psi_max=None, psi_mean=None, worst=[], n_features=0, skipped_features=[])
+    )
+    monitoring = mf_ledger.monitoring_block(
+        run_id=run_id,
+        rows_appended=n_appended,
+        current_rows=ledger_rows,
+        psi=psi,
+        predictions_path=ledger_path,
+        realizations_path=realizations_path,
+    )
 
     coverage = dict(
-        n_total=len(scheme_names), n_ok=len(records), n_errors=len(errors),
+        n_total=len(scheme_names),
+        n_ok=len(records),
+        n_errors=len(errors),
         # Reasons kept alongside the count — a systemic failure (e.g. every fund
         # erroring the same way) must be visible in the artifact, not just a bare
         # number indistinguishable from ordinary per-fund attrition.
@@ -358,18 +381,14 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
         # property of the trained model, and SECTOR_UNRESOLVED is a curation
         # worklist (mf_overrides.py --gaps). Collapsing them would hide which of
         # the three is actually growing.
-        n_not_in_universe=sum(
-            1 for r in records if DATA_FLAG_NOT_IN_UNIVERSE in r["data_flags"]),
-        n_out_of_training_universe=sum(
-            1 for r in records if DATA_FLAG_OUT_OF_TRAINING_UNIVERSE in r["data_flags"]),
-        n_sector_unresolved=sum(
-            1 for r in records if DATA_FLAG_SECTOR_UNRESOLVED in r["data_flags"]),
+        n_not_in_universe=sum(1 for r in records if DATA_FLAG_NOT_IN_UNIVERSE in r["data_flags"]),
+        n_out_of_training_universe=sum(1 for r in records if DATA_FLAG_OUT_OF_TRAINING_UNIVERSE in r["data_flags"]),
+        n_sector_unresolved=sum(1 for r in records if DATA_FLAG_SECTOR_UNRESOLVED in r["data_flags"]),
         # Counted like every sibling refusal, not folded into a total: AMFI keeps
         # listing new funds (154490 appeared mid-session on 2026-08-06), so the
         # sub-1y population grows on its own. Without a counter here that drift is
         # invisible in the artifact AND to mf_eval, which grades from coverage{}.
-        n_insufficient_history=sum(
-            1 for r in records if DATA_FLAG_INSUFFICIENT_HISTORY in r["data_flags"]),
+        n_insufficient_history=sum(1 for r in records if DATA_FLAG_INSUFFICIENT_HISTORY in r["data_flags"]),
         n_expense_available=sum(1 for r in records if r["facts"]["expense"] is not None),
     )
     # App-facing MODEL-HEALTH panel: the raw monitoring{}/coverage{} signals graded
@@ -377,8 +396,12 @@ def build_artifact(scheme_names: List[str], orch: Optional[MasterOrchestrator] =
     # "when should I distrust this model" directly instead of re-deriving it. Outcome
     # skill stays PENDING (unmeasurable pre-maturity) and never reddens the headline.
     evaluation = mf_eval.build_report_from_ledger(
-        monitoring, coverage, model_id=orch.cohort_model_id,
-        realizations_path=realizations_path, predictions_path=ledger_path)
+        monitoring,
+        coverage,
+        model_id=orch.cohort_model_id,
+        realizations_path=realizations_path,
+        predictions_path=ledger_path,
+    )
     return dict(
         artifact_version=ARTIFACT_VERSION,
         generated_at=run_id,
@@ -418,13 +441,13 @@ def error_rate_exceeded(coverage: Dict[str, Any], max_rate: float) -> Optional[s
     if rate <= max_rate:
         return None
     reasons = sorted({e.get("error", "?") for e in coverage.get("errors", [])})
-    return (f"{n_err}/{n_total} funds ({rate:.1%}) failed to evaluate, above the "
-            f"--max-error-rate of {max_rate:.1%}. Distinct reasons: "
-            + ("; ".join(reasons[:5]) or "none recorded"))
+    return (
+        f"{n_err}/{n_total} funds ({rate:.1%}) failed to evaluate, above the "
+        f"--max-error-rate of {max_rate:.1%}. Distinct reasons: " + ("; ".join(reasons[:5]) or "none recorded")
+    )
 
 
-def ledger_stalled(monitoring: Dict[str, Any], today: pd.Timestamp,
-                   max_anchor_age_days: int) -> Optional[str]:
+def ledger_stalled(monitoring: Dict[str, Any], today: pd.Timestamp, max_anchor_age_days: int) -> Optional[str]:
     """None if the ledger is progressing, else a human-readable reason.
 
     Guards the failure this pipeline actually had: with `TODAY` frozen at
@@ -450,10 +473,12 @@ def ledger_stalled(monitoring: Dict[str, Any], today: pd.Timestamp,
     age = (pd.Timestamp(today).normalize() - pd.Timestamp(newest).normalize()).days
     if age <= max_anchor_age_days:
         return None
-    return (f"newest prediction anchor is {newest} — {age} days behind the run date, "
-            f"above --max-anchor-age-days of {max_anchor_age_days}. The scoring "
-            f"anchor has stopped advancing, so no new prediction can ever be logged. "
-            f"Check that TODAY is not pinned (MF_TODAY) and that NAV is refreshing.")
+    return (
+        f"newest prediction anchor is {newest} — {age} days behind the run date, "
+        f"above --max-anchor-age-days of {max_anchor_age_days}. The scoring "
+        f"anchor has stopped advancing, so no new prediction can ever be logged. "
+        f"Check that TODAY is not pinned (MF_TODAY) and that NAV is refreshing."
+    )
 
 
 def _load_scheme_names(limit: Optional[int] = None) -> List[str]:
@@ -473,34 +498,45 @@ def _selftest() -> None:
 
     tmpdir = Path(tempfile.mkdtemp())
     try:
-        ledger_path = tmpdir / "predictions.jsonl"   # never touch the real ledger/ from a selftest
+        ledger_path = tmpdir / "predictions.jsonl"  # never touch the real ledger/ from a selftest
         realizations_path = tmpdir / "realizations.jsonl"
 
         names = _load_scheme_names(limit=3)
         orch = MasterOrchestrator(live=True)
         profile = InvestorProfile()
-        artifact = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path,
-                                  realizations_path=realizations_path)
+        artifact = build_artifact(
+            names, orch=orch, profile=profile, ledger_path=ledger_path, realizations_path=realizations_path
+        )
 
         assert artifact["coverage"]["n_total"] == 3
         assert artifact["coverage"]["n_ok"] + artifact["coverage"]["n_errors"] == 3
         assert artifact["model_id"], "FAIL: model_id missing (cohort artifact not loaded)"
         assert artifact["pipeline_sha"] != "unknown", "FAIL: git sha resolution failed"
-        print(f"[selftest] top-level shape + coverage counters consistent "
-              f"(n_ok={artifact['coverage']['n_ok']}, model_id={artifact['model_id']}) — PASS")
+        print(
+            f"[selftest] top-level shape + coverage counters consistent "
+            f"(n_ok={artifact['coverage']['n_ok']}, model_id={artifact['model_id']}) — PASS"
+        )
 
         # Honesty: realized_ic stays null pre-maturity (no untested-horizon proxy published);
         # PSI/rank_stability degrade to a known status rather than fabricating a number.
         m = artifact["monitoring"]
         assert m["realized_ic"]["status"] in ("PENDING_MATURITY", "INSUFFICIENT_MATURED")
         assert m["realized_ic"]["value"] is None
-        assert m["psi"]["status"] in ("OK", "MODERATE_SHIFT", "SIGNIFICANT_SHIFT",
-                                      "INSUFFICIENT_DATA", "REFERENCE_MISSING", "REFERENCE_STALE")
-        assert m["rank_stability"]["status"] == "FIRST_RUN"   # fresh tmp ledger, no prior run
+        assert m["psi"]["status"] in (
+            "OK",
+            "MODERATE_SHIFT",
+            "SIGNIFICANT_SHIFT",
+            "INSUFFICIENT_DATA",
+            "REFERENCE_MISSING",
+            "REFERENCE_STALE",
+        )
+        assert m["rank_stability"]["status"] == "FIRST_RUN"  # fresh tmp ledger, no prior run
         assert m["ledger"]["rows_appended_this_run"] == artifact["coverage"]["n_ok"]
-        print(f"[selftest] monitoring{{}}: realized_ic honestly null "
-              f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
-              f"ledger rows_appended={m['ledger']['rows_appended_this_run']} — PASS")
+        print(
+            f"[selftest] monitoring{{}}: realized_ic honestly null "
+            f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
+            f"ledger rows_appended={m['ledger']['rows_appended_this_run']} — PASS"
+        )
 
         # evaluation{}: the app-facing model-health panel. Fresh ledger has no matured
         # outcomes, so outcome_skill MUST be PENDING and MUST NOT redden the overall
@@ -509,32 +545,48 @@ def _selftest() -> None:
         assert ev["status"] in ("GREEN", "AMBER", "RED", "PENDING")
         outcome_m = next(x for x in ev["metrics"] if x["name"] == "outcome_skill")
         assert outcome_m["status"] == "PENDING", outcome_m
-        assert ev["status"] != "RED" or "outcome_skill" not in {x["name"] for x in ev["metrics"]
-                                                                 if x["status"] == "RED"}, \
-            "FAIL: a pending outcome must never drive the model to RED"
-        assert "not fund-outcome accuracy" in ev["disclaimer"].lower() or \
-               "not fund" in ev["disclaimer"].lower()
+        assert ev["status"] != "RED" or "outcome_skill" not in {
+            x["name"] for x in ev["metrics"] if x["status"] == "RED"
+        }, "FAIL: a pending outcome must never drive the model to RED"
+        assert "not fund-outcome accuracy" in ev["disclaimer"].lower() or "not fund" in ev["disclaimer"].lower()
         assert ev["model_id"] == artifact["model_id"]
-        print(f"[selftest] evaluation{{}}: overall={ev['status']}, outcome_skill=PENDING "
-              f"(never reddens), disclaimer present — PASS")
+        print(
+            f"[selftest] evaluation{{}}: overall={ev['status']}, outcome_skill=PENDING "
+            f"(never reddens), disclaimer present — PASS"
+        )
 
         # Re-running the same batch against the same ledger must be idempotent (dedupe).
-        artifact2 = build_artifact(names, orch=orch, profile=profile, ledger_path=ledger_path,
-                                   realizations_path=realizations_path)
-        assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, \
+        artifact2 = build_artifact(
+            names, orch=orch, profile=profile, ledger_path=ledger_path, realizations_path=realizations_path
+        )
+        assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, (
             "FAIL: re-running the same anchors should append zero new ledger rows"
+        )
         # Only 3 funds in this test batch (< mf_ledger.MIN_COMMON_FOR_STABILITY=20), so
         # the honest outcome is INSUFFICIENT_OVERLAP, not a fabricated correlation —
         # it must still find last run's rows (prev_run_id set), just not enough of them.
         rs = artifact2["monitoring"]["rank_stability"]
-        assert rs["status"] == "INSUFFICIENT_OVERLAP" and rs["n_common"] == 3 and rs["prev_run_id"], \
+        assert rs["status"] == "INSUFFICIENT_OVERLAP" and rs["n_common"] == 3 and rs["prev_run_id"], (
             f"FAIL: expected INSUFFICIENT_OVERLAP with n_common=3, got {rs}"
+        )
         print("[selftest] ledger idempotency across repeated batch runs — PASS")
 
-        required_top = {"amfi_code", "isin", "scheme_name", "category", "sector", "eligibility",
-                        "facts", "signal_a", "alerts_b", "nfo_dossier", "coverage_flags",
-                        "data_flags", "lock"}
-        n_branch_differ = 0     # how many funds the branch choice actually SWINGS
+        required_top = {
+            "amfi_code",
+            "isin",
+            "scheme_name",
+            "category",
+            "sector",
+            "eligibility",
+            "facts",
+            "signal_a",
+            "alerts_b",
+            "nfo_dossier",
+            "coverage_flags",
+            "data_flags",
+            "lock",
+        }
+        n_branch_differ = 0  # how many funds the branch choice actually SWINGS
         for rec in artifact["funds"]:
             assert required_top <= rec.keys(), f"FAIL: missing keys in {rec['scheme_name']}"
             assert isinstance(rec["coverage_flags"], list)
@@ -559,9 +611,9 @@ def _selftest() -> None:
 
             # ---- D4 option C: the app's re-derivation must be exactly reproducible.
             sa = rec["signal_a"]
-            assert {"verdict_branches", "screen_score_red_below",
-                    "weight_matrix", "utility_score"} <= sa.keys(), \
+            assert {"verdict_branches", "screen_score_red_below", "weight_matrix", "utility_score"} <= sa.keys(), (
                 f"FAIL: D4 fields missing in {rec['scheme_name']}"
+            )
             br = sa["verdict_branches"]
             assert set(br) == {"score_red", "score_not_red"}
             for b in br.values():
@@ -574,19 +626,18 @@ def _selftest() -> None:
             # personalised verdict would be subtly wrong AND the default-profile
             # verdict shown beside it would disagree with itself.
             if sa["utility_score"] is not None:
-                picked = br["score_red" if sa["utility_score"] < sa["screen_score_red_below"]
-                            else "score_not_red"]
+                picked = br["score_red" if sa["utility_score"] < sa["screen_score_red_below"] else "score_not_red"]
                 assert picked["verdict"] == sa["verdict"], (
                     f"FAIL: branch/verdict disagree on {rec['scheme_name']}: "
                     f"utility={sa['utility_score']} picked={picked['verdict']} "
-                    f"shipped={sa['verdict']}")
+                    f"shipped={sa['verdict']}"
+                )
                 assert picked["verdict_caveat"] == sa["verdict_caveat"]
                 # And the recomputation FORMULA itself — this is the exact arithmetic
                 # a Dart port will run, so if `100 * Σ w·s` does not reproduce the
                 # shipped utility, the documented client-side formula is wrong.
                 if all(v is not None for v in sa["sub_scores"].values()):
-                    recomputed = 100.0 * sum(sa["weight_matrix"][k] * sa["sub_scores"][k]
-                                             for k in sa["sub_scores"])
+                    recomputed = 100.0 * sum(sa["weight_matrix"][k] * sa["sub_scores"][k] for k in sa["sub_scores"])
                     # Tolerance is on ROUNDING, not on agreement. With weight_matrix at
                     # 6dp the residual is sub_scores' 3dp (~0.05) plus utility's own 1dp
                     # (~0.05), so 0.15 is ~3x the worst case. It was 0.5 while weights
@@ -595,22 +646,27 @@ def _selftest() -> None:
                     # precision bump exists to prevent.
                     assert abs(recomputed - sa["utility_score"]) < 0.15, (
                         f"FAIL: utility formula does not reproduce on {rec['scheme_name']}: "
-                        f"recomputed={recomputed:.3f} shipped={sa['utility_score']}")
+                        f"recomputed={recomputed:.3f} shipped={sa['utility_score']}"
+                    )
                     # Weights are a normalised distribution — a Dart port that forgets
                     # the final /total would silently scale every utility.
                     assert abs(sum(sa["weight_matrix"].values()) - 1.0) < 1e-6
-        print(f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
-              f"lock always null, verdict_basis stamped default-profile, "
-              f"expense gap flagged not guessed, sub_scores NaN-safe, "
-              f"cohort_status always present — PASS")
+        print(
+            f"[selftest] {len(artifact['funds'])} fund records: required keys present, "
+            f"lock always null, verdict_basis stamped default-profile, "
+            f"expense gap flagged not guessed, sub_scores NaN-safe, "
+            f"cohort_status always present — PASS"
+        )
         # Say plainly how much the branch/verdict assertion above actually proved on
         # THIS batch. Where both branches agree the assertion still holds but cannot
         # discriminate, and a vacuous pass reported as a real one is worse than no
         # test at all — so report the discriminating count instead of implying it.
-        print(f"[selftest] D4 branch pair: verdict formula reproduces and branch "
-              f"selection matches the shipped verdict on {len(artifact['funds'])} "
-              f"records; the branch choice SWINGS the verdict on {n_branch_differ} of "
-              f"them{' (so the selection assert is structural only on this batch)' if not n_branch_differ else ''} — PASS")
+        print(
+            f"[selftest] D4 branch pair: verdict formula reproduces and branch "
+            f"selection matches the shipped verdict on {len(artifact['funds'])} "
+            f"records; the branch choice SWINGS the verdict on {n_branch_differ} of "
+            f"them{' (so the selection assert is structural only on this batch)' if not n_branch_differ else ''} — PASS"
+        )
 
         # ---- D5: no profile may produce a NEGATIVE factor weight -------------------
         # Pure (no data), so it belongs with the contract it protects: the app derives
@@ -620,23 +676,26 @@ def _selftest() -> None:
         # Found for real on conservative + liquidity=high + horizon<4 (growth -0.03).
         from mf_agent_orchestrator import LiquidityNeed, ProfileRiskScorerAgent, RiskAppetite
         from mf_pipeline import ValidationOrchestrator
+
         _wa = ProfileRiskScorerAgent(ValidationOrchestrator())
         _n_profiles = 0
         for _r in RiskAppetite:
             for _l in LiquidityNeed:
                 for _h in (0.3, 0.5, 2.0, 3.9, 4.0, 6.9, 7.0, 7.5, 20.0, 40.0):
-                    _w = _wa.utility_weights(
-                        InvestorProfile(horizon_years=_h, liquidity_need=_l, risk_appetite=_r))
+                    _w = _wa.utility_weights(InvestorProfile(horizon_years=_h, liquidity_need=_l, risk_appetite=_r))
                     _n_profiles += 1
                     _neg = {k: v for k, v in _w.items() if v < 0}
                     assert not _neg, (
-                        f"FAIL: negative factor weight for risk={_r.value} "
-                        f"liquidity={_l.value} horizon={_h}: {_neg}")
+                        f"FAIL: negative factor weight for risk={_r.value} liquidity={_l.value} horizon={_h}: {_neg}"
+                    )
                     assert abs(sum(_w.values()) - 1.0) < 1e-9, (
                         f"FAIL: weights not a distribution for risk={_r.value} "
-                        f"liquidity={_l.value} horizon={_h}: total={sum(_w.values())}")
-        print(f"[selftest] D5: {_n_profiles} profile combinations — no negative factor "
-              f"weight, every weight vector sums to 1.0 — PASS")
+                        f"liquidity={_l.value} horizon={_h}: total={sum(_w.values())}"
+                    )
+        print(
+            f"[selftest] D5: {_n_profiles} profile combinations — no negative factor "
+            f"weight, every weight vector sums to 1.0 — PASS"
+        )
 
         # ---- Every mf_live_score refusal reaches the app as its OWN flag ----------
         # Phase 2 added two statuses that this module silently dropped, and mapped a
@@ -646,40 +705,45 @@ def _selftest() -> None:
         import types
 
         import mf_live_score
-        stub = types.SimpleNamespace(category="Flexi Cap", declared_sector="",
-                                     expense_ratio=0.01)
+
+        stub = types.SimpleNamespace(category="Flexi Cap", declared_sector="", expense_ratio=0.01)
         expected_statuses = set(mf_live_score._STATUSES) - {"OK"}
         assert expected_statuses <= set(_COHORT_STATUS_FLAG), (
             "FAIL: mf_live_score gained a status with no artifact flag — the app would "
-            f"see no reason at all for a null score: {expected_statuses - set(_COHORT_STATUS_FLAG)}")
+            f"see no reason at all for a null score: {expected_statuses - set(_COHORT_STATUS_FLAG)}"
+        )
 
         seen = {}
         for st in sorted(expected_statuses):
             got = _data_flags(stub, {"status": st}, "EVALUABLE")
             assert got == [_COHORT_STATUS_FLAG[st]], f"FAIL: {st} -> {got}"
             seen[st] = got[0]
-        assert len(set(seen.values())) == len(seen), \
+        assert len(set(seen.values())) == len(seen), (
             f"FAIL: two statuses share one flag — they demand different caller behaviour: {seen}"
+        )
         # The specific regression: a fixable data gap must NOT read as a permanent refusal.
         assert seen["NOT_IN_UNIVERSE"] != seen["OUT_OF_TRAINING_UNIVERSE"]
         assert _data_flags(stub, {"status": "OK"}, "EVALUABLE") == []
         # An unknown future status degrades to a STABLE generic code — never vanishes,
         # and never an interpolated one the app can't branch on.
-        assert _data_flags(stub, {"status": "SOME_FUTURE_STATUS"}, "EVALUABLE") == \
-            [DATA_FLAG_COHORT_UNSCORED_OTHER]
-        print(f"[selftest] all {len(seen)} refusal statuses map to distinct flags "
-              f"(NOT_IN_UNIVERSE != OUT_OF_TRAINING_UNIVERSE), OK is silent, "
-              f"unknown status degrades to a stable code — PASS")
+        assert _data_flags(stub, {"status": "SOME_FUTURE_STATUS"}, "EVALUABLE") == [DATA_FLAG_COHORT_UNSCORED_OTHER]
+        print(
+            f"[selftest] all {len(seen)} refusal statuses map to distinct flags "
+            f"(NOT_IN_UNIVERSE != OUT_OF_TRAINING_UNIVERSE), OK is silent, "
+            f"unknown status degrades to a stable code — PASS"
+        )
 
         # ---- The batch-failure gate must FIRE, not merely not-crash ---------------
         # This exists because the first real CI run reported success while dropping
         # 118 of 136 funds, so a test that only proves the happy path would reproduce
         # exactly the blindness it is meant to remove.
-        assert error_rate_exceeded(artifact["coverage"], 0.25) is None, \
-            "FAIL: a clean batch must pass the gate"
+        assert error_rate_exceeded(artifact["coverage"], 0.25) is None, "FAIL: a clean batch must pass the gate"
         fired = error_rate_exceeded(
-            dict(n_total=136, n_errors=118,
-                 errors=[{"query": "x", "error": "No such file: benchmark_availability.csv"}]), 0.25)
+            dict(
+                n_total=136, n_errors=118, errors=[{"query": "x", "error": "No such file: benchmark_availability.csv"}]
+            ),
+            0.25,
+        )
         assert fired and "118/136" in fired and "86.8%" in fired, fired
         # The real CI failure was a SINGLE systemic cause, so the reason must survive
         # into the message — a bare count is indistinguishable from ordinary attrition.
@@ -693,37 +757,52 @@ def _selftest() -> None:
         # The real defect: TODAY frozen at 2026-07-13 pinned every anchor, so the
         # nightly appended nothing for weeks and still reported success.
         run_day = pd.Timestamp("2026-08-05")
+
         def _mon(last_anchor, appended=0):
-            return dict(ledger=dict(rows_total=1161, rows_appended_this_run=appended,
-                                    first_anchor="2026-07-13", last_anchor=last_anchor))
+            return dict(
+                ledger=dict(
+                    rows_total=1161, rows_appended_this_run=appended, first_anchor="2026-07-13", last_anchor=last_anchor
+                )
+            )
+
         stalled = ledger_stalled(_mon("2026-07-13"), run_day, 7)
         assert stalled and "stopped advancing" in stalled, stalled
         # ...but a same-day re-run appends nothing and MUST NOT fail: zero appended
         # is ordinary idempotence, and failing on it would break every manual rerun.
-        assert ledger_stalled(_mon("2026-08-05", appended=0), run_day, 7) is None, \
+        assert ledger_stalled(_mon("2026-08-05", appended=0), run_day, 7) is None, (
             "FAIL: a fresh anchor with 0 appended rows is a re-run, not a stall"
+        )
         assert ledger_stalled(_mon("2026-07-29"), run_day, 7) is None, "FAIL: exact boundary"
         assert ledger_stalled(_mon("2026-07-28"), run_day, 7), "FAIL: one day past the boundary"
         # An empty ledger has nothing to be stale about, and must not fall back to
         # first_anchor — that never moves, so it would fail every healthy run later.
         assert ledger_stalled(dict(ledger=dict(first_anchor="2020-01-01")), run_day, 7) is None
         assert ledger_stalled({}, run_day, 7) is None
-        print("[selftest] stalled-ledger gate fires on a pinned anchor, stays silent on "
-              "a same-day re-run and an empty ledger — PASS")
+        print(
+            "[selftest] stalled-ledger gate fires on a pinned anchor, stays silent on "
+            "a same-day re-run and an empty ledger — PASS"
+        )
 
-        print("[selftest] batch-failure gate fires at 118/136 with the cause named, "
-              "passes a clean batch, is exact at the boundary, and refuses an empty batch — PASS")
+        print(
+            "[selftest] batch-failure gate fires at 118/136 with the cause named, "
+            "passes a clean batch, is exact at the boundary, and refuses an empty batch — PASS"
+        )
 
         # A NON-default profile must NOT be mislabeled as the default. Separate tmp
         # ledger path — a custom profile's predictions are still real cohort_q1
         # scores and shouldn't dedupe-collide with the default-profile run above.
         custom = InvestorProfile(horizon_years=3.0, liquidity_need="high", risk_appetite="conservative")
-        custom_artifact = build_artifact(names, orch=orch, profile=custom,
-                                         ledger_path=tmpdir / "predictions_custom.jsonl",
-                                         realizations_path=tmpdir / "realizations_custom.jsonl")
+        custom_artifact = build_artifact(
+            names,
+            orch=orch,
+            profile=custom,
+            ledger_path=tmpdir / "predictions_custom.jsonl",
+            realizations_path=tmpdir / "realizations_custom.jsonl",
+        )
         for rec in custom_artifact["funds"]:
-            assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, \
+            assert rec["signal_a"]["verdict_basis"]["is_default_profile"] is False, (
                 "FAIL: a custom profile was mislabeled as the default"
+            )
         print("[selftest] custom (non-default) profile correctly NOT stamped is_default_profile — PASS")
 
         # A NaN anywhere in an alert's `evidence` must NOT be able to discard the whole
@@ -731,15 +810,29 @@ def _selftest() -> None:
         # mf_sentinel._fmt()), but the convention isn't enforced — so prove the guard
         # holds structurally by feeding a hostile alert through the real record builder.
         import mf_sentinel
-        ok_result = next(r for r in (orch.evaluate(n, profile_config=profile.model_dump(mode="json"))
-                                     for n in names) if "error" not in r)
-        ok_result["sentinel"].alerts.append(mf_sentinel.Alert(
-            "TEST_HOSTILE_EVIDENCE", mf_sentinel.AlertSeverity.INFO.value, "factor",
-            mf_sentinel.AlertBasis.DESCRIPTIVE_RISK.value,
-            {"raw_nan": float("nan"), "raw_inf": float("inf"),
-             "np32_nan": np.float32("nan"), "np32_ok": np.float32(1.5), "np_int": np.int32(7),
-             "nested": {"deep_nan": float("nan"), "flag": True, "name": "ok"}},
-            "hostile evidence fixture"))
+
+        ok_result = next(
+            r
+            for r in (orch.evaluate(n, profile_config=profile.model_dump(mode="json")) for n in names)
+            if "error" not in r
+        )
+        ok_result["sentinel"].alerts.append(
+            mf_sentinel.Alert(
+                "TEST_HOSTILE_EVIDENCE",
+                mf_sentinel.AlertSeverity.INFO.value,
+                "factor",
+                mf_sentinel.AlertBasis.DESCRIPTIVE_RISK.value,
+                {
+                    "raw_nan": float("nan"),
+                    "raw_inf": float("inf"),
+                    "np32_nan": np.float32("nan"),
+                    "np32_ok": np.float32(1.5),
+                    "np_int": np.int32(7),
+                    "nested": {"deep_nan": float("nan"), "flag": True, "name": "ok"},
+                },
+                "hostile evidence fixture",
+            )
+        )
         hostile_rec = build_fund_record(ok_result, profile, is_default_profile=True)
         ev = next(a["evidence"] for a in hostile_rec["alerts_b"] if a["code"] == "TEST_HOSTILE_EVIDENCE")
         assert ev["raw_nan"] is None and ev["raw_inf"] is None, ev
@@ -750,9 +843,10 @@ def _selftest() -> None:
         # bools must survive as bools — isinstance(True, int) is True, so a naive
         # numeric guard would silently rewrite this as 1.0 and corrupt the contract.
         assert ev["nested"]["flag"] is True and ev["nested"]["name"] == "ok", ev
-        json.dumps(dict(funds=[hostile_rec]), allow_nan=False)   # must not raise
-        print("[selftest] hostile NaN/Inf in alert evidence is neutralised, bools preserved, "
-              "batch write survives — PASS")
+        json.dumps(dict(funds=[hostile_rec]), allow_nan=False)  # must not raise
+        print(
+            "[selftest] hostile NaN/Inf in alert evidence is neutralised, bools preserved, batch write survives — PASS"
+        )
 
         # gzip round-trip
         path = write_artifact(artifact, tmpdir)
@@ -763,29 +857,39 @@ def _selftest() -> None:
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    print("[selftest] PASS — artifact emitter produces an honest, schema-complete, "
-          "round-trippable batch artifact from real cached data, ledger append is "
-          "idempotent, and monitoring degrades honestly")
+    print(
+        "[selftest] PASS — artifact emitter produces an honest, schema-complete, "
+        "round-trippable batch artifact from real cached data, ledger append is "
+        "idempotent, and monitoring degrades honestly"
+    )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--selftest", action="store_true",
-                    help="contract shape + honesty gates + gzip round-trip on 3 real funds")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="score only the first N funds in the manifest (quick test)")
+    ap.add_argument(
+        "--selftest", action="store_true", help="contract shape + honesty gates + gzip round-trip on 3 real funds"
+    )
+    ap.add_argument("--limit", type=int, default=None, help="score only the first N funds in the manifest (quick test)")
     ap.add_argument("--out", type=str, default=None, help="output directory")
-    ap.add_argument("--max-error-rate", type=float, default=None,
-                    help="exit non-zero if more than this FRACTION of funds failed to "
-                         "evaluate (e.g. 0.25). Off by default; the scheduled job sets it "
-                         "so a run that silently drops most of the universe cannot report "
-                         "success. The artifact is still written first, for diagnosis.")
-    ap.add_argument("--max-anchor-age-days", type=int, default=None,
-                    help="exit non-zero if the NEWEST prediction anchor is more than this "
-                         "many days behind the run date. Off by default; the scheduled job "
-                         "sets it. Catches a pipeline that has stopped tracking time — a "
-                         "frozen TODAY pinned every anchor for weeks while the nightly "
-                         "reported success and appended nothing.")
+    ap.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=None,
+        help="exit non-zero if more than this FRACTION of funds failed to "
+        "evaluate (e.g. 0.25). Off by default; the scheduled job sets it "
+        "so a run that silently drops most of the universe cannot report "
+        "success. The artifact is still written first, for diagnosis.",
+    )
+    ap.add_argument(
+        "--max-anchor-age-days",
+        type=int,
+        default=None,
+        help="exit non-zero if the NEWEST prediction anchor is more than this "
+        "many days behind the run date. Off by default; the scheduled job "
+        "sets it. Catches a pipeline that has stopped tracking time — a "
+        "frozen TODAY pinned every anchor for weeks while the nightly "
+        "reported success and appended nothing.",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -796,9 +900,13 @@ if __name__ == "__main__":
         LOGGER.info("Scoring %d funds against the default investor profile...", len(names))
         artifact = build_artifact(names)
         path = write_artifact(artifact, Path(args.out) if args.out else OUT_DIR)
-        LOGGER.info("Wrote %s (%d funds, %d errors) -> %s",
-                   artifact["artifact_version"], artifact["coverage"]["n_ok"],
-                   artifact["coverage"]["n_errors"], path)
+        LOGGER.info(
+            "Wrote %s (%d funds, %d errors) -> %s",
+            artifact["artifact_version"],
+            artifact["coverage"]["n_ok"],
+            artifact["coverage"]["n_errors"],
+            path,
+        )
 
         # A batch that drops most of the universe is a FAILED run, not a thin one.
         # The first real CI run emitted 18 of 136 funds and still reported success,
@@ -807,12 +915,17 @@ if __name__ == "__main__":
         # Zero appended rows is normal (a same-day re-run has nothing new to say),
         # so it is logged, not failed on. What IS reported loudly, every run.
         led = (artifact.get("monitoring") or {}).get("ledger") or {}
-        LOGGER.info("Ledger: %s rows total, %s appended this run, newest anchor %s",
-                    led.get("rows_total"), led.get("rows_appended_this_run"),
-                    led.get("last_anchor"))
+        LOGGER.info(
+            "Ledger: %s rows total, %s appended this run, newest anchor %s",
+            led.get("rows_total"),
+            led.get("rows_appended_this_run"),
+            led.get("last_anchor"),
+        )
         if not led.get("rows_appended_this_run"):
-            LOGGER.warning("No new prediction rows were appended — expected on a re-run, "
-                           "but if it repeats across days the anchor has stopped advancing.")
+            LOGGER.warning(
+                "No new prediction rows were appended — expected on a re-run, "
+                "but if it repeats across days the anchor has stopped advancing."
+            )
 
         failures = []
         # A batch that drops most of the universe is a FAILED run, not a thin one.
@@ -822,8 +935,7 @@ if __name__ == "__main__":
         if args.max_error_rate is not None:
             failures.append(error_rate_exceeded(artifact["coverage"], args.max_error_rate))
         if args.max_anchor_age_days is not None:
-            failures.append(ledger_stalled(artifact.get("monitoring") or {}, TODAY,
-                                           args.max_anchor_age_days))
+            failures.append(ledger_stalled(artifact.get("monitoring") or {}, TODAY, args.max_anchor_age_days))
         failures = [f for f in failures if f]
         if failures:
             for reason in failures:
