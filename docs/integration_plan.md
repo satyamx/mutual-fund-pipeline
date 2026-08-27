@@ -17,9 +17,19 @@ anonymously** — verified by unauthenticated `curl` returning HTTP 200 with the
 payload. The decision that used to block step 1 is settled (option 1 in `docs/ci.md`);
 no token ships in the app, which was the constraint that ruled out the alternatives.
 
-**Step 1 is now buildable.** The remaining open call is D4 below (milestone 6): whether
-the app re-derives a profile-specific verdict in Dart — where it can drift from the
-Python — or renders the shipped facts + colours. Settle it before step 3 hardens.
+**Step 1 is DONE, not "buildable" — corrected 2026-08-27.** Hisaab Kitaab shipped the
+fetch/verify/ingest path on 2026-08-07 (`lib/services/mf_artifact_parser.dart`,
+`mf_artifact_ingest_service.dart`, `artifact_file_source.dart`; Drift schema v11, then
+v12 adding `ArtifactRuns` + the health card), device-verified on a Pixel 8 AVD
+2026-08-19. One real bug was found and fixed there afterwards (HK PRs #27/#28): on
+Android every picked file was Latin-1 decoded, because `cross_file` ignores its own
+`encoding` argument when `_bytes != null` and `file_selector_android` always sets it.
+**Standing app-side constraint: never `XFile.readAsString()`, never
+`http.Response.body` — decode the bytes explicitly.** Anything in this document that
+reads as "the app has not started" is stale; check the app repo before repeating it.
+
+**D4's remaining open call is now closed too — see D6 below.** The verdict is computed
+in Python and the app does not re-derive it.
 
 ## Sequence
 
@@ -112,6 +122,39 @@ Three things this does **not** change:
 - The cutoff is a tunable default with **no out-of-sample validation**. Personalising
   which side of it a fund lands on does not make the verdict more correct.
 
+### D6 — the verdict is computed in Python, and the app does not recompute it (2026-08-27)
+
+**Owner's call, 2026-08-27.** The verdict rule stays in the Python pipeline. The app
+**consumes** the shipped verdict; it does not port `utilityWeights` and does not
+re-derive a profile-specific verdict in Dart. This defers the client half of D4 option
+C — the server half already ships (`verdict_branches`, `screen_score_red_below`,
+`weight_matrix`, `utility_score`) and stays shipped, so nothing has to be re-emitted
+when this is revisited. Every verdict is therefore computed against
+`InvestorProfile()`'s defaults, and `verdict_basis.is_default_profile` is true on every
+record: **the default-profile disclaimer is mandatory, not optional**, precisely
+because no profile has been applied.
+
+Why: one source of truth for the thresholds. A Dart port is a second implementation of
+a rule whose cutoff has **no out-of-sample validation**, and it can drift silently.
+
+**"Consumes" means stored, NOT displayed — the two constraints are on different axes
+and both hold.** This decision fixes *where* the verdict is computed (Python, never
+recomputed in Dart). It does not touch the app-side rule that the composite verdict is
+never rendered — Hisaab Kitaab `DECISIONS.md` 2026-08-07 (7): `signal_a.verdict` /
+`verdict_color` / `sub_scores` may be stored, never put on a screen; `MfFund`
+deliberately exposes no getter for them and `test/app/mf_verdict_boundary_test.dart`
+enforces it. The reason is in this repo's own numbers: 290 of 367 funds read "BUY" on a
+model with holdout AUC 0.558. **Reading D6 as a licence to render a verdict chip would
+break that test and put a green BUY in front of a user on a coin-flip signal.**
+
+**Deferred, not dropped — multi-user.** When the app serves more than one user, the
+verdict becomes per-profile and computing it on-device is the natural shape: the batch
+would ship facts + `verdict_branches` + `weight_matrix` (all of which it already does)
+and each user's profile would select their own branch. Revisit at that point, with the
+±0.15 reproduction self-check in the D4 section above as the acceptance test. **That
+future move relocates the computation only; it does not by itself lift the
+never-render constraint, which is a separate decision on separate evidence.**
+
 ### Two cohort statuses that mean opposite things
 
 `NOT_IN_UNIVERSE` is a **fixable** gap (fetch the NAV, add to the manifest) —
@@ -138,21 +181,22 @@ misrepresents what the pipeline knows.
 
 | # | Deliverable | Blocked on |
 |---|---|---|
-| 0 | Resolve artifact access (public / mirror / object storage) | **owner decision — blocks all of the below** |
-| 1 | Fetch + verify + Drift load, with the stale-beats-corrupt rule | 0 |
+| 0 | ✅ **DONE** — artifact access resolved (public repo + rolling `latest-artifact` Release) | — |
+| 1 | ✅ **DONE 2026-08-07** — fetch + verify + Drift load (HK schema v11/v12, device-verified 2026-08-19) | — |
 | 2 | Fund list + detail screen: verdict chip, caveat, metric rows with grey nulls | 1 |
 | 3 | Coverage-flags surface and the two distinct cohort-status states | 2 |
 | 4 | Model-health panel per `app_evaluation_contract.md` | 2 |
 | 5 | Alerts, with `REGULATORY`-only notifications | 2 |
-| 6 | Real user profile replaces the default, and the disclaimer drops | 2 |
+| 6 | DEFERRED by D6 — real user profile replaces the default, and the disclaimer drops | multi-user support |
 
-Milestone 6 is worth calling out: today every verdict is computed against
-`InvestorProfile()`'s defaults because the batch runs before the app knows the user.
-Re-deriving a profile-specific verdict on-device means reimplementing the verdict
-rule in Dart — at which point the rule exists in two languages and can drift. The
-alternative is to ship the *facts* and *colours* and let the app apply the rule; that
-keeps one source of truth for thresholds. **This is an open design decision, not a
-settled one**, and it should be settled before milestone 2 hardens.
+**Milestone 6 is now DEFERRED, not open — see D6 above (2026-08-27).** The verdict is
+computed in Python against `InvestorProfile()`'s defaults and the app consumes it; the
+Dart port of `utilityWeights` is future work, gated on multi-user support. The
+default-profile disclaimer stays up until that lands. The original framing of the
+open question follows, kept because it is still the trade-off a future session has to
+re-weigh: re-deriving a profile-specific verdict on-device means the rule exists in two
+languages and can drift, against shipping facts + colours and keeping one source of
+truth for the thresholds.
 
 ## Mirror decisions into the app repo
 

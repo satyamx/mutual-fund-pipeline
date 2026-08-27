@@ -1,5 +1,13 @@
 # D4 — profile-specific verdicts: where the rule should live
 
+> **Amended 2026-08-27 by D6 (`docs/integration_plan.md`): the app-side half is
+> DEFERRED.** The server half below still ships and stays shipped; the app consumes the
+> shipped verdict and does **not** port `utilityWeights`, so every verdict is computed
+> against `InvestorProfile()`'s defaults and the default-profile disclaimer is
+> mandatory. Revisit when the app goes multi-user. "Consumes" means stored, not
+> rendered — the never-render constraint (HK `DECISIONS.md` 2026-08-07 (7)) is a
+> separate axis and is untouched by either decision.
+
 **Status: DECIDED and IMPLEMENTED (2026-08-06) — option C.** The owner chose C; the
 server side ships. `RecommendationEngine.run` now emits `verdict_branches` +
 `screen_score_red_below`, and `mf_artifact.py` ships those alongside `weight_matrix`

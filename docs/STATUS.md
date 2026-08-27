@@ -2,11 +2,36 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
-**As of 2026-08-07: MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** **Hisaab Kitaab: `Projects/MoneyManagerApp/Hisaab Kitaab`, HEAD `a33f628`, clean and pushed — it HAS a remote (`github.com/satyamx/money-manager-app`).** Every earlier note here calling it "clean, still local-only" at HEAD `9885565` was **stale and wrong** (verified 2026-08-07): `9885565` is the `DECISIONS.md` verdict-amendment commit, never the repo head. Check `git -C "<path>" status -sb` before repeating either claim — this is the same trap as the long-standing "the MF repo has no remote" note that cost two sessions.
+**As of 2026-08-27 (last verified): the pipeline has been running unattended for three weeks — 20 consecutive green nightlies, the newest `33024945376`. Earlier state, kept because the repo/remote facts still hold: as of 2026-08-07 MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** **Hisaab Kitaab: `Projects/MoneyManagerApp/Hisaab Kitaab`, HEAD `a33f628`, clean and pushed — it HAS a remote (`github.com/satyamx/money-manager-app`).** Every earlier note here calling it "clean, still local-only" at HEAD `9885565` was **stale and wrong** (verified 2026-08-07): `9885565` is the `DECISIONS.md` verdict-amendment commit, never the repo head. Check `git -C "<path>" status -sb` before repeating either claim — this is the same trap as the long-standing "the MF repo has no remote" note that cost two sessions.
 
 **Every decision D1–D5 is now closed** (see the table below). Manifest **565 funds**, shipped model **`phase_b_v5`**, `overrides/universe_overrides.csv` **198 curated rows**, and **8 funds** remain without a viable cohort. The repository is **PUBLIC** and the batch artifact is anonymously fetchable.
 
-> **Nothing has run on `phase_b_v5` yet.** The last nightly (`31136359325`, 2026-08-07 00:56Z) executed *before* these commits landed, so `ledger/predictions.jsonl` holds 1,861 rows of v1/v2/v2_1/v3 and **zero v4 or v5**. The next scheduled run is the first exercise of the 565-fund universe, the `INSUFFICIENT_HISTORY` refusal and the imputation fields — check it rather than assume it. Note `phase_b_v4` never reached CI and produced **no ledger rows at all**, so there is nothing to retire for it; v3's 1,045 rows are a legitimate shipped series and stay, exactly like v1's.
+> **`phase_b_v5` has now run — VERIFIED 2026-08-27, this replaces the old "nothing has run on it yet" warning.** Twenty nightlies have executed it (anchors `2026-08-06` → `2026-08-26`, 14 distinct anchors) and the ledger holds **6,497 `phase_b_v5_cohort` rows over 506 distinct funds**, out of 8,358 rows total. The last run (`33024945376`, 2026-08-27 00:33Z) emitted **565 funds / 0 errors** and appended 506 rows. **The numbers were checked, not the exit code** — read from the published artifact rather than the log, which does not print the coverage block: `cohort_status` = **506 OK / 39 INSUFFICIENT_HISTORY / 15 THIN_COHORT / 5 STALE_NAV**. So the imputation gate is live and refusing 39 real funds, and only OK rows reach the ledger (`mf_ledger._prediction_row` returns None for any non-OK signal), which is why 565 emitted funds give 506 ledgered ones. `imputed_fraction` is non-null on exactly **545 = 506 + 39** records — the two `STATUSES_WITH_IMPUTATION` statuses and no others, confirming the `n_imputed`-was-0-for-refused-funds defect stays fixed. Note `phase_b_v4` never reached CI and produced **no ledger rows at all**, so there is nothing to retire for it; v3's 1,045 rows are a legitimate shipped series and stay, exactly like v1's.
+
+## What is actually open (2026-08-27)
+
+Everything below the "Product shape" heading is history; this is the live list.
+
+1. **`realize-monthly` has never fired on its cron.** One run exists ever
+   (`30775394690`, a `workflow_dispatch` on 2026-08-03); the schedule is
+   `0 3 1 * *` and no scheduled run has landed since. Nothing is realizable until
+   ~2029, so this costs nothing today — but a cron that has never fired on schedule is
+   unproven, and finding that out in 2029 is the expensive version. **Check the run on
+   2026-09-01.**
+2. **`LICENSE`** — owner call, still absent, so all-rights-reserved by default while the
+   repo is public and `benchmarks/` redistribution is live.
+3. **`mf_cache/managers.csv` and `mf_cache/disclosures/`** — hand-sourced, unfetchable.
+   Until they exist, holdings and manager signals stay inert (`mf_managers.py
+   --template` writes the skeleton).
+4. **8 funds with no viable cohort** — not a missing label; each is under
+   `COHORT_MIN_SIZE`=4 with no parent to fold into. Conglomerate self-resolves when a
+   4th launches.
+5. **D6 (2026-08-27) is settled:** the verdict is computed in Python and the app
+   consumes it — see `docs/integration_plan.md`. Milestone 6 (per-user profiles in
+   Dart) is deferred to multi-user, not open.
+
+**The app side is further along than this file used to say:** integration milestones 0
+and 1 are DONE (HK schema v11/v12, device-verified 2026-08-19), not blocked.
 
 **The clock fix is confirmed working in CI.** Scheduled run `31049875759` (2026-08-05 21:43Z, on `544be59`) was green; the ledger stands at **1,512 rows** with anchors `2026-08-04` ×342 and `2026-08-05` ×6 alongside the historical `2026-07-13` ×1,164. That run itself appended 0 rows and committed nothing — correct, since NAV had not advanced since the 18:52 dispatch three hours earlier. Zero-appended is only alarming if it repeats *across days*, which is exactly what `--max-anchor-age-days 7` now fails on.
 
