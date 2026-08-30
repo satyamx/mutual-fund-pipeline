@@ -35,7 +35,15 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 60 was set when the universe was 367 funds. It is 565 now, and the emit
+    # step alone measured 33/33/39/39/38/45/42 min across the last seven green
+    # nightlies — 65-75% of the whole job's budget, before checkout, pip, cache
+    # restore, the ledger commit and the Release publish. Run 33230002943
+    # (2026-08-29) was killed at exactly 60m00s mid-emit and skipped the ledger
+    # commit; the day survived only because the next night's schedule fired.
+    # The NAV fetch is deliberately throttled, so this is the universe growing,
+    # not a hang — and a hang still dies here, 30 minutes later.
+    timeout-minutes: 90
     env:
       PYTHONIOENCODING: utf-8          # ₹/emoji output crashes under cp1252 otherwise
       PYTHONPATH: ${{ github.workspace }}
