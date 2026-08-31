@@ -8,9 +8,11 @@ WITHOUT importing sklearn into the orchestrator. This module does exactly that
 for the cohort artifact written by mf_model.build_cohort_artifact.
 
 The cohort_q1 probability is the only validated predictive signal in the
-pipeline (phase_b_v2 holdout AUC ~0.558, lift ~1.10x) — a weak signal INPUT, never an
-oracle. `signal_context()` exposes its measured accuracy so callers surface it
-honestly.
+pipeline — a weak signal INPUT, never an oracle. `signal_context()` reads the
+shipped artifact's own measured holdout AUC (never a hardcoded number here,
+which would go stale on the next retrain the way this docstring itself once
+did — see docs/STATUS.md for the current model's full metrics) so callers
+surface it honestly.
 
 Self-test: `python mf_infer.py --selftest` re-fits the sklearn pipeline on the
 same cohort data and asserts this numpy path reproduces its probabilities
