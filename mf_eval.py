@@ -274,16 +274,29 @@ class ModelHealthReport:
     note: str = ""
 
 
-_DISCLAIMER = (
-    "This panel reflects data-drift and pipeline health — NOT fund-outcome accuracy. "
-    "The cohort signal is a weak, within-cohort ranking aid (phase_b_v2 training holdout "
-    "AUC ~0.558, lift ~1.10x); its real-world accuracy cannot be measured until ~3 years "
-    "of logged predictions mature. 'Pending' means not-yet-measurable, not bad."
-)
+# Was a hardcoded "phase_b_v2 ... AUC ~0.558, lift ~1.10x" string that silently
+# went stale at every retrain (still read v2 while phase_b_v5 was live, showing
+# 0.558 instead of the shipped model's actual 0.537). `holdout_auc` now comes
+# from the artifact itself (see `_holdout_auc`) so it can never describe a
+# retired model. Lift has no machine-readable home (it's a report-time number,
+# not stored in the artifact) — dropped rather than risk re-introducing the
+# same staleness for a second field.
+def _disclaimer(model_id: Optional[str], holdout_auc: Optional[float]) -> str:
+    auc_str = f"~{holdout_auc:.3f}" if holdout_auc is not None else "not on file"
+    return (
+        "This panel reflects data-drift and pipeline health — NOT fund-outcome accuracy. "
+        f"The cohort signal ({model_id or 'model'}) is a weak, within-cohort ranking aid "
+        f"(training holdout AUC {auc_str}); its real-world accuracy cannot be measured until "
+        "~3 years of logged predictions mature. 'Pending' means not-yet-measurable, not bad."
+    )
 
 
 def build_report(
-    monitoring: Dict[str, Any], coverage: Dict[str, Any], outcome: Dict[str, Any], model_id: Optional[str] = None
+    monitoring: Dict[str, Any],
+    coverage: Dict[str, Any],
+    outcome: Dict[str, Any],
+    model_id: Optional[str] = None,
+    holdout_auc: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Pure: raw monitoring{} + coverage{} + outcome{} -> the app-renderable
     evaluation{} block. No orchestrator / NAV / sklearn dependency, so it is
@@ -310,11 +323,29 @@ def build_report(
         headline=headline,
         metrics=[asdict(m) for m in metrics],
         outcome=outcome,
-        disclaimer=_DISCLAIMER,
+        disclaimer=_disclaimer(model_id, holdout_auc),
         model_id=model_id,
         note=monitoring.get("note", ""),
     )
     return asdict(report)
+
+
+def _holdout_auc(model_id: Optional[str]) -> Optional[float]:
+    """Read the shipped artifact's own measured holdout AUC for the live cohort
+    target — never a hardcoded number that can outlive the model it describes.
+    Degrades to None (disclaimer says "not on file") if the artifact is
+    missing or doesn't match model_id; never raises into the report path."""
+    if model_id is None:
+        return None
+    try:
+        import mf_infer  # numpy-only, no sklearn — safe to import from the monitoring path
+
+        inf = mf_infer.CohortInferencer()
+        if inf.artifact.get("version") != model_id:
+            return None
+        return inf.signal_context(mf_infer.DEFAULT_TARGET).get("holdout_auc")
+    except Exception:
+        return None
 
 
 def build_report_from_ledger(
@@ -327,7 +358,7 @@ def build_report_from_ledger(
     """Convenience wrapper mf_artifact.py calls: pulls the matured-outcome metrics
     from the ledger, then grades everything."""
     outcome = outcome_metrics(realizations_path, predictions_path)
-    return build_report(monitoring, coverage, outcome, model_id=model_id)
+    return build_report(monitoring, coverage, outcome, model_id=model_id, holdout_auc=_holdout_auc(model_id))
 
 
 def render(report: Dict[str, Any]) -> str:
