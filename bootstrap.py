@@ -115,9 +115,14 @@ def main() -> int:
                 MANIFEST_PATH,
             )
             return 2
-        names = list(load_manifest()["scheme_name"])
-        LOG.info("--from-manifest: refreshing %d funds from %s", len(names), MANIFEST_PATH.name)
-        args.funds = list(args.funds) + names
+        # By AMFI CODE, not by name. The manifest already carries the code, so the
+        # NAV refresh needs neither the AMFI master nor name resolution — which is
+        # what let one AMFI feed-shape change (an empty master) silently skip the
+        # whole refresh for three nightlies and time out the emit step instead.
+        manifest_codes = [str(c) for c in load_manifest()["amfi_code"].dropna()]
+        LOG.info("--from-manifest: refreshing %d funds from %s", len(manifest_codes), MANIFEST_PATH.name)
+    else:
+        manifest_codes = []
 
     print("=" * 78 + "\n  MF PIPELINE BOOTSTRAP\n" + "=" * 78)
 
@@ -142,6 +147,7 @@ def main() -> int:
         LOG.info("[2/5] no --funds given, skipped")
     if args.candidates and not master.empty:
         resolved += _candidate_codes(master)
+    resolved += manifest_codes
     # A code reached by BOTH paths (a --funds query naming an out-of-manifest fund)
     # would otherwise be fetched twice. Order-preserving so the log reads sensibly.
     resolved = list(dict.fromkeys(resolved))
@@ -161,6 +167,11 @@ def main() -> int:
                 msg += f"  [{rep.summary()}]"
             LOG.info(msg)
         LOG.info("      NAV: %d ok, %d failed", n_ok, n_fail)
+        # Per-fund attrition is tolerated; a refresh that lost most of the universe
+        # is not, and must fail HERE rather than surface an hour later as a timeout.
+        if manifest_codes and n_ok < 0.75 * len(resolved):
+            LOG.error("      NAV refresh failed for %d of %d funds — failing the run", n_fail, len(resolved))
+            return 3
     else:
         LOG.info("[3/5] skipped")
 

@@ -293,10 +293,49 @@ class MFAPIAdapter:
 class AMFIRegistryLive:
     """AMFI NAVAll.txt -> scheme master (code, ISINs, name, category, AMC)."""
 
-    LINE = re.compile(
-        r"^(?P<code>\d{4,8});(?P<isin1>[^;]*);(?P<isin2>[^;]*);"
-        r"(?P<name>[^;]+);(?P<nav>[0-9.]+|N\.A\.);(?P<date>[^;]+)\s*$"
-    )
+    @staticmethod
+    def parse_row(line: str) -> Optional[Dict[str, Any]]:
+        """One NAVAll data row -> dict, or None if the line is not a data row.
+
+        AMFI publishes TWO row shapes and the pipeline has seen both:
+          6 fields  code;isin1;isin2;name;nav;date
+          8 fields  code;isin1;isin2;name;plan;option;nav;date
+        (the 8-field shape — `Plan` and `Option` inserted ahead of the NAV — is
+        what Hisaab Kitaab's own AMFI parser met live on 2026-08-23, HK DECISIONS
+        2026-08-23 (1)). The old fixed 6-field regex matches ZERO 8-field rows.
+        In CI the fetch raised no "GET ... failed" warning yet master() came back
+        empty on every nightly checked (09-19..09-23, green ones included), so
+        bootstrap logged "AMFI unreachable" on a 200, skipped the whole NAV refresh
+        and exited 0. The emit step then refetched 565 stale NAVs itself, which a
+        slow api.mfapi.in stretched past the job timeout (runs 35667626235 /
+        35795842638 / 35931482883). master() now logs the first data line when a
+        fetch parses to nothing, so the next shape change names itself.
+
+        So the field count is a floor, NAV is read second-to-last and the date
+        last — the one thing both shapes agree on. Plan/Option are folded back into
+        the name as " - <plan> - <option>" so the DIRECT/GROWTH preference in
+        resolve() still has the tokens it keys on. A non-positive NAV is refused:
+        it is the cheap guard against columns ever being appended AFTER the date.
+        """
+        if not line or not line[:1].isdigit():
+            return None
+        f = [x.strip() for x in line.split(";")]
+        if len(f) < 6 or not re.fullmatch(r"\d{4,8}", f[0]) or not f[3]:
+            return None
+        nav_s, date = f[-2], f[-1]
+        if nav_s == "N.A.":
+            return None
+        try:
+            nav = float(nav_s)
+        except ValueError:
+            return None
+        if not nav > 0:
+            return None
+        name = f[3]
+        extra = [x for x in f[4:-2] if x and x != "-"]
+        if extra:
+            name = " - ".join([name, *extra])
+        return dict(code=f[0], isin1=f[1], isin2=f[2], name=name, nav=nav, date=date)
 
     # A category header is "<Family> Schemes(<Asset> - <Sub>)". The literal
     # Scheme/Schemes token before the parenthesis is what separates it from an AMC
@@ -332,21 +371,21 @@ class AMFIRegistryLive:
             line = line.strip()
             if not line or line.startswith("Scheme Code"):
                 continue
-            m = self.LINE.match(line)
+            m = self.parse_row(line)
             if m:
-                if m.group("nav") == "N.A.":
-                    continue
                 rows.append(
                     dict(
-                        amfi_code=m.group("code"),
-                        isin=(m.group("isin1") or "").strip() or None,
-                        scheme_name=m.group("name").strip(),
+                        amfi_code=m["code"],
+                        isin=(m["isin1"] or "").strip() or None,
+                        scheme_name=m["name"],
                         category_raw=category,
                         amc=amc,
-                        nav=float(m.group("nav")),
-                        date=m.group("date"),
+                        nav=m["nav"],
+                        date=m["date"],
                     )
                 )
+            elif ";" in line:  # an unparseable semicolon row is data we failed to read,
+                continue       # never an AMC banner or a category header
             elif self.CATEGORY_HEADER.match(line):  # "Open Ended Schemes(Equity Scheme - Large Cap Fund)"
                 category = line
             elif ";" not in line:  # AMC banner line
@@ -355,6 +394,19 @@ class AMFIRegistryLive:
         if not df.empty:
             df.to_parquet(p)
             self.live = True
+            return df
+        # A 200 that parses to nothing is a SHAPE mismatch, not an outage — say so,
+        # and fall back to the cached master exactly as a network failure would,
+        # instead of handing every caller an empty frame they read as "unreachable".
+        LOGGER.error(
+            "AMFI NAVAll fetched (%d bytes) but parsed to ZERO scheme rows — the feed "
+            "shape changed. First data-looking line: %r",
+            len(txt),
+            next((ln for ln in txt.splitlines() if ln[:1].isdigit()), None),
+        )
+        if p.exists():
+            LOGGER.warning("serving cached master after the parse failure")
+            return pd.read_parquet(p)
         return df
 
     def resolve(self, query: str) -> Optional[pd.Series]:
@@ -739,9 +791,11 @@ def _selftest_navall() -> None:
         line = line.strip()
         if not line or line.startswith("Scheme Code"):
             continue
-        m = AMFIRegistryLive.LINE.match(line)
+        m = AMFIRegistryLive.parse_row(line)
         if m:
-            rows.append(dict(code=m.group("code"), name=m.group("name").strip(), category_raw=category, amc=amc))
+            rows.append(dict(code=m["code"], name=m["name"], category_raw=category, amc=amc))
+        elif ";" in line:
+            continue
         elif AMFIRegistryLive.CATEGORY_HEADER.match(line):
             category = line
         elif ";" not in line:
@@ -769,6 +823,40 @@ def _selftest_navall() -> None:
     assert not AMFIRegistryLive.CATEGORY_HEADER.match("Alpha Mutual Fund")
     assert AMFIRegistryLive.CATEGORY_HEADER.match("Open Ended Schemes(Equity Scheme - ELSS)")
     assert AMFIRegistryLive.CATEGORY_HEADER.match("Open Ended Schemes(Exchange Traded Funds (ETFs) - Equity ETF)")
+    # THE 8-FIELD SHAPE. The first data line is copied verbatim from a live pull
+    # (HK DECISIONS 2026-08-23 (1)); the rest follow it. The fixed 6-field regex
+    # this replaces matched none of these, and an empty master cost three nightlies.
+    live8 = "\n".join(
+        [
+            "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date",
+            "Open Ended Schemes(Debt Scheme - Banking and PSU Fund)",
+            "Aditya Birla Sun Life Mutual Fund",
+            "108273;INF209K01LV0;-;Aditya Birla Sun Life Banking & PSU Debt Fund;Regular Plan;GROWTH;387.4258;21-Aug-2026",
+            "119551;INF200K01UY1;-;Some Debt Fund;Direct Plan;GROWTH;55.1234;21-Aug-2026",
+            "119552;INF200K01UZ8;-;Some NA Fund;Direct Plan;GROWTH;N.A.;21-Aug-2026",
+            "119553;INF200K01UZ9;-;Zero Fund;Direct Plan;GROWTH;0;21-Aug-2026",
+        ]
+    )
+    got = {}
+    cat = None
+    for line in live8.splitlines():
+        r = AMFIRegistryLive.parse_row(line.strip())
+        if r:
+            got[r["code"]] = (r, cat)
+        elif AMFIRegistryLive.CATEGORY_HEADER.match(line):
+            cat = line
+    assert set(got) == {"108273", "119551"}, f"FAIL: 8-field rows not parsed (or N.A./0 NAV accepted): {sorted(got)}"
+    r, c = got["108273"]
+    assert r["nav"] == 387.4258 and r["date"] == "21-Aug-2026" and r["isin1"] == "INF209K01LV0", r
+    assert r["name"] == "Aditya Birla Sun Life Banking & PSU Debt Fund - Regular Plan - GROWTH", r["name"]
+    assert c == "Open Ended Schemes(Debt Scheme - Banking and PSU Fund)", c
+    # 6-field rows are unchanged: no plan/option to fold in, name kept verbatim.
+    r6 = AMFIRegistryLive.parse_row("100001;INF000000001;-;Alpha Large Cap Fund - Direct - Growth;123.45;01-Jul-2026")
+    assert r6 and r6["name"] == "Alpha Large Cap Fund - Direct - Growth" and r6["nav"] == 123.45, r6
+    # Header / banner / short rows are never data.
+    for junk in ("Scheme Code;a;b;c;d;e", "Alpha Mutual Fund", "123;x;y", ""):
+        assert AMFIRegistryLive.parse_row(junk) is None, junk
+    print("[selftest] NAVAll: 8-field (Plan/Option) and 6-field rows both parse; N.A./0 NAV refused — PASS")
     print(
         "[selftest] NAVAll: paren-bearing AMC banner read as AMC (not category); "
         "following AMCs keep their real category — PASS"
