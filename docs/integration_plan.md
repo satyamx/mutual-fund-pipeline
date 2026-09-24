@@ -179,14 +179,17 @@ misrepresents what the pipeline knows.
 
 ## Milestones
 
+*Table re-derived against the app repo 2026-09-24 (HK `master` @ `b7dab55`).*
+
+
 | # | Deliverable | Blocked on |
 |---|---|---|
 | 0 | ✅ **DONE** — artifact access resolved (public repo + rolling `latest-artifact` Release) | — |
 | 1 | ✅ **DONE 2026-08-07** — fetch + verify + Drift load (HK schema v11/v12, device-verified 2026-08-19) | — |
-| 2 | Fund list + detail screen: verdict chip, caveat, metric rows with grey nulls | 1 |
-| 3 | Coverage-flags surface and the two distinct cohort-status states | 2 |
-| 4 | Model-health panel per `app_evaluation_contract.md` | 2 |
-| 5 | Alerts, with `REGULATORY`-only notifications | 2 |
+| 2 | ✅ **DONE, minus the chip** — `FundEvidenceCard` on Portfolio: metric rows with grey NOT AVAILABLE nulls, artifact age. The **verdict chip is deliberately never rendered** (HK DECISIONS 2026-08-07 (7), enforced by `mf_verdict_boundary_test.dart`) — that is a standing decision, not an unfinished milestone | 1 |
+| 3 | ✅ **DONE** — `coverage_flags` rendered on the evidence card; non-`EVALUABLE` eligibility caveated by name (HK DECISIONS 2026-08-30 (3)) | 2 |
+| 4 | ✅ **DONE** — `AnalysisHealthCard` over HK schema v12 `ArtifactRuns`, disclaimer verbatim | 2 |
+| 5 | **OPEN** — `alerts_b` is parsed and stored (`FundAnalysis.alertsJson`) but reaches no screen and no notification. Needs an HK-side plan: where alerts render, and the `REGULATORY`-only notification gate | 2 |
 | 6 | DEFERRED by D6 — real user profile replaces the default, and the disclaimer drops | multi-user support |
 
 **Milestone 6 is now DEFERRED, not open — see D6 above (2026-08-27).** The verdict is

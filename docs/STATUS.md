@@ -8,16 +8,22 @@ Repo-tracked mirror of the build status, so a `git push` hands off the full pict
 
 > **`phase_b_v5` has now run — VERIFIED 2026-08-27, this replaces the old "nothing has run on it yet" warning.** Twenty nightlies have executed it (anchors `2026-08-06` → `2026-08-26`, 14 distinct anchors) and the ledger holds **6,497 `phase_b_v5_cohort` rows over 506 distinct funds**, out of 8,358 rows total. The last run (`33024945376`, 2026-08-27 00:33Z) emitted **565 funds / 0 errors** and appended 506 rows. **The numbers were checked, not the exit code** — read from the published artifact rather than the log, which does not print the coverage block: `cohort_status` = **506 OK / 39 INSUFFICIENT_HISTORY / 15 THIN_COHORT / 5 STALE_NAV**. So the imputation gate is live and refusing 39 real funds, and only OK rows reach the ledger (`mf_ledger._prediction_row` returns None for any non-OK signal), which is why 565 emitted funds give 506 ledgered ones. `imputed_fraction` is non-null on exactly **545 = 506 + 39** records — the two `STATUSES_WITH_IMPUTATION` statuses and no others, confirming the `n_imputed`-was-0-for-refused-funds defect stays fixed. Note `phase_b_v4` never reached CI and produced **no ledger rows at all**, so there is nothing to retire for it; v3's 1,045 rows are a legitimate shipped series and stay, exactly like v1's.
 
-## What is actually open (2026-08-27)
+## What is actually open (2026-09-24)
 
 Everything below the "Product shape" heading is history; this is the live list.
 
-1. **`realize-monthly` has never fired on its cron.** One run exists ever
-   (`30775394690`, a `workflow_dispatch` on 2026-08-03); the schedule is
-   `0 3 1 * *` and no scheduled run has landed since. Nothing is realizable until
-   ~2029, so this costs nothing today — but a cron that has never fired on schedule is
-   unproven, and finding that out in 2029 is the expensive version. **Check the run on
-   2026-09-01.**
+0. **Nightly timeouts 09-21..09-23 — fixed on `claude/mf-pipeline-integration-status-7uwr6h`,
+   unproven until a scheduled run goes green on it.** Three runs were cancelled at the
+   60-min cap mid-emit, so no ledger rows and a stale `latest-artifact`. Cause: AMFI's
+   NAVAll rows are 8 fields (Plan/Option before the NAV) and the 6-field regex matched
+   none, so `bootstrap.py` logged "AMFI unreachable" on **every** nightly checked
+   (green ones too), skipped the NAV refresh and exited 0; the emit step refetched 565
+   stale NAVs itself and a slow mfapi pushed it over. Fix: tolerant row parser,
+   `--from-manifest` refreshes by `amfi_code`, bootstrap fails under 75% refreshed,
+   job timeout 120. **The 09-21..09-23 anchors are lost to the ledger** — predictions
+   cannot be backfilled after the fact, and nothing should try to.
+1. ~~**`realize-monthly` has never fired on its cron.**~~ **Closed 2026-09-24:** its
+   first scheduled run, `33486045050` (2026-09-01), was green.
 2. **`LICENSE`** — owner call, still absent, so all-rights-reserved by default while the
    repo is public and `benchmarks/` redistribution is live.
 3. **`mf_cache/managers.csv` and `mf_cache/disclosures/`** — hand-sourced, unfetchable.
@@ -30,8 +36,9 @@ Everything below the "Product shape" heading is history; this is the live list.
    consumes it — see `docs/integration_plan.md`. Milestone 6 (per-user profiles in
    Dart) is deferred to multi-user, not open.
 
-**The app side is further along than this file used to say:** integration milestones 0
-and 1 are DONE (HK schema v11/v12, device-verified 2026-08-19), not blocked.
+**The app side is further along than this file used to say:** integration milestones
+0–4 are DONE (the verdict chip is refused by HK decision, not pending) — see the table
+in `docs/integration_plan.md`. **Milestone 5 (alerts) is the one open app-side item.**
 
 **The clock fix is confirmed working in CI.** Scheduled run `31049875759` (2026-08-05 21:43Z, on `544be59`) was green; the ledger stands at **1,512 rows** with anchors `2026-08-04` ×342 and `2026-08-05` ×6 alongside the historical `2026-07-13` ×1,164. That run itself appended 0 rows and committed nothing — correct, since NAV had not advanced since the 18:52 dispatch three hours earlier. Zero-appended is only alarming if it repeats *across days*, which is exactly what `--max-anchor-age-days 7` now fails on.
 
