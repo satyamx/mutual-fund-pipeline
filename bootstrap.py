@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from mf_datasources import (
     AMFI_CAPLIST_PAGE,
@@ -102,6 +103,15 @@ def main() -> int:
         "categories with no curated sector are skipped, because score_live "
         "refuses them before it would ever ask for their NAV.",
     )
+    ap.add_argument(
+        "--nav-workers",
+        type=int,
+        default=6,
+        help="concurrent mfapi fetches in the NAV refresh (default 6). Serial was "
+        "87 min for 565 funds on 2026-09-24 at ~9s/fund with mfapi slow — within 6 "
+        "min of the job cap. Each worker still honours the cache-first 20h TTL, so "
+        "this only parallelises fetches that were going to happen anyway.",
+    )
     args = ap.parse_args()
 
     if args.from_manifest:
@@ -155,8 +165,11 @@ def main() -> int:
     if resolved:
         LOG.info("[3/5] Pulling NAV history for %d code(s) ...", len(resolved))
         n_ok = n_fail = 0
-        for code in resolved:
-            nav, meta, rep = mfapi.nav_series(code)
+        # Fetch concurrently, report in input order. nav_series writes one cache
+        # file per code, so workers never touch the same path.
+        with ThreadPoolExecutor(max_workers=max(1, args.nav_workers)) as pool:
+            fetched = list(pool.map(mfapi.nav_series, resolved))
+        for code, (nav, meta, rep) in zip(resolved, fetched):
             if nav is None:
                 LOG.warning("      NAV fetch failed: %s", code)
                 n_fail += 1

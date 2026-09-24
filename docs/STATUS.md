@@ -20,7 +20,11 @@ Everything below the "Product shape" heading is history; this is the live list.
    (green ones too), skipped the NAV refresh and exited 0; the emit step refetched 565
    stale NAVs itself and a slow mfapi pushed it over. Fix: tolerant row parser,
    `--from-manifest` refreshes by `amfi_code`, bootstrap fails under 75% refreshed,
-   job timeout 120. **The 09-21..09-23 anchors are lost to the ledger** — predictions
+   job timeout 120, and the refresh fetches 6 funds at a time (`--nav-workers`). A
+   dispatch of the serial version (run `35966356261`, 2026-09-24) went green —
+   master parsed 14,153 schemes, NAV 565 ok — but mfapi averaged ~9s/fund and the
+   refresh alone took 87 min, leaving 6 min of headroom; hence the workers.
+   **The 09-21..09-23 anchors are lost to the ledger** — predictions
    cannot be backfilled after the fact, and nothing should try to.
 1. ~~**`realize-monthly` has never fired on its cron.**~~ **Closed 2026-09-24:** its
    first scheduled run, `33486045050` (2026-09-01), was green.
