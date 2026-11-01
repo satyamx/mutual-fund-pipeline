@@ -2,6 +2,8 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
+**Refreshed 2026-11-01 (from `gh` + the ledger, not from memory): healthy.** `origin/master` carries the `2026-10-31` ledger anchor; ledger = 28,607 rows / 60 anchors, 26,746 of them `phase_b_v5_cohort`. **39 of 39 nightlies since 2026-09-24 are green** (longest ~74 min against the 90-min limit). `realize-monthly` has now fired on its cron three times running (2026-09-01, 10-01, 11-01) — open item 1 is closed. The 60-min cancellations went on past 08-29: **runs on 09-03, 09-21, 09-22 and 09-23 were also cancelled at ~60m**, because the 90-min fix (`0350006`, committed 08-30) sat unpushed until after 09-23 — those runs executed `ee34b99`/`c5b2769`, neither of which contains it. Each lost only that night's append (a later night re-anchored), but three in a row is the case `--max-anchor-age-days 7` exists for. Nothing since. Sections below are dated and left as written.
+
 **As of 2026-08-27 (last verified): the pipeline has been running unattended for three weeks. **The "20 consecutive green nightlies" this line used to claim ended on 2026-08-29**, when run `33230002943` was cancelled on the job timeout — see open item 1b. Newest green: `33279245763` (2026-08-29 22:43Z), and `origin/master` carries the `2026-08-29` ledger append. Earlier state, kept because the repo/remote facts still hold: as of 2026-08-07 MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** **Hisaab Kitaab: `Projects/MoneyManagerApp/Hisaab Kitaab`, HEAD `a33f628`, clean and pushed — it HAS a remote (`github.com/satyamx/money-manager-app`).** Every earlier note here calling it "clean, still local-only" at HEAD `9885565` was **stale and wrong** (verified 2026-08-07): `9885565` is the `DECISIONS.md` verdict-amendment commit, never the repo head. Check `git -C "<path>" status -sb` before repeating either claim — this is the same trap as the long-standing "the MF repo has no remote" note that cost two sessions.
 
 **Every decision D1–D5 is now closed** (see the table below). Manifest **565 funds**, shipped model **`phase_b_v5`**, `overrides/universe_overrides.csv` **198 curated rows**, and **8 funds** remain without a viable cohort. The repository is **PUBLIC** and the batch artifact is anonymously fetchable.
@@ -12,13 +14,17 @@ Repo-tracked mirror of the build status, so a `git push` hands off the full pict
 
 Everything below the "Product shape" heading is history; this is the live list.
 
-1. **`realize-monthly` has never fired on its cron.** One run exists ever
+1. ✅ **CLOSED 2026-11-01 — `realize-monthly` fired on schedule on 09-01, 10-01 and 11-01, all green.** Original entry follows. ~~**`realize-monthly` has never fired on its cron.**~~ One run existed then
    (`30775394690`, a `workflow_dispatch` on 2026-08-03); the schedule is
    `0 3 1 * *` and no scheduled run has landed since. Nothing is realizable until
    ~2029, so this costs nothing today — but a cron that has never fired on schedule is
    unproven, and finding that out in 2029 is the expensive version. **Check the run on
    2026-09-01.**
-1b. **The nightly job was one slow AMFI night from losing a day of ledger, and
+1b. ✅ **FIXED, but only once pushed (after 2026-09-23); 39/39 green since 09-24.**
+   The 90-min limit was committed 08-30 and not pushed, so 09-03, 09-21, 09-22 and
+   09-23 were cancelled at 60m too. *A fix that is committed but not pushed is not a
+   fix — CI runs what is pushed.* Original entry follows.
+   **The nightly job was one slow AMFI night from losing a day of ledger, and
    ran out of budget on 2026-08-29.** Run `33230002943` was **cancelled at
    exactly 60m00s** — the job's `timeout-minutes`, not a concurrency
    cancellation (`cancel-in-progress: false`) and not an error. It died inside
