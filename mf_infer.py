@@ -28,6 +28,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from mf_horizon import DEFAULT, HORIZONS
+
 # The SHIPPED model, git-tracked at top-level model/ (2026-08-03) — deliberately
 # separate from mf_cache/phase_b/, which holds the regenerable research outputs
 # (features/labels parquets, CPCV results, reports) and stays gitignored.
@@ -78,9 +80,13 @@ def _apply_calibration(p_raw: np.ndarray, cal: Dict[str, Any]) -> np.ndarray:
 
 class CohortInferencer:
     """Loads a cohort model artifact and scores feature dicts. Stateless after
-    construction; safe to build once and reuse."""
+    construction; safe to build once and reuse. `horizon` (mf_horizon key) picks
+    the artifact and the default target: 3y is model_artifact_cohort.json /
+    cohort_q1 exactly as before, 1m..1y their own suffixed artifact and target."""
 
-    def __init__(self, artifact_path: Path = COHORT_ARTIFACT_PATH) -> None:
+    def __init__(self, artifact_path: Optional[Path] = None, horizon: str = DEFAULT) -> None:
+        artifact_path = artifact_path or HORIZONS[horizon].artifact_path
+        self.target = HORIZONS[horizon].target
         if not artifact_path.exists():
             raise FileNotFoundError(
                 f"cohort artifact not found: {artifact_path} — run `python mf_model.py --stage cohort` to build it."
@@ -93,10 +99,10 @@ class CohortInferencer:
     def targets(self) -> list[str]:
         return list(self.models)
 
-    def signal_context(self, target: str = DEFAULT_TARGET) -> Dict[str, Any]:
+    def signal_context(self, target: Optional[str] = None) -> Dict[str, Any]:
         """Measured edge of this target (holdout AUC + base rate) — surface the
         probability WITH this, never as a standalone verdict."""
-        return dict(self.models[target].get("signal_context", {}))
+        return dict(self.models[target or self.target].get("signal_context", {}))
 
     def _vectorize(self, features: Dict[str, float], m: Dict[str, Any]) -> np.ndarray:
         med, mean, std = m["imputation_medians"], m["standardize_mean"], m["standardize_std"]
@@ -108,9 +114,9 @@ class CohortInferencer:
             out[i] = (float(v) - mean[c]) / std[c]
         return out
 
-    def predict(self, features: Dict[str, float], target: str = DEFAULT_TARGET) -> float:
-        """Calibrated P(fund is in cohort's top quartile / half over 3y-forward)."""
-        m = self.models[target]
+    def predict(self, features: Dict[str, float], target: Optional[str] = None) -> float:
+        """Calibrated P(fund is in cohort's top quartile / half over the horizon's forward window)."""
+        m = self.models[target or self.target]
         z = self._vectorize(features, m)
         coef = np.array([m["coefficients"][c] for c in self.features], dtype=float)
         p_raw = _sigmoid(m["intercept"] + float(coef @ z))
@@ -120,15 +126,14 @@ class CohortInferencer:
         return {t: self.predict(features, t) for t in self.targets}
 
 
-_DEFAULT: Optional[CohortInferencer] = None
+_DEFAULT: Dict[str, CohortInferencer] = {}
 
 
-def load_default() -> CohortInferencer:
-    """Process-wide singleton so the orchestrator loads the artifact once."""
-    global _DEFAULT
-    if _DEFAULT is None:
-        _DEFAULT = CohortInferencer()
-    return _DEFAULT
+def load_default(horizon: str = DEFAULT) -> CohortInferencer:
+    """Process-wide singleton per horizon so each artifact is loaded once."""
+    if horizon not in _DEFAULT:
+        _DEFAULT[horizon] = CohortInferencer(horizon=horizon)
+    return _DEFAULT[horizon]
 
 
 # ------------------------------------------------------------------------------

@@ -65,7 +65,8 @@ import mf_overrides
 import mf_universe
 from mf_benchmarks import _asof
 from mf_features import LEVEL_FEATURES, FeatureEngine, assemble_panel
-from mf_infer import DEFAULT_TARGET, CohortInferencer, load_default
+from mf_horizon import DEFAULT
+from mf_infer import CohortInferencer, load_default
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
 
 LOGGER = logging.getLogger("MFLiveScore")
@@ -319,13 +320,22 @@ def score_live(
     universe_index: Optional[Dict[str, str]] = None,
     nav_loader: Optional[Callable[[str], Optional[pd.Series]]] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    target: str = DEFAULT_TARGET,
+    target: Optional[str] = None,
+    horizon: str = DEFAULT,
+    panels: Optional[Dict[pd.Timestamp, tuple]] = None,
 ) -> Dict[str, Any]:
     """Score one fund against the cohort model at the latest anchor its own NAV
-    data supports. See module docstring for the honesty gates and anchor choice."""
+    data supports. See module docstring for the honesty gates and anchor choice.
+
+    `horizon` picks the default inferencer (and so the target); 3y is today's
+    cohort_q1 model. `panels` is a caller-owned {t: (engine, panel)} memo: features
+    do not depend on the horizon, so one run passes the same dict to every fund and
+    every horizon and each anchor's universe panel is built once, not once per
+    (fund, horizon). The caller owns its lifetime — one run, one manifest/NAV panel."""
     manifest = manifest if manifest is not None else load_manifest()
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
-    inferencer = inferencer if inferencer is not None else load_default()
+    inferencer = inferencer if inferencer is not None else load_default(horizon)
+    target = target or inferencer.target
     # No module-level engine cache: a caller (e.g. MasterOrchestrator) that scores
     # many funds should build ONE FeatureEngine and pass it in explicitly (a plain
     # strong reference, tied to that caller's own lifetime) rather than rely on an
@@ -417,8 +427,29 @@ def score_live(
         engine, panel, _ref = build_candidate_panel(
             manifest, nav_panel, code, candidate_category, t, sector=candidate_sector
         )
+    elif panels is not None and t in panels:
+        engine, panel = panels[t]
     else:
         engine, panel = build_live_panel(manifest, nav_panel, t, engine=engine)
+        if panels is not None:
+            panels[t] = (engine, panel)
+    return score_on_panel(code, engine, panel, inferencer, t, staleness_days, target)
+
+
+def score_on_panel(
+    code: str,
+    engine: FeatureEngine,
+    panel: pd.DataFrame,
+    inferencer: CohortInferencer,
+    t: pd.Timestamp,
+    staleness_days: int,
+    target: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Every gate and the score that follow the panel build, for one fund on an
+    already-built one-anchor panel. score_live's tail, split out so a panel can be
+    scored by several horizons' models (and as of a past month-end, mf_ledger)
+    without being rebuilt."""
+    target = target or inferencer.target
     panel_codes = set(panel["amfi_code"])
     if code not in panel_codes:
         return _gap_result(
@@ -917,6 +948,24 @@ def _selftest() -> None:
         f"p={res['probability']:.3f} percentile={res['cohort_percentile']:.2f} "
         f"cohort_n={res['cohort_n']} universe_n={res['universe_n']} — PASS"
     )
+
+    # ---- one panel serves every horizon (docs/horizons.md §8) ---------------
+    # The memo must change nothing for 3y, and once an anchor's panel is built no
+    # other horizon's model may trigger a rebuild of it.
+    from mf_horizon import HORIZONS
+
+    panels: dict = {}
+    assert score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf, today=T, panels=panels) == res
+    real_build, builds = build_live_panel, []
+    globals()["build_live_panel"] = lambda *a, **k: builds.append(1) or real_build(*a, **k)
+    try:
+        for key, h in HORIZONS.items():
+            r = score_live(target_code, manifest=manifest, nav_panel=nav_panel, today=T, horizon=key, panels=panels)
+            assert r["status"] == "OK" and r["target"] == h.target, (key, r["status"], r["target"])
+    finally:
+        globals()["build_live_panel"] = real_build
+    assert not builds, f"FAIL: scoring other horizons rebuilt the panel {len(builds)} time(s)"
+    print(f"[selftest] one cached panel scores all {len(HORIZONS)} horizons, 3y result unchanged — PASS")
 
     print(
         "[selftest] PASS — live scoring reproduces the training panel exactly, "
