@@ -275,3 +275,25 @@ How to read it, written the same day and not revised:
 - The HistGBT challenger scored higher than the elastic-net on every new horizon's holdout (0.555–0.574).
   The elastic-net was the pre-registered model, so that is recorded and nothing is switched after the
   number.
+
+## 10. Owner rulings
+
+*Appended, dated, never folded back into the text above. The pre-registration stands as written; a ruling
+changes what is done with a result, not the result.*
+
+**2026-11-14 — a marginal PASS may enter its horizon's verdict.** §4 left this to the owner. Asked "May a
+marginal PASS (1m, 3m) enter its horizon's verdict?", the owner answered "Yes, let them in" (relayed by the
+orchestrating session the same day). So the `phase_b_1m_v1_cohort` and `phase_b_3m_v1_cohort` signals enter
+their horizons' verdicts exactly as a clean PASS would under §6: one extra green for a fund in the model's
+top decile of its cohort, never a red.
+
+What does not change:
+
+- The standing. Both horizons remain `PASS` with `marginal: true` in their stamps and in `mf_artifact_v2`,
+  so the app can show the qualifier.
+- The evidence. They cleared the lower-bound test by 0.002 and 0.005 and miss it at the strict divisor.
+  The ledger's forward test is still what would confirm or retire them.
+- The scope. The ruling names these two fits by model id (`mf_horizon.MARGINAL_ADMITTED`). A refit, or a
+  later marginal result at another horizon, needs its own ruling.
+- 6m, 1y and 3y are WEAK and stay out of every verdict. Every horizon is still logged. No refit. The app
+  still never renders BUY.
