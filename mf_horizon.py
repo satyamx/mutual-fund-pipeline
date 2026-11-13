@@ -265,6 +265,32 @@ def standing(holdout: dict, cpcv_block_aucs, h: Horizon) -> dict:
     )
 
 
+# Owner rulings admitting a MARGINAL PASS into its horizon's verdict (docs/horizons.md
+# "Owner rulings"). Keyed by MODEL ID, never by horizon key: a refit is a new model with
+# its own single evaluation and does not inherit a ruling made about this one.
+MARGINAL_ADMITTED = {
+    "phase_b_1m_v1_cohort": "owner ruling 2026-11-14",
+    "phase_b_3m_v1_cohort": "owner ruling 2026-11-14",
+}
+
+
+def load_stamp(key: str):
+    """The horizon's git-tracked holdout stamp, or None when it has none."""
+    p = HORIZONS[key].stamp_path
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def admits(stamp) -> bool:
+    """§6: PASS, and a marginal PASS only for an admitted model id. None/WEAK/FAIL -> False."""
+    st = (stamp or {}).get("standing") or {}
+    return st.get("standing") == "PASS" and (not st.get("marginal") or stamp.get("model_id") in MARGINAL_ADMITTED)
+
+
+def signal_in_verdict(key: str) -> bool:
+    """The single switch the artifact obeys: does this horizon's signal reach its verdict."""
+    return admits(load_stamp(key))
+
+
 # ==============================================================================
 # Selftest
 # ==============================================================================
@@ -357,6 +383,17 @@ def run_selftest() -> bool:
     for label, kw in [("lift<=1", dict(lift=0.95)), ("rank<=0.5", dict(rank=0.5)), ("3 of 6 blocks", dict(above=3))]:
         p = synth(0.56, **kw)
         check(f"synthetic FAIL ({label})", p["standing"] == "FAIL", str(p))
+
+    # (iv) which signals enter a verdict (docs/horizons.md §6 + Owner rulings): PASS, and a
+    # marginal PASS only for a model id the owner admitted — a refit never inherits it
+    for key, want in dict(zip(HORIZONS, [True, True, False, False, False])).items():
+        eq(f"{key} signal_in_verdict", signal_in_verdict(key), want)
+    eq("missing stamp -> not in verdict", admits(None), False)
+    pm = dict(model_id="phase_b_1m_v2_cohort", standing=dict(standing="PASS", marginal=True))
+    eq("marginal PASS of an unadmitted model id -> not in verdict", admits(pm), False)
+    eq("clean PASS -> in verdict", admits({**pm, "standing": dict(standing="PASS", marginal=False)}), True)
+    eq("WEAK of an admitted id -> not in verdict", admits({**pm, "model_id": "phase_b_1m_v1_cohort",
+                                                             "standing": dict(standing="WEAK", marginal=False)}), False)
 
     print(f"mf_horizon selftest: {'PASS' if not fails else f'{len(fails)} RED'}")
     return not fails
