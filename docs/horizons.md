@@ -252,3 +252,26 @@ nightly until it does.
 | key | model_id | evaluated | n | eff-n | AUC | lower bound | rank-AUC | lift | CPCV blocks > 0.5 | standing |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `3y` | `phase_b_v5_cohort` | 2026-08-07 | 4,132 | 138 | 0.537 | 0.445 | 0.536 | 1.44 | 4 of 5 | **WEAK** |
+| `1m` | `phase_b_1m_v1_cohort` | 2026-11-13 | 6,447 | 1,074 | 0.535 | 0.502 | 0.534 | 1.21 | 6 of 6 | **PASS, marginal** |
+| `3m` | `phase_b_3m_v1_cohort` | 2026-11-13 | 6,359 | 636 | 0.548 | 0.505 | 0.546 | 1.32 | 5 of 6 | **PASS, marginal** |
+| `6m` | `phase_b_6m_v1_cohort` | 2026-11-13 | 6,205 | 414 | 0.541 | 0.487 | 0.541 | 1.40 | 5 of 6 | **WEAK** |
+| `1y` | `phase_b_1y_v1_cohort` | 2026-11-13 | 5,872 | 255 | 0.540 | 0.472 | 0.540 | 1.35 | 5 of 6 | **WEAK** |
+
+Each new horizon was fitted and scored exactly once (`mf_model.py --stage cohort --horizon <key>`, offline,
+on the labels built from the cache cut at 2026-10-31). The full numbers are in
+`model/holdout_stamp_<key>.json`.
+
+How to read it, written the same day and not revised:
+
+- **No horizon is a clean PASS.** 1m and 3m clear the lower-bound test at their divisor (0.502, 0.505) and
+  miss it at the strict divisor (0.497, 0.499). By the rule fixed in §4 they are `PASS` with
+  `marginal: true`, and **their signals stay out of the verdict until the owner rules.**
+- **The edge is the same size everywhere.** AUC runs 0.535–0.548 across the four new horizons, against
+  3y's 0.537. The short horizons pass where the long ones do not because their windows overlap less and
+  so carry more independent evidence, not because the model ranks better at one month.
+- **This is exactly the case the prior warned about.** Two of four clearing a one-sided 5% bar by 0.002
+  and 0.005 is within what four null tests can produce (§4, "four tests, one family"). The ledger's
+  forward test — 1m from early 2027 — is what would turn "marginal" into anything stronger.
+- The HistGBT challenger scored higher than the elastic-net on every new horizon's holdout (0.555–0.574).
+  The elastic-net was the pre-registered model, so that is recorded and nothing is switched after the
+  number.
