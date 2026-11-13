@@ -71,7 +71,7 @@ from mf_benchmarks import forward_return
 from mf_horizon import HORIZONS
 from mf_infer import COHORT_ARTIFACT_PATH, DEFAULT_TARGET, MODEL_DIR
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
-from mf_live_score import build_live_panel
+from mf_live_score import build_live_panel, score_on_panel
 
 LOGGER = logging.getLogger("MFLedger")
 
@@ -144,7 +144,9 @@ PSI_MIN_UNIVERSE = 50  # below this, a decile histogram is noise, not a drift si
 PSI_MIN_FINITE = 30  # per-feature: skip rather than compute on a thin sample
 PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25  # standard PSI rule-of-thumb thresholds
 
-MATURITY = pd.DateOffset(years=3)  # 3y window, pinned == HORIZONS["3y"].window_end by mf_horizon; realization reads the registry
+# 3y's window, pinned == HORIZONS["3y"].window_end by mf_horizon's selftest; realization reads the registry
+MATURITY = pd.DateOffset(years=3)
+MONTH_END_WINDOW_DAYS = 10  # §7: a month-end anchor is logged only within this many days of it
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
@@ -737,7 +739,7 @@ def realized_summary(
     model_id = model_id or current_model_id(predictions_path, superseded_path, target)
     if model_id is not None:
         preds = [r for r in preds if r.get("model_id") == model_id]
-    rows = [r for r in load_realizations(realizations_path, target) if model_id is None or r.get("model_id") == model_id]
+    rows = [r for r in load_realizations(realizations_path, target) if model_id in (None, r.get("model_id"))]
     realized = [r for r in rows if r["status"] == "REALIZED"]
     dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
     thin = sum(1 for r in rows if r["status"] == "THIN_AT_REALIZATION")
@@ -769,8 +771,68 @@ def realized_summary(
     )
 
 
-def log_month_end(**kw):  # STUB for the RED run
-    return {}
+def log_month_end(
+    *,
+    run_id: str,
+    pipeline_sha: str,
+    manifest: pd.DataFrame,
+    nav_panel: Dict[str, pd.Series],
+    today: pd.Timestamp,
+    path: Path = PREDICTIONS_PATH,
+    inferencers: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Month-end rows for every non-3y horizon (docs/horizons.md §7) — the forward
+    test samples what the holdout sampled. M = the latest month-end <= the newest
+    NAV in `nav_panel`. A target already holding rows at M for its model id is
+    done; else, if `today` is within MONTH_END_WINDOW_DAYS of M, ONE panel is built
+    as of M (NAV <= M only — nothing after M can reach a row) and every horizon
+    scores it: one row per fund that is OK and whose own as-of NAV is within that
+    horizon's tolerance of M, anchor = M. Later than that the month is skipped and
+    counted, never backfilled. 3y keeps its daily path. `inferencers`: optional
+    {horizon key: CohortInferencer}, else the process singletons.
+    Returns {target: {anchor, appended, skipped_funds, skipped_month, already_logged}}."""
+    from pandas.tseries.offsets import MonthEnd
+
+    from mf_infer import load_default
+
+    today = pd.Timestamp(today).normalize()
+    newest = max(s.dropna().index.max() for s in nav_panel.values() if len(s.dropna()))
+    M = MonthEnd().rollback(newest.normalize())
+    anchor = str(M.date())
+    out: Dict[str, Dict[str, Any]] = {}
+    todo = []
+    for h in HORIZONS.values():
+        if h.legacy:
+            continue
+        # rows at anchor M can only live in M's month file (rotation is by anchor month)
+        month_file = path.parent / h.target / f"{anchor[:7]}.jsonl"
+        done = any(r.get("anchor") == anchor and r.get("model_id") == h.model_id for r in read_jsonl(month_file))
+        late = (today - M).days > MONTH_END_WINDOW_DAYS
+        out[h.target] = dict(
+            anchor=anchor, appended=0, skipped_funds=0, skipped_month=int(late and not done), already_logged=done
+        )
+        if not done and not late:
+            todo.append(h)
+    if not todo:
+        return out
+
+    as_of = {c: s.loc[:M] for c, s in nav_panel.items()}
+    engine, panel = build_live_panel(manifest, as_of, M)
+    last = {c: s.dropna().index.max() for c, s in as_of.items() if len(s.dropna())}
+    for h in todo:
+        inf = (inferencers or {}).get(h.key) or load_default(h.key)
+        rows, skipped = [], 0
+        for code in manifest["amfi_code"]:
+            stale = (M - last[code]).days if code in last else None
+            ok = stale is not None and stale <= h.tol_days  # the fund's OWN as-of NAV, this horizon's tolerance
+            cs = score_on_panel(code, engine, panel, inf, M, stale) if ok else None
+            row = build_row(code, cs, run_id=run_id, pipeline_sha=pipeline_sha, model_id=h.model_id)
+            if row is None:
+                skipped += 1
+            else:
+                rows.append(row)
+        out[h.target].update(appended=append_predictions(rows, path=path), skipped_funds=skipped)
+    return out
 
 
 # ==============================================================================
@@ -1104,7 +1166,7 @@ def _selftest() -> None:
     r1 = _realize_one(dict(fake_row, amfi_code=st1["amfi_code"], target=h1.target, cohort_codes=peers1), nav_panel)
     assert r1["status"] == "REALIZED" and r1["n_peer_r_fwd"] == int(st1["cohort_n"]), (r1, st1["cohort_n"])
     assert abs(r1["own_r_fwd"] - float(st1["R_fwd"])) < 1e-9 and r1["y_realized"] == bool(st1["y_cohort_q1"]), r1
-    print(f"[selftest] Test D (1m replay @ {anchor.date()}, fund {st1['amfi_code']}): matches 1m labels exactly — PASS")
+    print(f"[selftest] Test D (1m replay @ {anchor.date()}, fund {st1['amfi_code']}): matches 1m labels — PASS")
 
     # ---- PSI: null case (live == reference itself) and shock case ----------
     import mf_model as M
@@ -1148,6 +1210,8 @@ def _selftest() -> None:
         f"[selftest] rank_stability: first_run=FIRST_RUN, identical={stab_same['spearman']}, "
         f"shuffled={stab_shuf['spearman']} — PASS"
     )
+
+    _selftest_horizons(manifest, nav_panel)
 
     print(
         "[selftest] PASS — ledger append/read is crash-safe and idempotent, realization "
@@ -1262,7 +1326,7 @@ def _t_maturity(tmp: Path) -> None:
             **kw,
         )
         assert res["n_matured_this_run"] == int(want), f"FAIL: case {i} {target} {anchor} today={today} {res}"
-    print("[selftest] maturity per target: 3y at anchor+3y, 1m at anchor+MonthEnd(1), only once NAV reaches it — PASS")
+    print("[selftest] maturity per target: 3y at anchor+3y, 1m at anchor+MonthEnd(1), once NAV reaches it — PASS")
 
 
 def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series]) -> None:

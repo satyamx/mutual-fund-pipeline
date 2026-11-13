@@ -955,7 +955,8 @@ def _selftest() -> None:
     from mf_horizon import HORIZONS
 
     panels: dict = {}
-    assert score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf, today=T, panels=panels) == res
+    memo = score_live(target_code, manifest=manifest, nav_panel=nav_panel, inferencer=inf, today=T, panels=panels)
+    assert memo == res, "FAIL: the panel memo changed the 3y result"
     real_build, builds = build_live_panel, []
     globals()["build_live_panel"] = lambda *a, **k: builds.append(1) or real_build(*a, **k)
     try:
