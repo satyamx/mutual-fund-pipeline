@@ -144,7 +144,7 @@ PSI_MIN_UNIVERSE = 50  # below this, a decile histogram is noise, not a drift si
 PSI_MIN_FINITE = 30  # per-feature: skip rather than compute on a thin sample
 PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25  # standard PSI rule-of-thumb thresholds
 
-MATURITY = pd.DateOffset(years=3)  # matches forward_return's own `years=3` default
+MATURITY = pd.DateOffset(years=3)  # 3y window, pinned == HORIZONS["3y"].window_end by mf_horizon; realization reads the registry
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
@@ -552,14 +552,18 @@ def compute_psi_live(
 # math, over the FROZEN cohort_codes logged at prediction time.
 # ==============================================================================
 def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
+    """The row's own horizon (registry, by `target`): its window end, minimum
+    window and tolerance — the exact forward_return call mf_labels trained on."""
+    h = _BY_TARGET[row["target"]]
     anchor = pd.Timestamp(row["anchor"])
+    kw = dict(tol_days=h.tol_days, min_yrs=h.min_window_years, end=h.window_end(anchor))
     own_series = nav_panel.get(row["amfi_code"])
-    own_fwd = forward_return(own_series, anchor) if own_series is not None else None
+    own_fwd = forward_return(own_series, anchor, **kw) if own_series is not None else None
 
     peer_fwds: List[float] = []
     for peer in row["cohort_codes"]:
         s = nav_panel.get(peer)
-        fr = forward_return(s, anchor) if s is not None else None
+        fr = forward_return(s, anchor, **kw) if s is not None else None
         if fr is not None:
             peer_fwds.append(fr.value)
 
@@ -626,7 +630,7 @@ def realize_matured_predictions(
 
     retired = load_superseded(superseded_path)
     new_rows: List[dict] = []
-    n_pending = n_superseded = 0
+    n_pending = n_superseded = n_unknown = 0
     for row in predictions:
         # A retired payload's predictions stay in the file as a record of what was
         # actually emitted, but they are never graded: realizing a model that was
@@ -635,18 +639,32 @@ def realize_matured_predictions(
         if row.get("model_id") in retired:
             n_superseded += 1
             continue
+        # Maturity is the row's own horizon's. A target the registry does not know
+        # has no window to wait for and no label to compute — counted, never guessed.
+        h = _BY_TARGET.get(row.get("target"))
+        if h is None:
+            n_unknown += 1
+            continue
         key = _dedupe_key_of(row, DEDUPE_KEY)
         if key is not None and key in already:
             continue
         legacy_key = _dedupe_key_of(row, _legacy)
         if legacy_key is not None and legacy_key in already_legacy:
             continue
-        if today < pd.Timestamp(row["anchor"]) + MATURITY:
+        # Only once the fund's NAV reaches the window end, or the end is more than
+        # the horizon's tolerance in the past: a job running on the 1st would
+        # otherwise close a 1m window on a NAV a day or two short of it, for good.
+        end = h.window_end(pd.Timestamp(row["anchor"]))
+        own = nav_panel.get(row["amfi_code"])
+        reached = own is not None and len(own.dropna()) > 0 and own.dropna().index.max() >= end
+        if today < end or (not reached and (today - end).days <= h.tol_days):
             n_pending += 1
             continue
         new_rows.append(_realize_one(row, nav_panel))
     if n_superseded:
         LOGGER.info("Skipped %d prediction(s) from superseded model(s): %s", n_superseded, ", ".join(sorted(retired)))
+    if n_unknown:
+        LOGGER.warning("Skipped %d prediction(s) whose target is not in mf_horizon.HORIZONS.", n_unknown)
 
     n_appended = append_predictions(new_rows, path=realizations_path, dedupe_key=DEDUPE_KEY, sub="realized")
     return dict(
@@ -655,6 +673,7 @@ def realize_matured_predictions(
         n_matured_this_run=len(new_rows),
         n_newly_realized=n_appended,
         n_superseded_skipped=n_superseded,
+        n_unknown_target=n_unknown,
     )
 
 
@@ -1074,6 +1093,19 @@ def _selftest() -> None:
         f"matches stored labels.parquet exactly — PASS"
     )
 
+    # ...and a month-end horizon realizes on ITS window, not 3y's: same replay
+    # against the 1m labels (mf_cache/phase_b/1m/, read only).
+    from mf_horizon import HORIZONS
+
+    h1 = HORIZONS["1m"]
+    lab1 = pd.read_parquet(h1.labels_path)
+    st1 = lab1[(lab1["anchor"] == anchor) & lab1["y_cohort_q1"].notna()].iloc[0]
+    peers1 = resolver.groups[resolver._group_key(st1["amfi_code"])]
+    r1 = _realize_one(dict(fake_row, amfi_code=st1["amfi_code"], target=h1.target, cohort_codes=peers1), nav_panel)
+    assert r1["status"] == "REALIZED" and r1["n_peer_r_fwd"] == int(st1["cohort_n"]), (r1, st1["cohort_n"])
+    assert abs(r1["own_r_fwd"] - float(st1["R_fwd"])) < 1e-9 and r1["y_realized"] == bool(st1["y_cohort_q1"]), r1
+    print(f"[selftest] Test D (1m replay @ {anchor.date()}, fund {st1['amfi_code']}): matches 1m labels exactly — PASS")
+
     # ---- PSI: null case (live == reference itself) and shock case ----------
     import mf_model as M
 
@@ -1318,6 +1350,11 @@ if __name__ == "__main__":
         ref = build_psi_reference()
         LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), PSI_REFERENCE_PATH)
     elif args.realize:
-        LOGGER.info("realize: %s", realize_matured_predictions())
+        # every registered target: one monthly job realizes every horizon's matured rows
+        manifest = load_manifest()
+        nav_panel = load_nav_panel(manifest)
+        for h in HORIZONS.values():
+            res = realize_matured_predictions(manifest=manifest, nav_panel=nav_panel, target=h.target)
+            LOGGER.info("realize %s: %s", h.target, res)
     else:
         ap.print_help()
