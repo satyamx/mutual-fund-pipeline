@@ -597,18 +597,24 @@ class QuantEngine:
         return float(rets.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR)) if len(rets) > 2 else np.nan
 
     # ----------------------- rolling returns (stepped) -----------------------
-    def rolling_returns(self, levels: pd.Series, window_years: int, step: str = "daily") -> pd.Series:
+    def rolling_returns(
+        self, levels: pd.Series, window_years: float, step: str = "daily", annualize: bool = True
+    ) -> pd.Series:
         """
         Stepped rolling CAGR — NOT point-to-point. For every observation date t,
         computes annualised return over [t - window, t]. `step='weekly'`
-        subsamples the daily-stepped series to Fridays.
+        subsamples the daily-stepped series to Fridays. A fractional window
+        (a 1/3/6-month horizon, docs/horizons.md §6) is window_years x 252 trading
+        days; `annualize=False` returns the plain period return — a sub-year return
+        is never compounded up to a year nobody earned.
         """
-        window = window_years * TRADING_DAYS_PER_YEAR
+        window = int(round(window_years * TRADING_DAYS_PER_YEAR))
         levels = levels.dropna()
         if len(levels) <= window:
             return pd.Series(dtype=float, name=f"roll_{window_years}y")
         gross = self.validator.safe_divide(levels.to_numpy()[window:], levels.to_numpy()[:-window])
-        ann = np.power(gross, 1.0 / window_years, where=np.isfinite(gross), out=np.full_like(gross, np.nan)) - 1.0
+        expo = 1.0 / window_years if annualize else 1.0
+        ann = np.power(gross, expo, where=np.isfinite(gross), out=np.full_like(gross, np.nan)) - 1.0
         out = pd.Series(ann, index=levels.index[window:], name=f"roll_{window_years}y")
         if step == "weekly":
             out = out[out.index.dayofweek == 4]  # Friday steps
