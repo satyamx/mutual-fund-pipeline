@@ -68,8 +68,8 @@ import numpy as np
 import pandas as pd
 
 from mf_benchmarks import forward_return
-from mf_horizon import HORIZONS
-from mf_infer import COHORT_ARTIFACT_PATH, DEFAULT_TARGET, MODEL_DIR
+from mf_horizon import DEFAULT, HORIZONS
+from mf_infer import DEFAULT_TARGET, MODEL_DIR
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
 from mf_live_score import build_live_panel, score_on_panel
 
@@ -427,17 +427,20 @@ def _bin_proportions(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts / counts.sum()
 
 
-def build_psi_reference(out: Path = PSI_REFERENCE_PATH) -> dict:
+def build_psi_reference(out: Optional[Path] = None, horizon: str = DEFAULT) -> dict:
     """Training-time only: empirical decile edges + reference bin proportions
     per monitored feature, over the cohort model's ACTUAL training rows (same
     filter mf_model.load_cohort_dataset applies). Rebuild whenever the cohort
     model retrains — stamped with that artifact's version so monitoring-time
     code can detect a stale reference rather than silently comparing against
-    the wrong model's training population."""
+    the wrong model's training population. Per horizon: its own training rows
+    (mf_cache/phase_b/<key>/), artifact and output (model/psi_reference_<key>.json)."""
     import mf_model as M  # sklearn-adjacent imports stay out of the monitoring/scoring path
 
-    df, _ = M.load_cohort_dataset()
-    artifact = json.loads(COHORT_ARTIFACT_PATH.read_text(encoding="utf-8"))
+    h = HORIZONS[horizon]
+    out = out or h.psi_reference_path
+    df, _ = M.load_cohort_dataset(h)
+    artifact = json.loads(h.artifact_path.read_text(encoding="utf-8"))
     ref: Dict[str, Any] = dict(
         model_id=artifact["version"], created=datetime.now(timezone.utc).isoformat(), features={}
     )
@@ -1401,8 +1404,9 @@ if __name__ == "__main__":
     ap.add_argument(
         "--build-reference",
         action="store_true",
-        help="(re)build psi_reference.json from the cohort model's training rows",
+        help="(re)build the PSI reference from the cohort model's training rows",
     )
+    ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT, help="with --build-reference (mf_horizon)")
     ap.add_argument(
         "--realize", action="store_true", help="join matured ledger predictions against fresh NAV data (offline job)"
     )
@@ -1411,8 +1415,9 @@ if __name__ == "__main__":
     if args.selftest:
         _selftest()
     elif args.build_reference:
-        ref = build_psi_reference()
-        LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), PSI_REFERENCE_PATH)
+        ref = build_psi_reference(horizon=args.horizon)
+        out = HORIZONS[args.horizon].psi_reference_path
+        LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), out)
     elif args.realize:
         # every registered target: one monthly job realizes every horizon's matured rows
         manifest = load_manifest()
