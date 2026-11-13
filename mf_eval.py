@@ -214,9 +214,13 @@ def grade_outcome(outcome: Dict[str, Any]) -> MetricHealth:
 # with lift/precision/calibration — all honestly PENDING until maturity)
 # ==============================================================================
 def outcome_metrics(
-    realizations_path: Path = mf_ledger.REALIZATIONS_PATH, predictions_path: Path = mf_ledger.PREDICTIONS_PATH
+    realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
+    predictions_path: Path = mf_ledger.PREDICTIONS_PATH,
+    target: str = mf_ledger.DEFAULT_TARGET,
 ) -> Dict[str, Any]:
-    base = mf_ledger.realized_summary(realizations_path, predictions_path)
+    """One target's outcomes only (cohort_q1 by default): each horizon is graded
+    against its own ledger, never pooled with another's."""
+    base = mf_ledger.realized_summary(realizations_path, predictions_path, target=target)
     out: Dict[str, Any] = dict(
         status=base["status"],
         realized_ic=base["value"],
@@ -239,7 +243,7 @@ def outcome_metrics(
     model_id = base.get("model_id")
     rows = [
         r
-        for r in mf_ledger.read_jsonl(realizations_path)
+        for r in mf_ledger.load_realizations(realizations_path, target)
         if r["status"] == "REALIZED" and (model_id is None or r.get("model_id") == model_id)
     ]
     if not rows:
@@ -330,7 +334,7 @@ def build_report(
     return asdict(report)
 
 
-def _holdout_auc(model_id: Optional[str]) -> Optional[float]:
+def _holdout_auc(model_id: Optional[str], target: str = mf_ledger.DEFAULT_TARGET) -> Optional[float]:
     """Read the shipped artifact's own measured holdout AUC for the live cohort
     target — never a hardcoded number that can outlive the model it describes.
     Degrades to None (disclaimer says "not on file") if the artifact is
@@ -340,10 +344,10 @@ def _holdout_auc(model_id: Optional[str]) -> Optional[float]:
     try:
         import mf_infer  # numpy-only, no sklearn — safe to import from the monitoring path
 
-        inf = mf_infer.CohortInferencer()
+        inf = mf_infer.CohortInferencer(horizon=mf_ledger._BY_TARGET[target].key)
         if inf.artifact.get("version") != model_id:
             return None
-        return inf.signal_context(mf_infer.DEFAULT_TARGET).get("holdout_auc")
+        return inf.signal_context(target).get("holdout_auc")
     except Exception:
         return None
 
@@ -354,11 +358,14 @@ def build_report_from_ledger(
     model_id: Optional[str] = None,
     realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
     predictions_path: Path = mf_ledger.PREDICTIONS_PATH,
+    target: str = mf_ledger.DEFAULT_TARGET,
 ) -> Dict[str, Any]:
     """Convenience wrapper mf_artifact.py calls: pulls the matured-outcome metrics
     from the ledger, then grades everything."""
-    outcome = outcome_metrics(realizations_path, predictions_path)
-    return build_report(monitoring, coverage, outcome, model_id=model_id, holdout_auc=_holdout_auc(model_id))
+    outcome = outcome_metrics(realizations_path, predictions_path, target)
+    return build_report(
+        monitoring, coverage, outcome, model_id=model_id, holdout_auc=_holdout_auc(model_id, target)
+    )
 
 
 def render(report: Dict[str, Any]) -> str:
