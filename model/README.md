@@ -18,6 +18,16 @@ Read by `mf_infer.CohortInferencer`
   distribution the live PSI drift check compares against. Only meaningful paired with
   the exact model it was built from, which is why it lives here and not in the cache.
 
+## Per-horizon files (`docs/horizons.md`)
+
+Each non-default horizon has its own pair, suffixed by its key: `model_artifact_cohort_<key>.json` and
+`psi_reference_<key>.json` for `1m`, `3m`, `6m`, `1y` (the unsuffixed pair is `3y`, the default). Beside
+them, `holdout_stamp_<key>.json` (all five, git-tracked) records the horizon's one causal-holdout
+evaluation and its standing (`PASS` / `WEAK` / `FAIL`, `marginal`). The stamps are the evidence the
+artifact's horizon menu and `mf_horizon.signal_in_verdict` read. The four new ones are written once by
+`mf_model.py --stage cohort --horizon <key>`, which refuses a second evaluation; `3y`'s was transcribed
+from its frozen 2026-08-07 evaluation with no refit. None is ever edited.
+
 ## Why versioned rather than regenerated
 
 This is the one Phase-B output that is not research. It is the frozen,

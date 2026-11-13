@@ -24,6 +24,7 @@ handoff). Four things the code won't tell you:
 - `mf_overrides.py` / `overrides/` are **INPUTS ONLY** — never write scores back into them.
 - `mf_sentinel.py`'s `_NEVER_HIGH` structurally bars non-regulatory alert bases from HIGH.
 - `mf_holdings.py` is **never an ML feature** (unbacktestable); it reaches the verdict only via the SEBI single-issuer compliance rule.
+- Forecast horizons (1m/3m/6m/1y/3y): **`docs/horizons.md`** — the menu, the bar a horizon's signal must clear, and the evaluate-once rule.
 - The live orchestrator does **NOT** use `mf_pipeline.py`'s `ScoringEngine` — its FACTOR_MAP composite is being retired into Sentinel alert thresholds. `mf_pipeline.py` is research-only.
 
 ## Environment & running
@@ -32,6 +33,7 @@ handoff). Four things the code won't tell you:
 - Common commands:
   - `python bootstrap.py --funds "Parag Parikh Flexi Cap" ...` — fetch/refresh real data into `mf_cache/`.
   - `python mf_model.py --stage cohort` — (re)train + write the cohort model artifacts.
+  - `python mf_model.py --stage cohort --horizon <key>` — fit + score one horizon (`docs/horizons.md`); **evaluate-once: refuses a second run**.
   - `python mf_infer.py --selftest` — verify numpy inference == sklearn (bit-exact).
   - `python mf_features.py --selftest` / `python mf_cv.py --selftest` — anti-lookahead / leakage checks.
   - `python mf_overrides.py --propose --out overrides/_sector_proposals.csv` — SUGGEST sectors for the blocked funds (review surface; never auto-applied).

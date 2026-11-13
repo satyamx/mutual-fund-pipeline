@@ -2,6 +2,31 @@
 
 Repo-tracked mirror of the build status, so a `git push` hands off the full picture without relying on `~/.claude` memory syncing. See `CLAUDE.md` for orientation and the honesty invariant; deeper design rationale is in project memory (`resume-point.md`, `mf-architecture-decisions.md`) if that syncs to your environment.
 
+## 2026-11-14 — multi-horizon menu (branch `feat/multi-horizon`, NOT pushed, NOT merged)
+
+Five horizons, each fitted and scored once on its causal holdout (`docs/horizons.md`, stamps in
+`model/holdout_stamp_<key>.json`):
+
+| key | standing | holdout AUC |
+|---|---|---|
+| `1m` | PASS, marginal | 0.535 |
+| `3m` | PASS, marginal | 0.548 |
+| `6m` | WEAK | 0.541 |
+| `1y` | WEAK | 0.540 |
+| `3y` | WEAK (unchanged, `phase_b_v5`) | 0.537 |
+
+- **RULED (owner, 2026-11-14): a marginal PASS is admitted for the 1m and 3m v1 models**
+  (`mf_horizon.MARGINAL_ADMITTED`, keyed by model id so a refit does not inherit it). So the 1m and 3m
+  signals enter their own horizon's verdict as a sixth colour (green for an OK top-decile fund, never
+  red); 6m, 1y and 3y run the five-colour rule and ship their signal `WITHHELD`. Nothing enters the v1
+  verdict, which is unchanged; the 3y per-horizon verdict equals it for every fund (selftest pin).
+- **Ledger:** rotated per target/month (`ledger/<target>/<YYYY-MM>.jsonl`; `predictions.jsonl` is never
+  rewritten). 1m/3m/6m/1y log month-end anchors only, within 10 days of the month-end; 3y still logs daily.
+- **Artifact:** the nightly publishes `mf_artifact_latest.json.gz` + `latest.json` as v1, unchanged, and
+  `mf_artifact_v2_latest.json.gz` beside them (`docs/design/mf_artifact_v2.md`).
+- **Open owner decisions:** (1) whether 3y logging should move from daily to month-end; (2) the Hisaab
+  Kitaab v2 parser and tables are a separate session (`docs/design/mf_artifact_v2.md` §6).
+
 **Refreshed 2026-11-01 (from `gh` + the ledger, not from memory): healthy.** `origin/master` carries the `2026-10-31` ledger anchor; ledger = 28,607 rows / 60 anchors, 26,746 of them `phase_b_v5_cohort`. **39 of 39 nightlies since 2026-09-24 are green** (longest ~74 min against the 90-min limit). `realize-monthly` has now fired on its cron three times running (2026-09-01, 10-01, 11-01) — open item 1 is closed. The 60-min cancellations went on past 08-29: **runs on 09-03, 09-21, 09-22 and 09-23 were also cancelled at ~60m**, because the 90-min fix (`0350006`, committed 08-30) sat unpushed until after 09-23 — those runs executed `ee34b99`/`c5b2769`, neither of which contains it. Each lost only that night's append (a later night re-anchored), but three in a row is the case `--max-anchor-age-days 7` exists for. Nothing since. Sections below are dated and left as written.
 
 **As of 2026-08-27 (last verified): the pipeline has been running unattended for three weeks. **The "20 consecutive green nightlies" this line used to claim ended on 2026-08-29**, when run `33230002943` was cancelled on the job timeout — see open item 1b. Newest green: `33279245763` (2026-08-29 22:43Z), and `origin/master` carries the `2026-08-29` ledger append. Earlier state, kept because the repo/remote facts still hold: as of 2026-08-07 MF repo HEAD = `0bd437e` on `master`, pushed and in sync with `origin` (`github.com/satyamx/mutual-fund-pipeline`), which is also the CI deploy path.** **Hisaab Kitaab: `Projects/MoneyManagerApp/Hisaab Kitaab`, HEAD `a33f628`, clean and pushed — it HAS a remote (`github.com/satyamx/money-manager-app`).** Every earlier note here calling it "clean, still local-only" at HEAD `9885565` was **stale and wrong** (verified 2026-08-07): `9885565` is the `DECISIONS.md` verdict-amendment commit, never the repo head. Check `git -C "<path>" status -sb` before repeating either claim — this is the same trap as the long-standing "the MF repo has no remote" note that cost two sessions.
