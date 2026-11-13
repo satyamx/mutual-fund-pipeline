@@ -333,11 +333,10 @@ def run_selftest() -> bool:
     eq("1y pinned 23 (stricter than formula's 22)", HORIZONS["1y"].divisor, 23)
 
     # (iii) the bar: frozen 3y stamp scores WEAK, lower bound 0.4452
-    out = h3.out_dir
-    stamp = json.loads((out / "holdout_evaluated_cohort.json").read_text(encoding="utf-8"))
-    cpcv = json.loads((out / "cpcv_results_cohort.json").read_text(encoding="utf-8"))
-    blocks3 = [m["pooled_auc"] for m in cpcv["targets"]["cohort_q1"]["enet"].values()]
-    s3 = standing(stamp["models"]["cohort_q1:enet"], blocks3, h3)
+    # read from the git-tracked stamp, never mf_cache/: this must run on a cold CI cache
+    stamp = json.loads(h3.stamp_path.read_text(encoding="utf-8"))
+    s3 = standing(stamp["models"]["cohort_q1:enet"], stamp["cpcv_block_aucs"].values(), h3)
+    eq("3y stamp standing block is what standing() gives", stamp["standing"], s3)
     eq("3y frozen stamp standing", s3["standing"], "WEAK")
     close("3y frozen lower bound", s3["lower_bound"], 0.4452, 0.0005)
     close("1y AUC needed (n 5872, base 0.277, div 23)", auc_needed(5872, 0.277, 23), 0.5672, 0.0005)

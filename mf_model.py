@@ -641,14 +641,18 @@ def run_holdout_cohort(
                 f"neg={m['negatives']}"
             )
 
-    pd.concat(all_preds, ignore_index=True).to_parquet(h.holdout_pred_path, index=False)
     if h.legacy:
+        pd.concat(all_preds, ignore_index=True).to_parquet(h.holdout_pred_path, index=False)
         h.cache_stamp_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
         return out
-    blocks = [m["pooled_auc"] for m in cpcv["targets"][h.target]["enet"].values()]
-    out = dict(horizon=h.key, model_id=h.model_id, **out)
-    out["standing"] = standing(out["models"][f"{h.target}:enet"], blocks, h)
+    # The stamp is written FIRST (a scored holdout must never exist without its
+    # evaluate-once record) and carries the CPCV block AUCs, so the standing can be
+    # re-derived from this git-tracked file alone.
+    blocks = {b: m["pooled_auc"] for b, m in cpcv["targets"][h.target]["enet"].items()}
+    out = dict(horizon=h.key, model_id=h.model_id, **out, cpcv_block_aucs=blocks)
+    out["standing"] = standing(out["models"][f"{h.target}:enet"], blocks.values(), h)
     h.stamp_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    pd.concat(all_preds, ignore_index=True).to_parquet(h.holdout_pred_path, index=False)
     print(f"[holdout-cohort] {h.key} standing: {out['standing']['standing']} -> {h.stamp_path}")
     return out
 
