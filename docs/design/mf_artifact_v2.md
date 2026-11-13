@@ -39,8 +39,11 @@ Everything in v1 (`generated_at`, `pipeline_sha`, `model_id`, `default_profile`,
         "test_span": "2024-11-30..2025-10-31", "evaluated_at": "2026-11-13"
       },
       "ledger": {
-        "rows_total": 0, "last_anchor": null, "first_maturity": null,
-        "n_realized": 0, "skipped_month_ends": 0
+        "rows_total": 0, "last_anchor": null, "first_maturity": null, "n_realized": 0,
+        "month_end": {
+          "anchor": "2026-10-31", "appended": 0, "skipped_funds": 0,
+          "skipped_month": 0, "already_logged": false
+        }
       }
     }
   ]
@@ -51,10 +54,13 @@ Everything in v1 (`generated_at`, `pipeline_sha`, `model_id`, `default_profile`,
   from a hardcoded one.
 - `standing` is `PASS`, `WEAK` or `FAIL`, read from the horizon's git-tracked stamp
   (`model/holdout_stamp_<key>.json`). A horizon with no stamp is not listed at all.
-- `signal_in_verdict` is `true` only for `PASS` and not `marginal`. It is the single switch the rest of the
-  document obeys.
+- `signal_in_verdict` is true for `PASS`; a marginal PASS only when the owner has admitted that model id
+  (`mf_horizon.MARGINAL_ADMITTED`). It is the single switch the rest of the document obeys.
 - `holdout` is the one evaluation, verbatim from the stamp. The zeros above are placeholders in this
   design; a real artifact never carries a made-up number.
+- `ledger` comes from the per-target ledger readers (`rows_total`, `last_anchor`; `first_maturity` and
+  `n_realized` for this model id), plus `month_end` = this run's `mf_ledger.log_month_end` result for the
+  target (`null` for 3y, which logs daily, and when the run could not log).
 
 ## 3. Per fund
 
@@ -172,6 +178,7 @@ refused whole, not ingested as v1. An unknown `standing` is treated as not PASS.
   at this horizon;
 - a signal line **only** when `signalInVerdict` is true and the fund's `signalStatus` is `OK`, phrased as
   where the fund sits in its peer group, never as a probability headline and never as BUY;
+- a marginal horizon's signal with a visible "marginal" qualifier;
 - no verdict, as today.
 
 Fail closed: signal numbers on a horizon whose `signalInVerdict` is false are a pipeline bug and are not
