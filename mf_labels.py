@@ -36,6 +36,7 @@ from mf_benchmarks import (
     resolve_pure_peer,
 )
 from mf_datasources import CACHE, MFAPIAdapter
+from mf_horizon import DEFAULT, HORIZONS, Horizon
 
 OUT_DIR = CACHE / "phase_b"
 LABELS_PATH = OUT_DIR / "labels.parquet"
@@ -68,26 +69,39 @@ def load_manifest() -> pd.DataFrame:
     return pd.read_csv(MANIFEST_PATH, dtype={"amfi_code": str})
 
 
-def load_nav_panel(manifest: pd.DataFrame) -> dict[str, pd.Series]:
-    """Cleaned NAV series per fund, via the shared NAVCleaner (mf_datasources)."""
+def load_nav_panel(
+    manifest: pd.DataFrame, offline: bool = False, cutoff: pd.Timestamp | None = None
+) -> dict[str, pd.Series]:
+    """Cleaned NAV series per fund, via the shared NAVCleaner (mf_datasources).
+    offline: serve mf_cache/ as it stands, never refetch (the 1m..1y label build:
+    its data cutoff D must not move under it). cutoff: drop NAV after D (applied
+    after cleaning, so the cleaner sees exactly what it always has)."""
     adapter = MFAPIAdapter()
+    adapter.offline = adapter.offline or offline
     panel = {}
     for code in manifest["amfi_code"]:
         series, _meta, _report = adapter.nav_series(code)
+        if series is not None and cutoff is not None:
+            series = series.loc[:cutoff]
         if series is not None and len(series) >= 5:
             panel[code] = series
     return panel
 
 
-def build_fwd_panel(manifest: pd.DataFrame, nav_panel: dict[str, pd.Series]) -> dict[tuple[str, pd.Timestamp], float]:
-    """R_fwd(code, t) for every fund/anchor with a valid 3y-forward window."""
+def build_fwd_panel(
+    manifest: pd.DataFrame, nav_panel: dict[str, pd.Series], h: Horizon = HORIZONS[DEFAULT]
+) -> dict[tuple[str, pd.Timestamp], float]:
+    """R_fwd(code, t) for every fund/anchor with a valid h-forward window. 3y keeps
+    the wide ANCHOR_GRID (truncated by the data itself); 1m..1y anchors end at the
+    registry's anchor end (month-ends <= D - h)."""
+    grid = ANCHOR_GRID if h.legacy else pd.date_range(ANCHOR_GRID[0], h.anchor_end, freq="ME")
     fwd = {}
     for code in manifest["amfi_code"]:
         series = nav_panel.get(code)
         if series is None:
             continue
-        for t in ANCHOR_GRID:
-            res = forward_return(series, t)
+        for t in grid:
+            res = forward_return(series, t, tol_days=h.tol_days, min_yrs=h.min_window_years, end=h.window_end(t))
             if res is not None:
                 fwd[(code, t)] = res.value
     return fwd
@@ -306,6 +320,35 @@ def regenerate_with_cohort_targets() -> pd.DataFrame:
     return df
 
 
+def build_horizon_labels(h: Horizon) -> pd.DataFrame:
+    """1m..1y label table: R_fwd + cohort key/size + y_cohort_q1/y_cohort_top_half
+    only — the OR-label benchmark legs are 3y history and are not computed here.
+    NAV is read offline and truncated at the horizon's data cutoff D."""
+    manifest = load_manifest()
+    nav_panel = load_nav_panel(manifest, offline=True, cutoff=h.data_cutoff)
+    fwd = build_fwd_panel(manifest, nav_panel, h)
+    meta = manifest.set_index("amfi_code")
+    df = pd.DataFrame(
+        [
+            dict(
+                amfi_code=code,
+                scheme_name=meta.at[code, "scheme_name"],
+                category=meta.at[code, "category"],
+                sector=meta.at[code, "sector"],
+                anchor=t,
+                anchor_year=t.year,
+                R_fwd=v,
+            )
+            for (code, t), v in fwd.items()
+        ]
+    )
+    df, stats = add_cohort_targets(df, manifest)
+    h.out_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(h.labels_path, index=False)
+    print(f"[{h.key}] labels -> {h.labels_path}: {stats}")
+    return df
+
+
 def main() -> pd.DataFrame:
     manifest = load_manifest()
     nav_panel = load_nav_panel(manifest)
@@ -329,8 +372,11 @@ if __name__ == "__main__":
         action="store_true",
         help="add within-cohort targets to the existing labels.parquet (reuses cached R_fwd; no NAV rebuild)",
     )
+    ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT)
     args = ap.parse_args()
-    if args.cohort_only:
+    if args.horizon != DEFAULT:
+        build_horizon_labels(HORIZONS[args.horizon])
+    elif args.cohort_only:
         regenerate_with_cohort_targets()
     else:
         main()

@@ -60,11 +60,11 @@ from mf_cv import (
     cpcv_folds,
 )
 from mf_datasources import CACHE
+from mf_horizon import DEFAULT, HORIZONS, Horizon, standing
 from mf_labels import COHORT_MIN_SIZE
 
+H3 = HORIZONS[DEFAULT]
 OUT_DIR = CACHE / "phase_b"
-FEATURES_PATH = OUT_DIR / "features.parquet"
-LABELS_PATH = OUT_DIR / "labels.parquet"
 CPCV_RESULTS_PATH = OUT_DIR / "cpcv_results.json"
 OOS_PRED_PATH = OUT_DIR / "oos_predictions.parquet"
 HOLDOUT_STAMP = OUT_DIR / "holdout_evaluated.json"
@@ -144,9 +144,9 @@ META_COLS = ("amfi_code", "anchor")
 # ==============================================================================
 # Data
 # ==============================================================================
-def load_dataset() -> tuple[pd.DataFrame, list[str]]:
-    feats = pd.read_parquet(FEATURES_PATH)
-    labels = pd.read_parquet(LABELS_PATH)
+def load_dataset(h: Horizon = H3) -> tuple[pd.DataFrame, list[str]]:
+    feats = pd.read_parquet(h.features_path)
+    labels = pd.read_parquet(h.labels_path)
     df = labels.merge(feats, on=["amfi_code", "anchor"], how="inner")
     df = df[df["anchor"] >= MODEL_START].reset_index(drop=True)
     feature_cols = [c for c in feats.columns if c not in META_COLS]
@@ -367,7 +367,9 @@ def reliability_table(y: np.ndarray, p: np.ndarray, bins: int = 10) -> list[dict
     return out
 
 
-def block_metrics(anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray, p_cal: np.ndarray) -> dict:
+def block_metrics(
+    anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray, p_cal: np.ndarray, divisor: int = EFFECTIVE_N_DIVISOR
+) -> dict:
     base = float(y.mean())
     rank, n_cohorts = within_anchor_rank_auc(anchors, y, p_raw)
     dec = decile_stats(anchors, y, p_raw)
@@ -377,7 +379,7 @@ def block_metrics(anchors: np.ndarray, y: np.ndarray, p_raw: np.ndarray, p_cal: 
     brier = float(np.mean((p_cal - y) ** 2))
     return dict(
         n=int(len(y)),
-        effective_n=round(len(y) / EFFECTIVE_N_DIVISOR),
+        effective_n=round(len(y) / divisor),
         base_rate=base,
         negatives=int((~pos).sum()),
         pooled_auc=pooled_auc(y, p_raw),
@@ -403,6 +405,7 @@ def run_fold(
     test_mask: np.ndarray,
     kind: str,
     cfg: dict,
+    divisor: int = EFFECTIVE_N_DIVISOR,
 ) -> tuple[dict, pd.DataFrame, object, object]:
     anchors = df["anchor"].to_numpy()
     y = df[target_col].to_numpy(dtype=bool)
@@ -431,7 +434,7 @@ def run_fold(
     p_test_raw = model.predict_proba(Xt)[:, 1]
     p_test_cal = cal.predict(p_test_raw)
 
-    metrics = block_metrics(anchors[test_mask], y[test_mask], p_test_raw, p_test_cal)
+    metrics = block_metrics(anchors[test_mask], y[test_mask], p_test_raw, p_test_cal, divisor)
     metrics["calibration_kind"] = cal.kind
     # in-sample diagnostics — quarantined, never evidence (§5.1)
     p_fit = model.predict_proba(Xf)[:, 1]
@@ -445,9 +448,8 @@ def run_fold(
             amfi_code=df.loc[test_mask, "amfi_code"].to_numpy(),
             anchor=anchors[test_mask],
             y=y[test_mask],
-            condA=df.loc[test_mask, "condA"].to_numpy(),
-            condB=df.loc[test_mask, "condB"].to_numpy(),
-            condA_peer=df.loc[test_mask, "condA_peer"].to_numpy(),
+            # OR-label legs: 3y labels only (1m..1y label tables do not carry them)
+            **{c: df.loc[test_mask, c].to_numpy() for c in ("condA", "condB", "condA_peer") if c in df},
             p_raw=p_test_raw,
             p_cal=p_test_cal,
         )
@@ -552,40 +554,40 @@ def run_holdout(df: pd.DataFrame, feature_cols: list[str], force: bool = False) 
 # writes to its own artifact paths, and does not alter run_cpcv/run_holdout or
 # their outputs above in any way.
 # ==============================================================================
-COHORT_TARGETS = {"cohort_q1": "y_cohort_q1", "cohort_top_half": "y_cohort_top_half"}
-COHORT_CPCV_RESULTS_PATH = OUT_DIR / "cpcv_results_cohort.json"
-COHORT_OOS_PRED_PATH = OUT_DIR / "oos_predictions_cohort.parquet"
-COHORT_HOLDOUT_STAMP = OUT_DIR / "holdout_evaluated_cohort.json"
-COHORT_HOLDOUT_PRED_PATH = OUT_DIR / "holdout_predictions_cohort.parquet"
-COHORT_COEF_PATH = OUT_DIR / "coefficients_cohort.json"
-COHORT_REPORT_PATH = OUT_DIR / "cohort_target_report.md"
-# Imported, NOT redeclared: this is the one artifact that leaves mf_cache/ and is
-# committed (see mf_infer for why). Two literals for the same path is exactly the
-# drift mf_labels.MANIFEST_PATH is single-defined to avoid — and here a drift would
-# mean the trainer writes a model the inference side never reads.
-from mf_infer import COHORT_ARTIFACT_PATH  # noqa: E402 — path constant, not logic
+def cohort_targets(h: Horizon = H3) -> dict[str, str]:
+    """Target name -> label column. 3y keeps its shipped names (cohort_q1 is the ledger
+    key); every other horizon suffixes its key (cohort_q1_1m, cohort_top_half_1m, ...)."""
+    sfx = h.target[len("cohort_q1") :]
+    return {h.target: "y_cohort_q1", "cohort_top_half" + sfx: "y_cohort_top_half"}
 
 
-def load_cohort_dataset() -> tuple[pd.DataFrame, list[str]]:
+COHORT_TARGETS = cohort_targets(H3)
+# Every per-horizon path (research outputs, model/ artifact, stamp) lives in the
+# mf_horizon registry. The 3y artifact path must stay the one mf_infer reads — a
+# drift would mean the trainer writes a model the inference side never loads —
+# and mf_horizon's selftest pins exactly that (3y artifact == mf_infer.COHORT_ARTIFACT_PATH).
+
+
+def load_cohort_dataset(h: Horizon = H3) -> tuple[pd.DataFrame, list[str]]:
     """Same feature/label merge as load_dataset(), restricted to rows where the
     fund's (anchor, cohort) cell had >= mf_labels.COHORT_MIN_SIZE funds with a
     valid R_fwd (mf_labels.add_cohort_targets encodes ineligibility as NA)."""
-    df, feature_cols = load_dataset()
+    df, feature_cols = load_dataset(h)
     df = df[df["y_cohort_q1"].notna()].reset_index(drop=True)
-    for col in COHORT_TARGETS.values():
+    for col in cohort_targets(h).values():
         df[col] = df[col].astype(bool)
     return df, feature_cols
 
 
-def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str], h: Horizon = H3) -> dict:
     anchors = df["anchor"]
     results: dict = {"targets": {}}
     all_preds = []
-    for tname, tcol in COHORT_TARGETS.items():
+    for tname, tcol in cohort_targets(h).items():
         results["targets"][tname] = {"enet": {}, "hgbt": {}}
         for kind, cfg in (("enet", PRIMARY_ENET), ("hgbt", PRIMARY_HGBT)):
-            for block, train, test in cpcv_folds(anchors):
-                m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg)
+            for block, train, test in cpcv_folds(anchors, h):
+                m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg, h.divisor)
                 results["targets"][tname][kind][block] = m
                 preds["target"], preds["model"], preds["block"] = tname, kind, block
                 all_preds.append(preds)
@@ -595,33 +597,41 @@ def run_cpcv_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
                     f"base_rate={m['base_rate']:.3f} neg={m['negatives']} "
                     f"(n={m['n']})"
                 )
-    pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_OOS_PRED_PATH, index=False)
-    COHORT_CPCV_RESULTS_PATH.write_text(json.dumps(results, indent=1), encoding="utf-8")
+    pd.concat(all_preds, ignore_index=True).to_parquet(h.oos_pred_path, index=False)
+    h.cpcv_results_path.write_text(json.dumps(results, indent=1), encoding="utf-8")
     return results
 
 
-def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = False) -> dict:
-    if COHORT_HOLDOUT_STAMP.exists() and not force:
+def run_holdout_cohort(
+    df: pd.DataFrame, feature_cols: list[str], force: bool = False, h: Horizon = H3, cpcv: dict | None = None
+) -> dict:
+    """3y: legacy evaluate-once stamp in mf_cache/ (--force-holdout re-evaluates,
+    audit use only). Every other horizon: the stamp is GIT-TRACKED in model/,
+    carries the docs/horizons.md §4 standing, and there is no force — a second
+    run is refused here and, before any fitting, in main()."""
+    if h.legacy and h.cache_stamp_path.exists() and not force:
         print(
             "cohort holdout already evaluated — reusing stamped result "
-            f"({COHORT_HOLDOUT_STAMP}). Use --force to re-evaluate (do NOT do "
+            f"({h.cache_stamp_path}). Use --force to re-evaluate (do NOT do "
             "this to shop for a better number)."
         )
-        return json.loads(COHORT_HOLDOUT_STAMP.read_text(encoding="utf-8"))
+        return json.loads(h.cache_stamp_path.read_text(encoding="utf-8"))
+    if not h.legacy and (force or h.stamp_path.exists()):
+        raise SystemExit(f"{h.key}: holdout already evaluated ({h.stamp_path}) or force asked; refused, no force exists")
 
-    train, test = causal_holdout(df["anchor"])
+    train, test = causal_holdout(df["anchor"], h)
     out = dict(
         evaluated_at=datetime.now(timezone.utc).isoformat(),
-        train_end=str(CAUSAL_TRAIN_END.date()),
-        test_span=f"{CAUSAL_TEST_START.date()}..{CAUSAL_TEST_END.date()}",
+        train_end=str(h.train_end.date()),
+        test_span=f"{h.test_start.date()}..{h.test_end.date()}",
         n_train=int(train.sum()),
         n_test=int(test.sum()),
         models={},
     )
     all_preds = []
-    for tname, tcol in COHORT_TARGETS.items():
+    for tname, tcol in cohort_targets(h).items():
         for kind, cfg in (("enet", PRIMARY_ENET), ("hgbt", PRIMARY_HGBT)):
-            m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg)
+            m, preds, _, _ = run_fold(df, feature_cols, tcol, train, test, kind, cfg, h.divisor)
             out["models"][f"{tname}:{kind}"] = m
             preds["target"], preds["model"], preds["block"] = tname, kind, "HOLDOUT"
             all_preds.append(preds)
@@ -631,27 +641,50 @@ def run_holdout_cohort(df: pd.DataFrame, feature_cols: list[str], force: bool = 
                 f"neg={m['negatives']}"
             )
 
-    pd.concat(all_preds, ignore_index=True).to_parquet(COHORT_HOLDOUT_PRED_PATH, index=False)
-    COHORT_HOLDOUT_STAMP.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    pd.concat(all_preds, ignore_index=True).to_parquet(h.holdout_pred_path, index=False)
+    if h.legacy:
+        h.cache_stamp_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+        return out
+    blocks = [m["pooled_auc"] for m in cpcv["targets"][h.target]["enet"].values()]
+    out = dict(horizon=h.key, model_id=h.model_id, **out)
+    out["standing"] = standing(out["models"][f"{h.target}:enet"], blocks, h)
+    h.stamp_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    print(f"[holdout-cohort] {h.key} standing: {out['standing']['standing']} -> {h.stamp_path}")
     return out
 
 
-def run_coefficients_cohort(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+def run_coefficients_cohort(df: pd.DataFrame, feature_cols: list[str], h: Horizon = H3) -> dict:
     """Standardized elastic-net coefficients, fit on the full cohort-eligible
     dataset (no bootstrap here — the CPCV per-block table already shows
     fold-to-fold (in)stability of the headline metrics)."""
     out = {}
-    for tname, tcol in COHORT_TARGETS.items():
+    for tname, tcol in cohort_targets(h).items():
         y = df[tcol].to_numpy(dtype=bool)
         X = df[feature_cols]
         pre = Preprocessor().fit(X)
         model = fit_enet(pre.transform(X), y, PRIMARY_ENET)
         out[tname] = {k: float(v) for k, v in zip(feature_cols, model.coef_[0])}
-    COHORT_COEF_PATH.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    h.coef_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
 
 
-def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
+def _horizon_note(h: Horizon, stamp: dict) -> str:
+    """Artifact note for a non-3y horizon, written from ITS OWN stamp — never the
+    3y sentence, whose numbers belong to a different fit."""
+    m, st = stamp["models"][f"{h.target}:enet"], stamp["standing"]
+    return (
+        f"Within-cohort relative target over a {h.key} forward window (top quartile vs "
+        f"same (anchor, cohort) peers). Causal holdout {stamp['test_span']}, evaluated once "
+        f"{stamp['evaluated_at'][:10]}: AUC {m['pooled_auc']:.3f} (one-sided 95% lower bound "
+        f"{st['lower_bound']:.3f} at effective-n divisor {st['divisor']}), rank-AUC {m['rank_auc']:.3f}, "
+        f"lift {m['lift_over_base']:.2f}x on {m['n']} rows (effective n {st['effective_n']}); "
+        f"standing {st['standing']}{' (marginal)' if st['marginal'] else ''} against the bar "
+        "pre-registered in docs/horizons.md. Elastic-net only. Fitted on all cohort-eligible "
+        "anchors except the last-25% calibration slice."
+    )
+
+
+def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str], h: Horizon = H3) -> dict:
     """Full inference payload for the within-cohort targets (mirror of
     build_artifact, which only covers the OR/excess targets). coefficients_cohort
     ships weights only; live single-fund scoring also needs the intercept,
@@ -662,17 +695,20 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
     signal_context carries the honest measured edge (holdout AUC + base rate) so
     the consuming app can surface the probability with its true accuracy, never
     as an oracle."""
+    targets = cohort_targets(h)
+    stamp_path = h.cache_stamp_path if h.legacy else h.stamp_path
     holdout_auc: dict = {}
-    if COHORT_HOLDOUT_STAMP.exists():
-        stamp = json.loads(COHORT_HOLDOUT_STAMP.read_text(encoding="utf-8"))
-        for tname in COHORT_TARGETS:
+    stamp: dict = {}
+    if stamp_path.exists():
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        for tname in targets:
             m = stamp.get("models", {}).get(f"{tname}:enet")
             if m is not None:
                 holdout_auc[tname] = float(m["pooled_auc"])
 
     anchors = df["anchor"].to_numpy()
     artifact = dict(
-        version=MODEL_VERSION + "_cohort",
+        version=h.model_id,
         created=datetime.now(timezone.utc).isoformat(),
         training_anchor_span=f"{df['anchor'].min().date()}..{df['anchor'].max().date()}",
         features=feature_cols,
@@ -684,11 +720,13 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
             "not a standalone verdict. Elastic-net only (HGBT showed no edge on "
             "these targets). Fitted on all cohort-eligible anchors except the "
             "last-25% calibration slice."
-        ),
+        )
+        if h.legacy
+        else _horizon_note(h, stamp),
         models={},
     )
     all_mask = np.ones(len(df), dtype=bool)
-    for tname, tcol in COHORT_TARGETS.items():
+    for tname, tcol in targets.items():
         y = df[tcol].to_numpy(dtype=bool)
         fit_mask, calib_mask = calib_split(anchors, all_mask)
         X = df[feature_cols]
@@ -698,7 +736,13 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
         artifact["models"][tname] = dict(
             target=tcol,
             base_rate=float(y.mean()),
-            signal_context=dict(holdout_auc=holdout_auc.get(tname), base_rate=float(y.mean())),
+            signal_context=dict(holdout_auc=holdout_auc.get(tname), base_rate=float(y.mean()))
+            if h.legacy
+            else dict(
+                holdout_auc=holdout_auc.get(tname),
+                base_rate=float(y.mean()),
+                **{k: stamp["standing"][k] for k in ("standing", "marginal", "lower_bound")},
+            ),
             imputation_medians={c: float(v) for c, v in pre.median.items()},
             standardize_mean={c: float(v) for c, v in pre.mean.items()},
             standardize_std={c: float(v) for c, v in pre.std.items()},
@@ -706,12 +750,13 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str]) -> dict:
             intercept=float(model.intercept_[0]),
             calibration=cal.to_json(),
         )
-    COHORT_ARTIFACT_PATH.write_text(json.dumps(artifact, indent=1), encoding="utf-8")
-    print(f"cohort artifact -> {COHORT_ARTIFACT_PATH}")
+    h.artifact_path.write_text(json.dumps(artifact, indent=1), encoding="utf-8")
+    print(f"cohort artifact -> {h.artifact_path}")
     return artifact
 
 
-def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dict) -> str:
+def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dict, h: Horizon = H3) -> str:
+    COHORT_TARGETS = cohort_targets(h)  # noqa: N806 — this horizon's targets, shadowing the 3y module dict
     lines: list[str] = []
     add = lines.append
 
@@ -719,7 +764,7 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
     add("")
     add(
         f"Generated {datetime.now(timezone.utc).date()}. Targets: `y_cohort_q1` "
-        "(top quartile of same-cohort peers' 3y-forward return) and "
+        f"(top quartile of same-cohort peers' {h.key}-forward return) and "
         "`y_cohort_top_half` (above cohort median), computed per (anchor, cohort) "
         "directly from R_fwd — cohort = PeerProxyResolver grouping (same "
         "`category` for diversified funds; same `sector` for thematic funds with "
@@ -803,7 +848,7 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
             add(_metric_row(f"{tname} ({kind})", m))
     add("")
 
-    add("## CPCV — purged/embargoed, 5 blocks (primary evaluation)")
+    add(f"## CPCV — purged/embargoed, {len(h.blocks)} blocks (primary evaluation)")
     add("")
     for tname in COHORT_TARGETS:
         for kind, label in (("enet", "elastic-net (PRIMARY)"), ("hgbt", "HistGBT (challenger)")):
@@ -850,8 +895,8 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
         add("")
 
     text = "\n".join(lines) + "\n"
-    COHORT_REPORT_PATH.write_text(text, encoding="utf-8")
-    print(f"cohort report -> {COHORT_REPORT_PATH}")
+    h.report_path.write_text(text, encoding="utf-8")
+    print(f"cohort report -> {h.report_path}")
     return text
 
 
@@ -1198,28 +1243,38 @@ def main() -> None:
     ap.add_argument(
         "--stage", choices=["cpcv", "coef", "holdout", "artifact", "report", "all", "cohort"], default="all"
     )
-    ap.add_argument("--force-holdout", action="store_true", help="re-evaluate the causal holdout (audit use only)")
+    ap.add_argument(
+        "--force-holdout", action="store_true", help="re-evaluate the causal holdout (audit use only; 3y only)"
+    )
+    ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT, help="forecast horizon (mf_horizon)")
     args = ap.parse_args()
+    h = HORIZONS[args.horizon]
+    if not h.legacy:
+        # Evaluate-once, enforced before ANY fitting: no force flag, no refit after the number.
+        if args.stage != "cohort" or args.force_holdout:
+            ap.error(f"--horizon {h.key} supports only --stage cohort, and never --force-holdout")
+        if h.stamp_path.exists():
+            raise SystemExit(f"{h.key} already evaluated ({h.stamp_path}); refit only under a new model_id")
 
     if args.stage == "cohort":
-        df, feature_cols = load_cohort_dataset()
+        df, feature_cols = load_cohort_dataset(h)
         print(
-            f"cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
+            f"[{h.key}] cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
             f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}"
         )
-        cpcv = run_cpcv_cohort(df, feature_cols)
-        holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout)
-        coefs = run_coefficients_cohort(df, feature_cols)
-        build_cohort_artifact(df, feature_cols)
-        full_df, _ = load_dataset()
+        cpcv = run_cpcv_cohort(df, feature_cols, h)
+        holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout, h=h, cpcv=cpcv)
+        coefs = run_coefficients_cohort(df, feature_cols, h)
+        build_cohort_artifact(df, feature_cols, h)
+        full_df, _ = load_dataset(h)
         label_stats = dict(
             min_size=COHORT_MIN_SIZE,
             n_total=int(len(full_df)),
             n_dropped=int(full_df["y_cohort_q1"].isna().sum()),
             n_kept=int(len(df)),
         )
-        holdout_span = (full_df["anchor"] >= CAUSAL_TEST_START) & (full_df["anchor"] <= CAUSAL_TEST_END)
-        for tname, tcol in COHORT_TARGETS.items():
+        holdout_span = (full_df["anchor"] >= h.test_start) & (full_df["anchor"] <= h.test_end)
+        for tname, tcol in cohort_targets(h).items():
             kept = full_df["y_cohort_q1"].notna()
             v = full_df.loc[kept, tcol].astype(bool)
             vh = full_df.loc[kept & holdout_span, tcol].astype(bool)
@@ -1228,7 +1283,7 @@ def main() -> None:
                 holdout_base_rate=float(vh.mean()) if len(vh) else float("nan"),
                 holdout_negatives=int((~vh).sum()),
             )
-        write_cohort_report(cpcv, holdout, coefs, label_stats)
+        write_cohort_report(cpcv, holdout, coefs, label_stats, h)
         return
 
     # RETAINED ON PURPOSE (do not delete as "dead"): the non-cohort stages below

@@ -274,6 +274,7 @@ def run_selftest() -> bool:
     import mf_benchmarks
     import mf_cv
     import mf_infer
+    import mf_labels
     import mf_ledger
     import mf_model
 
@@ -319,6 +320,7 @@ def run_selftest() -> bool:
     eq("3y artifact path == mf_infer", h3.artifact_path, mf_infer.COHORT_ARTIFACT_PATH)
     eq("3y psi path == mf_ledger", h3.psi_reference_path, mf_ledger.PSI_REFERENCE_PATH)
     eq("3y target == DEFAULT_TARGET", h3.target, mf_infer.DEFAULT_TARGET)
+    eq("3y labels path == mf_labels", h3.labels_path, mf_labels.LABELS_PATH)
     eq("default horizon", DEFAULT, "3y")
 
     # (ii) the divisor procedure, fed the §3 measured inputs
