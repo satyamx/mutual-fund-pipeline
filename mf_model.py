@@ -741,7 +741,8 @@ def build_cohort_artifact(df: pd.DataFrame, feature_cols: list[str], h: Horizon 
             else dict(
                 holdout_auc=holdout_auc.get(tname),
                 base_rate=float(y.mean()),
-                **{k: stamp["standing"][k] for k in ("standing", "marginal", "lower_bound")},
+                # the standing certifies cohort_q1 only; top-half gets no standing
+                **({k: stamp["standing"][k] for k in ("standing", "marginal", "lower_bound")} if tname == h.target else {}),
             ),
             imputation_medians={c: float(v) for c, v in pre.median.items()},
             standardize_mean={c: float(v) for c, v in pre.mean.items()},
@@ -1238,6 +1239,47 @@ def write_report(cpcv: dict, holdout: dict, coefs: dict) -> str:
 
 
 # ==============================================================================
+def run_cohort_stage(h: Horizon = H3, force_holdout: bool = False) -> None:
+    """--stage cohort for one horizon. Non-3y evaluate-once, enforced before ANY
+    fitting: stamp + artifact present -> refused; stamp present, artifact missing
+    (a run died after scoring) -> RESUME: CPCV and the stamped holdout are read
+    back, never re-scored, and only coefficients + artifact + report run."""
+    df, feature_cols = load_cohort_dataset(h)
+    print(
+        f"[{h.key}] cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
+        f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}"
+    )
+    if not h.legacy and h.stamp_path.exists():
+        if h.artifact_path.exists():
+            raise SystemExit(f"{h.key} already evaluated ({h.stamp_path}); refit only under a new model_id")
+        print(f"[{h.key}] stamped but no artifact — resuming after the holdout (not re-scored)")
+        cpcv = json.loads(h.cpcv_results_path.read_text(encoding="utf-8"))
+        holdout = json.loads(h.stamp_path.read_text(encoding="utf-8"))
+    else:
+        cpcv = run_cpcv_cohort(df, feature_cols, h)
+        holdout = run_holdout_cohort(df, feature_cols, force=force_holdout, h=h, cpcv=cpcv)
+    coefs = run_coefficients_cohort(df, feature_cols, h)
+    build_cohort_artifact(df, feature_cols, h)
+    full_df, _ = load_dataset(h)
+    label_stats = dict(
+        min_size=COHORT_MIN_SIZE,
+        n_total=int(len(full_df)),
+        n_dropped=int(full_df["y_cohort_q1"].isna().sum()),
+        n_kept=int(len(df)),
+    )
+    holdout_span = (full_df["anchor"] >= h.test_start) & (full_df["anchor"] <= h.test_end)
+    for tname, tcol in cohort_targets(h).items():
+        kept = full_df["y_cohort_q1"].notna()
+        v = full_df.loc[kept, tcol].astype(bool)
+        vh = full_df.loc[kept & holdout_span, tcol].astype(bool)
+        label_stats[tname] = dict(
+            base_rate=float(v.mean()),
+            holdout_base_rate=float(vh.mean()) if len(vh) else float("nan"),
+            holdout_negatives=int((~vh).sum()),
+        )
+    write_cohort_report(cpcv, holdout, coefs, label_stats, h)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -1249,41 +1291,11 @@ def main() -> None:
     ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT, help="forecast horizon (mf_horizon)")
     args = ap.parse_args()
     h = HORIZONS[args.horizon]
-    if not h.legacy:
-        # Evaluate-once, enforced before ANY fitting: no force flag, no refit after the number.
-        if args.stage != "cohort" or args.force_holdout:
-            ap.error(f"--horizon {h.key} supports only --stage cohort, and never --force-holdout")
-        if h.stamp_path.exists():
-            raise SystemExit(f"{h.key} already evaluated ({h.stamp_path}); refit only under a new model_id")
+    if not h.legacy and (args.stage != "cohort" or args.force_holdout):
+        ap.error(f"--horizon {h.key} supports only --stage cohort, and never --force-holdout")
 
     if args.stage == "cohort":
-        df, feature_cols = load_cohort_dataset(h)
-        print(
-            f"[{h.key}] cohort dataset: {len(df)} rows, {len(feature_cols)} features, "
-            f"anchors {df['anchor'].min().date()}..{df['anchor'].max().date()}"
-        )
-        cpcv = run_cpcv_cohort(df, feature_cols, h)
-        holdout = run_holdout_cohort(df, feature_cols, force=args.force_holdout, h=h, cpcv=cpcv)
-        coefs = run_coefficients_cohort(df, feature_cols, h)
-        build_cohort_artifact(df, feature_cols, h)
-        full_df, _ = load_dataset(h)
-        label_stats = dict(
-            min_size=COHORT_MIN_SIZE,
-            n_total=int(len(full_df)),
-            n_dropped=int(full_df["y_cohort_q1"].isna().sum()),
-            n_kept=int(len(df)),
-        )
-        holdout_span = (full_df["anchor"] >= h.test_start) & (full_df["anchor"] <= h.test_end)
-        for tname, tcol in cohort_targets(h).items():
-            kept = full_df["y_cohort_q1"].notna()
-            v = full_df.loc[kept, tcol].astype(bool)
-            vh = full_df.loc[kept & holdout_span, tcol].astype(bool)
-            label_stats[tname] = dict(
-                base_rate=float(v.mean()),
-                holdout_base_rate=float(vh.mean()) if len(vh) else float("nan"),
-                holdout_negatives=int((~vh).sum()),
-            )
-        write_cohort_report(cpcv, holdout, coefs, label_stats, h)
+        run_cohort_stage(h, force_holdout=args.force_holdout)
         return
 
     # RETAINED ON PURPOSE (do not delete as "dead"): the non-cohort stages below
