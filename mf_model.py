@@ -780,18 +780,26 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
     add("")
     add("## Read this first")
     add("")
-    add(
-        "- This target removes the regime effect the OR-label suffered from "
-        "(2017 anchors ~32% positive, 2020 anchors ~99% positive) by construction: "
-        "every fund in a cohort at a given anchor faces the same market, so the "
-        "label only reflects RELATIVE standing, not market direction."
-    )
+    # The OR-label history and the measured counts below describe the 3y build only;
+    # every other horizon gets the general statements and its own tables.
+    if h.legacy:
+        add(
+            "- This target removes the regime effect the OR-label suffered from "
+            "(2017 anchors ~32% positive, 2020 anchors ~99% positive) by construction: "
+            "every fund in a cohort at a given anchor faces the same market, so the "
+            "label only reflects RELATIVE standing, not market direction."
+        )
     add(
         "- Base rates below deviate from the nominal ~25%/~50% guide because "
         "small cohorts (n=4-9) cannot split into exact quartiles/halves under a "
         "continuous quantile — this is honest quantization noise, not a labeling "
-        "bug (verified: n=5 cohorts, the five 5-fund thematic sectors, run "
-        "40%/40% instead of 25%/50%; see label_stats below)."
+        "bug"
+        + (
+            " (verified: n=5 cohorts, the five 5-fund thematic sectors, run "
+            "40%/40% instead of 25%/50%; see label_stats below)."
+            if h.legacy
+            else "; see label_stats below."
+        )
     )
     add(
         "- Headline metric is AUC / rank-AUC / lift over base rate, never raw "
@@ -803,10 +811,16 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
         "(excess_1y, excess_3y, beta_3y, te_3y, ir_3y, upcap_3y, downcap_3y) were "
         "re-verified against mf_features.py source — every one slices its input "
         "series to `.loc[:t]` before use (own NAV and the LOO peer composite "
-        "alike), and `mf_features.py --selftest` (bumps all post-t NAVs +/-20% "
-        "and asserts bit-identical features) PASSED before this run. No forward "
-        "information reaches the feature side; the cohort ranking itself uses "
-        "R_fwd only on the label side, exactly as with the OR-label."
+        "alike)"
+        + (
+            ", and `mf_features.py --selftest` (bumps all post-t NAVs +/-20% "
+            "and asserts bit-identical features) PASSED before this run. No forward "
+            "information reaches the feature side; the cohort ranking itself uses "
+            "R_fwd only on the label side, exactly as with the OR-label."
+            if h.legacy
+            else ". No forward information reaches the feature side; the cohort "
+            "ranking itself uses R_fwd only on the label side."
+        )
     )
     add("")
 
@@ -815,9 +829,13 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
     add(
         "n_total/n_dropped/n_kept below are counted on the model-ready frame "
         "(labels inner-joined to features.parquet, anchors >= 2014-01-31) — "
-        "narrower than the raw label-build population (mf_labels.py reports "
-        "13,621 kept / 1,416 dropped over the full 2013-2023 anchor grid before "
-        "the features merge)."
+        "narrower than the raw label-build population"
+        + (
+            " (mf_labels.py reports 13,621 kept / 1,416 dropped over the full "
+            "2013-2023 anchor grid before the features merge)."
+            if h.legacy
+            else "."
+        )
     )
     add("")
     add(
@@ -833,11 +851,12 @@ def write_cohort_report(cpcv: dict, holdout: dict, coefs: dict, label_stats: dic
             f"{s['holdout_base_rate']:.3f} | {s['holdout_negatives']} |"
         )
     add("")
-    add(
-        "(For reference, the prior OR-label causal holdout had only 26 negatives "
-        "out of 1416 rows — base rate 0.982. Both cohort targets fix that.)"
-    )
-    add("")
+    if h.legacy:
+        add(
+            "(For reference, the prior OR-label causal holdout had only 26 negatives "
+            "out of 1416 rows — base rate 0.982. Both cohort targets fix that.)"
+        )
+        add("")
 
     add("## Causal holdout (evaluated once) — headline")
     add("")
@@ -1255,7 +1274,11 @@ def run_cohort_stage(h: Horizon = H3, force_holdout: bool = False) -> None:
     )
     if not h.legacy and h.stamp_path.exists():
         if h.artifact_path.exists():
-            raise SystemExit(f"{h.key} already evaluated ({h.stamp_path}); refit only under a new model_id")
+            raise SystemExit(
+                f"{h.key} already evaluated ({h.stamp_path}). This guard is keyed by the stamp path, "
+                "not the model_id: a refit needs a new model version in mf_horizon AND this stamp and "
+                f"{h.artifact_path.name} archived out of model/ first (docs/horizons.md §5)."
+            )
         print(f"[{h.key}] stamped but no artifact — resuming after the holdout (not re-scored)")
         cpcv = json.loads(h.cpcv_results_path.read_text(encoding="utf-8"))
         holdout = json.loads(h.stamp_path.read_text(encoding="utf-8"))
