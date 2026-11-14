@@ -21,7 +21,10 @@ Five horizons, each fitted and scored once on its causal holdout (`docs/horizons
   red); 6m, 1y and 3y run the five-colour rule and ship their signal `WITHHELD`. Nothing enters the v1
   verdict, which is unchanged; the 3y per-horizon verdict equals it for every fund (selftest pin).
 - **Ledger:** rotated per target/month (`ledger/<target>/<YYYY-MM>.jsonl`; `predictions.jsonl` is never
-  rewritten). 1m/3m/6m/1y log month-end anchors only, from day 3 to day 10 after the month-end; 3y still logs daily.
+  rewritten). All five horizons, 3y included, log month-end anchors only, from day 3 to day 10 after the
+  month-end (3y: owner decision 2026-11-14, relayed by the orchestrating session); the 3y signal shown per
+  fund is still scored daily, it is just no longer appended daily. The nightly's stall gate is now
+  `--max-anchor-age-days 45`, since a healthy newest 3y anchor can be ~41 days old.
   Takes effect on merge: the first month-end rows would be anchored 2026-11-30.
 - **Artifact:** the nightly publishes `mf_artifact_latest.json.gz` + `latest.json` as v1, unchanged, and
   `mf_artifact_v2_latest.json.gz` beside them (`docs/design/mf_artifact_v2.md`).
@@ -32,8 +35,8 @@ Five horizons, each fitted and scored once on its causal holdout (`docs/horizons
 - **Known and left:** the evaluate-once guard is keyed by horizon, not model id (a refit must archive the
   old stamp first); `mf_cv` creates `./mf_cache` on import; `mf_live_score.py:584` and `mf_ledger.py:1129`
   hardcode `mf_cache/phase_b` and ignore `MF_CACHE_DIR`.
-- **Open owner decisions:** (1) whether 3y logging should move from daily to month-end; (2) the Hisaab
-  Kitaab v2 parser and tables are a separate session (`docs/design/mf_artifact_v2.md` §6).
+- **Open owner decisions:** the Hisaab Kitaab v2 parser and tables are a separate session
+  (`docs/design/mf_artifact_v2.md` §6).
 
 **Refreshed 2026-11-01 (from `gh` + the ledger, not from memory): healthy.** `origin/master` carries the `2026-10-31` ledger anchor; ledger = 28,607 rows / 60 anchors, 26,746 of them `phase_b_v5_cohort`. **39 of 39 nightlies since 2026-09-24 are green** (longest ~74 min against the 90-min limit). `realize-monthly` has now fired on its cron three times running (2026-09-01, 10-01, 11-01) — open item 1 is closed. The 60-min cancellations went on past 08-29: **runs on 09-03, 09-21, 09-22 and 09-23 were also cancelled at ~60m**, because the 90-min fix (`0350006`, committed 08-30) sat unpushed until after 09-23 — those runs executed `ee34b99`/`c5b2769`, neither of which contains it. Each lost only that night's append (a later night re-anchored), but three in a row is the case `--max-anchor-age-days 7` exists for. Nothing since. Sections below are dated and left as written.
 
