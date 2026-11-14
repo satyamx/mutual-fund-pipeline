@@ -147,6 +147,9 @@ PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25  # standard PSI rule-of-thumb thresho
 # 3y's window, pinned == HORIZONS["3y"].window_end by mf_horizon's selftest; realization reads the registry
 MATURITY = pd.DateOffset(years=3)
 MONTH_END_WINDOW_DAYS = 10  # §7: a month-end anchor is logged only within this many days of it
+# ...and not before this many: the done-check never revisits a month, so a day-0-2 run would
+# score late publishers (fund-of-funds, international) on a stale NAV training never saw.
+MONTH_END_SETTLE_DAYS = 3
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
@@ -787,20 +790,22 @@ def log_month_end(
     """Month-end rows for every non-3y horizon (docs/horizons.md §7) — the forward
     test samples what the holdout sampled. M = the latest month-end <= the newest
     NAV in `nav_panel`. A target already holding rows at M for its model id is
-    done; else, if `today` is within MONTH_END_WINDOW_DAYS of M, ONE panel is built
+    done; else, if `today` is MONTH_END_SETTLE_DAYS..MONTH_END_WINDOW_DAYS after M (earlier
+    is `pending`: NAVs still settling, nothing written, not a skip), ONE panel is built
     as of M (NAV <= M only — nothing after M can reach a row) and every horizon
     scores it: one row per fund that is OK and whose own as-of NAV is within that
     horizon's tolerance of M, anchor = M. Later than that the month is skipped and
     counted, never backfilled. 3y keeps its daily path. `inferencers`: optional
     {horizon key: CohortInferencer}, else the process singletons.
-    Returns {target: {anchor, appended, skipped_funds, skipped_month, already_logged}}."""
+    Returns {target: {anchor, appended, skipped_funds, skipped_month, already_logged, pending}}."""
     from pandas.tseries.offsets import MonthEnd
 
     from mf_infer import load_default
 
     today = pd.Timestamp(today).normalize()
     newest = max(s.dropna().index.max() for s in nav_panel.values() if len(s.dropna()))
-    M = MonthEnd().rollback(newest.normalize())
+    # capped at today: one future-dated NAV row must never mint a future anchor in an append-only file
+    M = MonthEnd().rollback(min(newest.normalize(), today))
     anchor = str(M.date())
     out: Dict[str, Dict[str, Any]] = {}
     todo = []
@@ -811,10 +816,16 @@ def log_month_end(
         month_file = path.parent / h.target / f"{anchor[:7]}.jsonl"
         done = any(r.get("anchor") == anchor and r.get("model_id") == h.model_id for r in read_jsonl(month_file))
         late = (today - M).days > MONTH_END_WINDOW_DAYS
+        pending = not done and (today - M).days < MONTH_END_SETTLE_DAYS  # not a skip: a later run logs it
         out[h.target] = dict(
-            anchor=anchor, appended=0, skipped_funds=0, skipped_month=int(late and not done), already_logged=done
+            anchor=anchor,
+            appended=0,
+            skipped_funds=0,
+            skipped_month=int(late and not done),
+            already_logged=done,
+            pending=pending,
         )
-        if not done and not late:
+        if not done and not late and not pending:
             todo.append(h)
     if not todo:
         return out
@@ -1357,7 +1368,19 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
             path=root / "predictions.jsonl",
         )
 
-    res = run(tmp / "a", nav_panel, 3)
+    # day 0-2: month-end NAVs still settling (late publishers) — pending, nothing written, not a skip
+    early = run(tmp / "p", nav_panel, 1)
+    assert all(early[h.target].get("pending") is True and early[h.target]["appended"] == 0
+               and early[h.target]["skipped_month"] == 0 for h in month), f"FAIL: day 1 not pending: {early}"
+    assert not (tmp / "p").exists() or not any((tmp / "p").rglob("*.jsonl")), "FAIL: day 1 wrote rows"
+    # a NAV dated after today must not create a future anchor in an append-only ledger
+    code0 = next(c for c, s in nav_panel.items() if len(s.dropna()))
+    future = dict(nav_panel)
+    future[code0] = pd.concat([nav_panel[code0], pd.Series([1.0], index=[M + pd.Timedelta(days=40)])])
+    fut = run(tmp / "f", future, 1)
+    assert all(fut[h.target]["anchor"] == str(M.date()) for h in month), f"FAIL: future NAV moved the anchor: {fut}"
+
+    res = run(tmp / "a", nav_panel, 4)
     for h in month:
         r = res.get(h.target, {})
         assert r.get("appended", 0) > 0 and r["skipped_month"] == 0, f"FAIL: {h.key} {r}"
@@ -1367,7 +1390,7 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
     assert not load_predictions(tmp / "a" / "predictions.jsonl"), "FAIL: month-end logging wrote 3y rows"
 
     bumped = {c: s.where(s.index <= M, s * 1.37) for c, s in nav_panel.items()}
-    run(tmp / "b", bumped, 3)
+    run(tmp / "b", bumped, 4)
 
     def strip(root, h):
         return sorted(
@@ -1385,7 +1408,7 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
     print(
         f"[selftest] month-end {M.date()}: rows at anchor=M for {[h.key for h in month]} "
         f"({', '.join(str(res[h.target]['appended']) for h in month)}), post-M NAV ignored, "
-        "second call appends 0, day 11 skipped + counted — PASS"
+        "second call appends 0, day 1 pending, future NAV capped at today, day 11 skipped + counted — PASS"
     )
 
 
