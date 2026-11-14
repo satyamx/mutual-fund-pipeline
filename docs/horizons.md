@@ -297,3 +297,17 @@ What does not change:
   later marginal result at another horizon, needs its own ruling.
 - 6m, 1y and 3y are WEAK and stay out of every verdict. Every horizon is still logged. No refit. The app
   still never renders BUY.
+
+## 11. Implementation notes
+
+*Appended, dated. Refinements found while building; none touches the bar, a divisor or a result.*
+
+**2026-11-14 — month-end rows wait three days.** §7 says a month-end anchor `M` is logged "within 10 days
+of `M`". As built, rows are logged only from day 3 to day 10. On the first nights after a month-end,
+fund-of-funds and international funds have not yet published their month-end NAV; scoring them then would
+use a NAV the training grid never saw, and a month once logged is never revisited. Before day 3 the result
+is `pending`, not a skip. The anchor is also capped at today, so a mis-dated NAV cannot create a future
+anchor in an append-only file.
+
+**2026-11-14 — v2 is best-effort.** A failure while deriving or writing `mf_artifact_v2` is logged and
+never blocks the v1 document, the ledger append or the v1 publish.
