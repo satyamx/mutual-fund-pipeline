@@ -42,6 +42,10 @@ import pandas as pd
 LOGGER = logging.getLogger("MFData")
 CACHE = Path(os.environ.get("MF_CACHE_DIR", "./mf_cache"))
 CACHE.mkdir(parents=True, exist_ok=True)
+# MF_OFFLINE=1: no HTTP at all, and NAV caches are served as they stand however old
+# (fetch_raw would otherwise refetch anything past its 20h TTL). For reproducible
+# research builds and selftests on a frozen cache.
+OFFLINE = os.environ.get("MF_OFFLINE") == "1"
 
 AMFI_NAVALL = "https://www.amfiindia.com/spages/NAVAll.txt"
 AMFI_CAPLIST_PAGE = "https://www.amfiindia.com/otherdata/categorisation-of-stocks"
@@ -50,6 +54,8 @@ ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
 
 
 def _requests():
+    if OFFLINE:
+        return None
     try:
         import requests  # noqa: PLC0415
 
@@ -236,12 +242,15 @@ class MFAPIAdapter:
     def __init__(self, cleaner: Optional[NAVCleaner] = None) -> None:
         self.cleaner = cleaner or NAVCleaner()
         self.live = False
+        self.offline = OFFLINE  # True: cache only, never refetch, missing file -> None
 
     def _cache_path(self, code: str) -> Path:
         return CACHE / f"mfapi_{code}.json"
 
     def fetch_raw(self, scheme_code: str, max_age_hours: int = 20) -> Optional[Dict[str, Any]]:
         p = self._cache_path(scheme_code)
+        if self.offline:
+            return json.loads(p.read_text()) if p.exists() else None
         if p.exists() and (time.time() - p.stat().st_mtime) < max_age_hours * 3600:
             return json.loads(p.read_text())
         payload = _get_json(f"{MFAPI_BASE}/mf/{scheme_code}")

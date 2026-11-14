@@ -87,11 +87,14 @@ import pandas as pd
 import mf_eval
 import mf_ledger
 import mf_live_score  # STATUSES_WITH_IMPUTATION — imported, never restated
-from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator
+from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator, top_decile
 from mf_datasources import CACHE
+from mf_horizon import DEFAULT as DEFAULT_HORIZON
+from mf_horizon import HORIZONS, load_stamp
 from mf_labels import load_manifest
 
 ARTIFACT_VERSION = "mf_artifact_v1"
+ARTIFACT_V2_VERSION = "mf_artifact_v2"  # v1 + the horizon menu (docs/design/mf_artifact_v2.md)
 OUT_DIR = CACHE / "artifacts"
 
 LOGGER = logging.getLogger("MFArtifact")
@@ -308,19 +311,113 @@ def build_fund_record(
     )
 
 
-def build_artifact(
+_SIGNAL_NUMBERS = ("top_decile", "percentile", "probability", "cohort_n", "n_imputed", "imputed_fraction")
+
+
+def _v2_signal(cs: Optional[Dict[str, Any]], admitted: bool) -> Dict[str, Any]:
+    """A non-admitted horizon is WITHHELD with every number null — "never displayed" is a
+    property of the file. An admitted one carries the usual status, numbers on OK only, and
+    NOT_SCORED when it was not scored at all — a status is always named, never null."""
+    if not admitted:
+        return dict(status="WITHHELD", **dict.fromkeys(_SIGNAL_NUMBERS))
+    if not cs or cs.get("status") != "OK":
+        return dict(status=(cs or {}).get("status") or "NOT_SCORED", **dict.fromkeys(_SIGNAL_NUMBERS))
+    n_imp, n_feat = len(cs["imputed_features"]), cs.get("n_features")
+    return dict(
+        status="OK",
+        top_decile=top_decile(cs),
+        percentile=_finite_or_none(cs["cohort_percentile"]),
+        probability=_finite_or_none(cs["probability"]),
+        cohort_n=cs["cohort_n"],
+        n_imputed=n_imp,
+        imputed_fraction=round(n_imp / n_feat, 4) if n_feat else None,
+    )
+
+
+def _v2_horizons(hz: Optional[Dict[str, Any]], keys: List[str], admitted: set) -> Dict[str, Any]:
+    out = {}
+    for k in keys:
+        e = (hz or {}).get(k)
+        if e is None:  # the orchestrator's isolated horizon block failed for this fund
+            out[k] = dict(facts=None, signal=_v2_signal(None, k in admitted), verdict=None,
+                          coverage_flags=["HORIZON_NOT_EVALUATED — unexpected error"])
+            continue
+        out[k] = dict(
+            facts=_json_safe(e["facts"]),
+            signal=_v2_signal(e["signal"], k in admitted),
+            verdict=e["verdict"],
+            coverage_flags=e["coverage_flags"],
+        )
+    return out
+
+
+def horizon_menu(
+    admitted: set, ledger_path: Path, realizations_path: Path, month_end: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """v2 `horizons`: one entry per registry horizon that has a git-tracked stamp, shortest
+    first. `holdout` is the one evaluation, read from the stamp, never recomputed."""
+    out = []
+    for key, h in sorted(HORIZONS.items(), key=lambda kv: kv[1].months):
+        st = load_stamp(key)
+        if st is None:
+            continue
+        m, sd = st["models"][f"{h.target}:enet"], st["standing"]
+        stats = mf_ledger.ledger_stats(ledger_path, h.target)
+        rs = mf_ledger.realized_summary(realizations_path, ledger_path, model_id=h.model_id, target=h.target)
+        out.append(
+            dict(
+                key=key,
+                months=h.months,
+                target=h.target,
+                model_id=st["model_id"],
+                standing=sd["standing"],
+                marginal=sd["marginal"],
+                signal_in_verdict=key in admitted,
+                holdout=dict(
+                    auc=m["pooled_auc"],
+                    auc_lower_bound=sd["lower_bound"],
+                    rank_auc=m["rank_auc"],
+                    top_decile_lift=m["lift_over_base"],
+                    n=m["n"],
+                    effective_n=sd["effective_n"],
+                    divisor=sd["divisor"],
+                    strict_divisor=sd["strict_divisor"],
+                    cpcv_blocks_above_half=f"{sd['cpcv_blocks_above']}/{len(st['cpcv_block_aucs'])}",
+                    test_span=st["test_span"],
+                    evaluated_at=st["evaluated_at"],
+                ),
+                ledger=dict(
+                    rows_total=stats["rows_total"],
+                    last_anchor=stats["last_anchor"],
+                    first_maturity=rs["earliest_maturity"],
+                    n_realized=rs["n_realized"],
+                    # this run's month-end logging (all five horizons, 3y included)
+                    month_end=(month_end or {}).get(h.target),
+                ),
+            )
+        )
+    return out
+
+
+def build_artifact(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """The mf_artifact_v1 document alone (see build_artifacts)."""
+    return build_artifacts(*args, **kwargs)[0]
+
+
+def build_artifacts(
     scheme_names: List[str],
     orch: Optional[MasterOrchestrator] = None,
     profile: Optional[InvestorProfile] = None,
     ledger_path: Path = mf_ledger.PREDICTIONS_PATH,
     realizations_path: Path = mf_ledger.REALIZATIONS_PATH,
-) -> Dict[str, Any]:
-    """Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
+) -> tuple:
+    """(v1, v2) from ONE run. v1 is built exactly as it always was; v2 is derived from it
+    by adding keys only (docs/design/mf_artifact_v2.md §1). Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
     RealNAVStore fund cache and cohort-scoring resources build once) against
     `profile` (defaults to InvestorProfile()'s own baseline), and assembles the
-    full versioned artifact. Every OK cohort_signal is appended to the
-    (git-tracked) prediction ledger — see mf_ledger.py for why this must happen
-    now even though nothing can be realized for ~3 years."""
+    full versioned artifact. The 3y cohort_signal is scored daily for the document;
+    the (git-tracked) prediction ledger takes month-end rows only, every horizon
+    (mf_ledger.log_month_end; 3y by owner decision 2026-11-14)."""
     orch = orch if orch is not None else MasterOrchestrator(live=True)
     profile = profile if profile is not None else InvestorProfile()
     is_default_profile = profile.model_dump(mode="json") == InvestorProfile().model_dump(mode="json")
@@ -330,6 +427,7 @@ def build_artifact(
     pipeline_sha = _git_sha()
 
     records: List[Dict[str, Any]] = []
+    horizon_blocks: List[Optional[Dict[str, Any]]] = []  # parallel to records, v2 only
     errors: List[Dict[str, str]] = []
     ledger_rows: List[Dict[str, Any]] = []
     for name in scheme_names:
@@ -339,6 +437,7 @@ def build_artifact(
             errors.append(dict(query=name, error=result.get("error", "unknown")))
             continue
         records.append(rec)
+        horizon_blocks.append(result.get("horizons"))
         row = mf_ledger.build_row(
             rec["amfi_code"],
             result.get("cohort_signal"),
@@ -347,10 +446,25 @@ def build_artifact(
             model_id=orch.cohort_model_id,
         )
         if row is not None:
-            ledger_rows.append(row)
-    n_appended = mf_ledger.append_predictions(ledger_rows, path=ledger_path)
+            ledger_rows.append(row)  # in memory only: rank_stability's current_rows, never appended
 
     live_res = orch.cohort_live_resources()
+    # Month-end rows for all five horizons (docs/horizons.md §7), once per run. A failure
+    # costs this month's rows (reported as month_end null in v2), never the v1 document.
+    month_end = None
+    if live_res is not None:
+        try:
+            month_end = mf_ledger.log_month_end(
+                run_id=run_id,
+                pipeline_sha=pipeline_sha,
+                manifest=live_res[0],
+                nav_panel=live_res[1],
+                today=TODAY,
+                path=ledger_path,
+            )
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            LOGGER.error("Month-end ledger logging failed: %s", exc)
+    n_appended = ((month_end or {}).get(mf_ledger.DEFAULT_TARGET) or {}).get("appended", 0)  # 0 most nights
     psi = (
         mf_ledger.compute_psi_live(live_res[0], live_res[1], live_res[3], TODAY, orch.cohort_model_id)
         if live_res is not None
@@ -402,7 +516,7 @@ def build_artifact(
         realizations_path=realizations_path,
         predictions_path=ledger_path,
     )
-    return dict(
+    v1 = dict(
         artifact_version=ARTIFACT_VERSION,
         generated_at=run_id,
         pipeline_sha=pipeline_sha,
@@ -413,6 +527,23 @@ def build_artifact(
         evaluation=evaluation,
         funds=records,
     )
+    # v2 is best-effort: whatever goes wrong deriving it, v1 (and the ledger append above,
+    # which the nightly commits) is returned untouched and v2 is None.
+    try:
+        admitted = set(orch.signal_horizons)
+        menu = horizon_menu(admitted, ledger_path, realizations_path, month_end)
+        keys = [m["key"] for m in menu]
+        v2 = {
+            **v1,
+            "artifact_version": ARTIFACT_V2_VERSION,
+            "default_horizon": DEFAULT_HORIZON,
+            "horizons": menu,
+            "funds": [{**r, "horizons": _v2_horizons(hz, keys, admitted)} for r, hz in zip(records, horizon_blocks)],
+        }
+    except Exception as exc:  # noqa: BLE001 — see comment above
+        LOGGER.error("mf_artifact_v2 derivation failed, v1 unaffected: %s", exc)
+        v2 = None
+    return v1, v2
 
 
 def write_artifact(artifact: Dict[str, Any], out_dir: Path = OUT_DIR) -> Path:
@@ -486,6 +617,111 @@ def _load_scheme_names(limit: Optional[int] = None) -> List[str]:
     return names[:limit] if limit else names
 
 
+def _selftest_v2(v1: Dict[str, Any], v2: Dict[str, Any], v2_forced: Dict[str, Any]) -> List[str]:
+    """The five v2 pins, each a named check so a RED says which one. Returns the REDs."""
+    from mf_agent_orchestrator import horizon_verdict
+    from mf_horizon import HORIZONS, load_stamp, signal_in_verdict
+
+    red: List[str] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        if not ok:
+            red.append(f"{name} {detail}")
+            print(f"RED  [v2 {name}] {detail}")
+
+    funds = v2.get("funds", [])
+    # 1. Superset: strip the additions, swap the version back, and v1 is what is left.
+    check("1 superset: version", v2.get("artifact_version") == "mf_artifact_v2", repr(v2.get("artifact_version")))
+    back = {k: v for k, v in v2.items() if k not in ("horizons", "default_horizon")}
+    back["artifact_version"] = v1["artifact_version"]
+    back["funds"] = [{k: v for k, v in f.items() if k != "horizons"} for f in funds]
+    check("1 superset: v2 minus additions == v1", back == v1)
+
+    # 2. Menu: exactly the registry horizons that have a stamp, shortest first; every
+    # fund carries exactly those keys, each with facts / signal / verdict.
+    want = [k for k, h in sorted(HORIZONS.items(), key=lambda kv: kv[1].months) if load_stamp(k) is not None]
+    menu = [m.get("key") for m in v2.get("horizons", [])]
+    check("2 menu keys", menu == want, f"got {menu} want {want}")
+    check("2 default horizon", v2.get("default_horizon") == "3y", repr(v2.get("default_horizon")))
+    for f in funds:
+        hz = f.get("horizons") or {}
+        check("2 fund keys", list(hz) == want, f"{f['scheme_name']}: {list(hz)}")
+        for k, e in hz.items():
+            check("2 entry shape", {"facts", "signal", "verdict"} <= set(e), f"{k}: {sorted(e)}")
+    for m in v2.get("horizons", []):
+        check("2 switch == mf_horizon", m.get("signal_in_verdict") == signal_in_verdict(m["key"]), m["key"])
+
+    # 3. Withholding: a non-admitted horizon ships WITHHELD + all-null numbers and no
+    # sixth colour; an admitted one shows numbers on OK rows only. On the real run AND a
+    # forced one (6m admitted, the rest withheld), so both cases exist whatever the stamps.
+    n_withheld = n_admitted = 0
+    for doc in (v2, v2_forced):
+        admitted = {m["key"] for m in doc.get("horizons", []) if m.get("signal_in_verdict")}
+        for f in doc.get("funds", []):
+            for k, e in (f.get("horizons") or {}).items():
+                sig, vd = e.get("signal") or {}, e.get("verdict") or {}
+                nums = {x: v for x, v in sig.items() if x != "status"}
+                if k not in admitted:
+                    n_withheld += 1
+                    check("3 withheld status", sig.get("status") == "WITHHELD", f"{k}: {sig.get('status')}")
+                    check("3 withheld nulls", all(v is None for v in nums.values()), f"{k}: {nums}")
+                    check("3 withheld signal_used", vd.get("signal_used") is False, k)
+                else:
+                    n_admitted += 1
+                    ok = sig.get("status") == "OK"
+                    check("3 admitted status is named, never null", sig.get("status") is not None, f"{k}: {sig}")
+                    check("3 admitted numbers iff OK", all((v is not None) == ok for v in nums.values()), f"{k}: {sig}")
+                    check("3 admitted signal_used", vd.get("signal_used") is True, k)
+                    want_c = "green" if ok and sig["top_decile"] else "grey"
+                    check("3 sixth colour", (vd.get("metric_colors") or {}).get("signal") == want_c, f"{k}: {vd}")
+    check("3 both cases exercised", n_withheld > 0 and n_admitted > 0, f"withheld={n_withheld} admitted={n_admitted}")
+    # an admitted horizon with no score at all (resources down, unscoreable fund) is NOT_SCORED
+    unscored = _v2_signal(None, True)
+    check("3 unscored admitted -> NOT_SCORED", unscored["status"] == "NOT_SCORED", repr(unscored))
+    check("3 unscored admitted -> numbers null", all(v is None for k, v in unscored.items() if k != "status"))
+    try:  # a missing percentile is not top decile, never a crash (it used to drop the facts too)
+        nop = _v2_signal(dict(status="OK", cohort_percentile=None, probability=0.3, cohort_n=20,
+                              imputed_features=[], n_features=10), True)
+        check("3 OK with null percentile -> not top decile", nop["top_decile"] is False, repr(nop))
+    except Exception as exc:  # noqa: BLE001 — a crash here is the RED
+        check("3 OK with null percentile -> not top decile", False, repr(exc))
+    # The sixth colour on a fixture: it can add one green, never a red.
+    rec = dict(
+        metric_colors=dict(cagr="green", excess_cagr_3y="green", sortino_3y="amber", max_dd_3y="red",
+                           consistency="amber", compliance="amber", screen_score="blue"),
+        verdict_inputs=dict(critical_breach=False, unverified=True),
+    )
+    rec_ok = {**rec, "metric_colors": {**rec["metric_colors"], "max_dd_3y": "amber"}}
+    check("3 fixture: top decile adds the third green", horizon_verdict(rec_ok, 0.5, True, True)["verdict"] == "BUY")
+    check("3 fixture: not top decile is neutral", horizon_verdict(rec_ok, 0.5, False, True)["verdict"] == "HOLD / WATCH")
+    check("3 fixture: never red", horizon_verdict(rec, 0.5, False, True)["metric_colors"]["signal"] != "red")
+    check("3 fixture: unused adds no colour", "signal" not in horizon_verdict(rec_ok, 0.5, True, False)["metric_colors"])
+    check("3 fixture: null consistency is grey", horizon_verdict(rec_ok, None, False, False)["metric_colors"]["consistency"] == "grey")
+
+    # 4. 3y parity: the 3y verdict IS today's verdict, and 3y consistency IS today's
+    # consistency wherever a rolling window exists (today's 0.5 is a no-window placeholder).
+    for f in funds:
+        e = (f.get("horizons") or {}).get("3y") or {}
+        got = (e.get("verdict") or {}).get("verdict")
+        check("4 3y verdict == signal_a.verdict", got == f["signal_a"]["verdict"], f"{f['scheme_name']}: {got}")
+        fc, sub = (e.get("facts") or {}).get("consistency"), f["signal_a"]["sub_scores"]["consistency"]
+        check("4 3y consistency == today's", fc == sub if fc is not None else sub == 0.5, f"{fc} vs {sub}")
+
+    # 5. Basis: period under 12 months, annualized from 12; serialises with allow_nan=False.
+    for f in funds:
+        for k, e in (f.get("horizons") or {}).items():
+            b = (e.get("facts") or {}).get("return_basis")
+            check("5 basis", b == ("annualized" if HORIZONS[k].months >= 12 else "period"), f"{k}: {b}")
+    try:
+        json.dumps(v2, allow_nan=False)
+        json.dumps(v2_forced, allow_nan=False)
+    except ValueError as exc:
+        check("5 allow_nan=False", False, str(exc))
+    check("5 basis exercised", any(f.get("horizons") for f in funds))
+    print(f"[selftest] mf_artifact_v2 pins: {'PASS' if not red else f'{len(red)} RED'}")
+    return red
+
+
 # ==============================================================================
 # SELFTEST — contract shape, honesty gates, gzip round-trip. Runs against real
 # cached data (a small real slice of the universe, not synthetic funds) since
@@ -496,15 +732,24 @@ def _selftest() -> None:
     import shutil
     import tempfile
 
+    global TODAY
     tmpdir = Path(tempfile.mkdtemp())
+    _today = TODAY
     try:
         ledger_path = tmpdir / "predictions.jsonl"  # never touch the real ledger/ from a selftest
         realizations_path = tmpdir / "realizations.jsonl"
 
         names = _load_scheme_names(limit=3)
         orch = MasterOrchestrator(live=True)
+        # Pin a NON-window day (M + 1: month-end NAVs still settling) so no build here
+        # appends month-end rows whatever the calendar says; M as log_month_end derives it.
+        from pandas.tseries.offsets import MonthEnd
+
+        _nav = orch.cohort_live_resources()[1]
+        _newest = max(s.dropna().index.max() for s in _nav.values() if len(s.dropna()))
+        TODAY = MonthEnd().rollback(min(_newest.normalize(), _today)) + pd.Timedelta(days=1)
         profile = InvestorProfile()
-        artifact = build_artifact(
+        artifact, v2 = build_artifacts(
             names, orch=orch, profile=profile, ledger_path=ledger_path, realizations_path=realizations_path
         )
 
@@ -531,7 +776,11 @@ def _selftest() -> None:
             "REFERENCE_STALE",
         )
         assert m["rank_stability"]["status"] == "FIRST_RUN"  # fresh tmp ledger, no prior run
-        assert m["ledger"]["rows_appended_this_run"] == artifact["coverage"]["n_ok"]
+        # 3y logs month-end anchors only (owner decision 2026-11-14): a non-window day appends
+        # nothing, yet every fund still carries its daily-scored 3y signal in v1.
+        assert m["ledger"]["rows_appended_this_run"] == 0, f"FAIL: non-window day appended {m['ledger']}"
+        assert all(f["signal_a"]["cohort_status"] for f in artifact["funds"]), "FAIL: a fund lost its 3y signal"
+        assert any(f["signal_a"]["cohort_q1_prob"] is not None for f in artifact["funds"]), "FAIL: no 3y score at all"
         print(
             f"[selftest] monitoring{{}}: realized_ic honestly null "
             f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
@@ -555,6 +804,52 @@ def _selftest() -> None:
             f"(never reddens), disclaimer present — PASS"
         )
 
+        # ---- mf_artifact_v2 (docs/design/mf_artifact_v2.md §5) — the five pins --------
+        # A forced run as well: 6m admitted, everything else withheld, whatever the stamps
+        # say today, so both the WITHHELD and the admitted case are exercised for good.
+        _real = list(orch.signal_horizons)
+        orch.signal_horizons = ["6m"]
+        try:
+            _, v2_forced = build_artifacts(
+                names, orch=orch, profile=profile, ledger_path=tmpdir / "p_forced.jsonl",
+                realizations_path=tmpdir / "r_forced.jsonl",
+            )
+        finally:
+            orch.signal_horizons = _real
+        # v2 is best-effort: forced to raise, build_artifacts still returns the same v1 and None
+        # own directory: rotated rows live beside the ledger path, so a shared tmpdir would
+        # hand this run the first run's rows and a different monitoring block
+        global horizon_menu
+        _hm = horizon_menu
+
+        def _boom(*a, **k):
+            raise RuntimeError("forced v2 failure (selftest)")
+
+        horizon_menu = _boom
+        try:
+            got = build_artifacts(names, orch=orch, profile=profile, ledger_path=tmpdir / "boom" / "predictions.jsonl",
+                                  realizations_path=tmpdir / "boom" / "realizations.jsonl")
+        except Exception as exc:  # noqa: BLE001 — a crash here is the RED
+            got = ("raised", repr(exc))
+        finally:
+            horizon_menu = _hm
+
+        def _vol(d):
+            d = json.loads(json.dumps(d))
+            d.pop("generated_at", None)
+            d["monitoring"]["ledger"].pop("path", None)
+            return d
+
+        red = []
+        if not (got[1] is None and isinstance(got[0], dict) and _vol(got[0]) == _vol(artifact)):
+            _d = [k for k in artifact if isinstance(got[0], dict) and _vol(got[0]).get(k) != _vol(artifact).get(k)]
+            print(f"RED  [v2 best-effort] a v2 failure must return (same v1, None): v2={str(got[1])[:60]} differing={_d}")
+            red.append("best-effort")
+        else:
+            print("[selftest] v2 best-effort: a forced v2 failure returns the same v1 and None — PASS")
+        red += _selftest_v2(artifact, v2, v2_forced)
+        assert not red, "FAIL: mf_artifact_v2 pins RED: " + "; ".join(red)
+
         # Re-running the same batch against the same ledger must be idempotent (dedupe).
         artifact2 = build_artifact(
             names, orch=orch, profile=profile, ledger_path=ledger_path, realizations_path=realizations_path
@@ -562,13 +857,10 @@ def _selftest() -> None:
         assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, (
             "FAIL: re-running the same anchors should append zero new ledger rows"
         )
-        # Only 3 funds in this test batch (< mf_ledger.MIN_COMMON_FOR_STABILITY=20), so
-        # the honest outcome is INSUFFICIENT_OVERLAP, not a fabricated correlation —
-        # it must still find last run's rows (prev_run_id set), just not enough of them.
+        # Nothing was logged on a non-window day, so there is no previous 3y run to compare
+        # against: FIRST_RUN, not a correlation against rows that were never written.
         rs = artifact2["monitoring"]["rank_stability"]
-        assert rs["status"] == "INSUFFICIENT_OVERLAP" and rs["n_common"] == 3 and rs["prev_run_id"], (
-            f"FAIL: expected INSUFFICIENT_OVERLAP with n_common=3, got {rs}"
-        )
+        assert rs["status"] == "FIRST_RUN", f"FAIL: expected FIRST_RUN with nothing logged, got {rs}"
         print("[selftest] ledger idempotency across repeated batch runs — PASS")
 
         required_top = {
@@ -855,6 +1147,7 @@ def _selftest() -> None:
         assert reloaded == artifact, "FAIL: gzip round-trip changed the artifact"
         print(f"[selftest] gzip round-trip ({path.stat().st_size} bytes) — PASS")
     finally:
+        TODAY = _today
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     print(
@@ -886,7 +1179,8 @@ if __name__ == "__main__":
         default=None,
         help="exit non-zero if the NEWEST prediction anchor is more than this "
         "many days behind the run date. Off by default; the scheduled job "
-        "sets it. Catches a pipeline that has stopped tracking time — a "
+        "sets it (45: 3y anchors are month-ends, up to ~41 days old on a "
+        "healthy run). Catches a pipeline that has stopped tracking time — a "
         "frozen TODAY pinned every anchor for weeks while the nightly "
         "reported success and appended nothing.",
     )
@@ -898,8 +1192,14 @@ if __name__ == "__main__":
     else:
         names = _load_scheme_names(args.limit)
         LOGGER.info("Scoring %d funds against the default investor profile...", len(names))
-        artifact = build_artifact(names)
+        artifact, v2 = build_artifacts(names)
         path = write_artifact(artifact, Path(args.out) if args.out else OUT_DIR)
+        # v2 after v1, best-effort: a v2 failure is logged, never a non-zero exit
+        try:
+            if v2 is not None:
+                LOGGER.info("Wrote %s -> %s", v2["artifact_version"], write_artifact(v2, Path(args.out) if args.out else OUT_DIR))
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            LOGGER.error("mf_artifact_v2 not written: %s", exc)
         LOGGER.info(
             "Wrote %s (%d funds, %d errors) -> %s",
             artifact["artifact_version"],
@@ -912,8 +1212,8 @@ if __name__ == "__main__":
         # The first real CI run emitted 18 of 136 funds and still reported success,
         # because nothing here ever returned non-zero — the artifact is written
         # before this check precisely so a failing run is still inspectable.
-        # Zero appended rows is normal (a same-day re-run has nothing new to say),
-        # so it is logged, not failed on. What IS reported loudly, every run.
+        # Zero appended rows is normal: 3y logs month-end anchors only, so most nights
+        # (and every re-run) append nothing. Logged, not failed on, every run.
         led = (artifact.get("monitoring") or {}).get("ledger") or {}
         LOGGER.info(
             "Ledger: %s rows total, %s appended this run, newest anchor %s",
@@ -921,11 +1221,11 @@ if __name__ == "__main__":
             led.get("rows_appended_this_run"),
             led.get("last_anchor"),
         )
-        if not led.get("rows_appended_this_run"):
-            LOGGER.warning(
-                "No new prediction rows were appended — expected on a re-run, "
-                "but if it repeats across days the anchor has stopped advancing."
-            )
+        # Warn only inside the day-3..10 month-end window when nothing was appended or
+        # already logged — read from v2's 3y entry, since v1's shape is frozen.
+        me3 = next((h["ledger"]["month_end"] for h in (v2 or {}).get("horizons", []) if h["key"] == "3y"), None)
+        if me3 and not (me3["appended"] or me3["already_logged"] or me3["pending"] or me3["skipped_month"]):
+            LOGGER.warning("Month-end window for %s: no 3y prediction rows appended or already logged.", me3["anchor"])
 
         failures = []
         # A batch that drops most of the universe is a FAILED run, not a thin one.

@@ -25,6 +25,12 @@ Splits provided:
                     EVALUATE-ONCE: mf_model enforces a stamp file so this split
                     is scored a single time, after all development freezes.
 
+Every split takes a horizon `h` (mf_horizon registry, default 3y). The module
+constants below are today's 3y values, kept as importable names; mf_horizon's
+selftest pins them equal to the 3y record, which is what the functions read.
+For 1m..1y all anchor arithmetic is in month-end steps (MonthEnd), so a window
+[t, t+h] and the embargo land exactly on the month-end anchor grid.
+
 `--selftest` demonstrates on synthetic data that a memorizable feature +
 overlapping labels inflates random-split AUC but does NOT survive purged CPCV.
 """
@@ -37,6 +43,10 @@ from typing import Iterator, Tuple
 
 import numpy as np
 import pandas as pd
+
+from mf_horizon import DEFAULT, HORIZONS, Horizon
+
+H3 = HORIZONS[DEFAULT]
 
 LABEL_HORIZON = pd.DateOffset(years=3)
 EMBARGO = pd.DateOffset(months=1)
@@ -59,54 +69,59 @@ CAUSAL_TEST_START = pd.Timestamp("2022-08-31")
 CAUSAL_TEST_END = pd.Timestamp("2023-07-31")
 
 
-def purge_train_mask(anchors: pd.Series, test_start: pd.Timestamp, test_end: pd.Timestamp) -> np.ndarray:
+def purge_train_mask(
+    anchors: pd.Series, test_start: pd.Timestamp, test_end: pd.Timestamp, h: Horizon = H3
+) -> np.ndarray:
     """True where a candidate training anchor SURVIVES purging vs the test span
-    [test_start, test_end]: its window [a, a+3y] must close before test_start,
-    or open after test_end + 3y + 1-month embargo."""
+    [test_start, test_end]: its window [a, end(a)] must close before test_start,
+    or open after end(test_end) + 1-month embargo. A window that merely touches
+    a test window is purged."""
     a = pd.to_datetime(anchors)
-    before = (a + LABEL_HORIZON) < test_start
-    after = a > (test_end + LABEL_HORIZON + EMBARGO)
+    before = h.window_end(a) < test_start
+    after = a > (h.window_end(test_end) + h.embargo)
     return np.asarray(before | after)
 
 
-def block_of(anchors: pd.Series) -> pd.Series:
-    """Block id (B1..B5) per anchor; NaN outside the modeling span."""
+def block_of(anchors: pd.Series, h: Horizon = H3) -> pd.Series:
+    """Block id (B1..Bk) per anchor; NaN outside the modeling span."""
     a = pd.to_datetime(anchors)
     out = pd.Series(pd.NA, index=a.index, dtype="object")
-    for name, (s, e) in BLOCKS.items():
+    for name, s, e in h.blocks:
         out[(a >= pd.Timestamp(s)) & (a <= pd.Timestamp(e))] = name
     return out
 
 
-def cpcv_folds(anchors: pd.Series) -> Iterator[Tuple[str, np.ndarray, np.ndarray]]:
+def cpcv_folds(anchors: pd.Series, h: Horizon = H3) -> Iterator[Tuple[str, np.ndarray, np.ndarray]]:
     """Yields (block_name, train_mask, test_mask) over positional order of
     `anchors`. Purge + embargo already applied to the train mask."""
     a = pd.to_datetime(anchors).reset_index(drop=True)
     in_model = np.asarray(a >= MODEL_START)
-    for name, (s, e) in BLOCKS.items():
+    for name, s, e in h.blocks:
         ts, te = pd.Timestamp(s), pd.Timestamp(e)
         test = in_model & np.asarray((a >= ts) & (a <= te))
-        train = in_model & ~test & purge_train_mask(a, ts, te)
+        train = in_model & ~test & purge_train_mask(a, ts, te, h)
         yield name, train, test
 
 
-def causal_holdout(anchors: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
+def causal_holdout(anchors: pd.Series, h: Horizon = H3) -> Tuple[np.ndarray, np.ndarray]:
     """(train_mask, test_mask) for the strictly-causal evaluate-once holdout."""
     a = pd.to_datetime(anchors).reset_index(drop=True)
     in_model = np.asarray(a >= MODEL_START)
-    test = in_model & np.asarray((a >= CAUSAL_TEST_START) & (a <= CAUSAL_TEST_END))
-    train = in_model & np.asarray(a <= CAUSAL_TRAIN_END) & purge_train_mask(a, CAUSAL_TEST_START, CAUSAL_TEST_END)
+    test = in_model & np.asarray((a >= h.test_start) & (a <= h.test_end))
+    train = in_model & np.asarray(a <= h.train_end) & purge_train_mask(a, h.test_start, h.test_end, h)
     return train, test
 
 
-def purged_val_split(anchors: pd.Series, train_mask: np.ndarray, val_block: str) -> Tuple[np.ndarray, np.ndarray]:
+def purged_val_split(
+    anchors: pd.Series, train_mask: np.ndarray, val_block: str, h: Horizon = H3
+) -> Tuple[np.ndarray, np.ndarray]:
     """Carve a validation slice (one block) OUT OF a training mask, purging the
     remaining training anchors against the validation span too. Used for
     hyperparameter selection and calibration — never touches any test data."""
     a = pd.to_datetime(anchors).reset_index(drop=True)
-    vs, ve = (pd.Timestamp(x) for x in BLOCKS[val_block])
+    vs, ve = (pd.Timestamp(x) for x in dict((n, (s, e)) for n, s, e in h.blocks)[val_block])
     val = train_mask & np.asarray((a >= vs) & (a <= ve))
-    inner_train = train_mask & ~val & purge_train_mask(a, vs, ve)
+    inner_train = train_mask & ~val & purge_train_mask(a, vs, ve, h)
     return inner_train, val
 
 

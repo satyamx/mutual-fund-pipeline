@@ -88,10 +88,13 @@ jobs:
       # still pointed at the old model path) is not, hence the explicit notice.
       - name: Model-layer selftests
         run: |
-          if [ ! -f model/model_artifact_cohort.json ]; then
-            echo "::error::model/model_artifact_cohort.json is missing from the checkout"
-            exit 1
-          fi
+          for k in "" _1m _3m _6m _1y; do  # one shipped model per horizon (mf_horizon.HORIZONS)
+            if [ ! -f "model/model_artifact_cohort${k}.json" ]; then
+              echo "::error::model/model_artifact_cohort${k}.json is missing from the checkout"
+              exit 1
+            fi
+          done
+          python mf_horizon.py --selftest
           if [ -f mf_cache/phase_b/features.parquet ] && [ -f mf_cache/phase_b/labels.parquet ]; then
             python mf_features.py --selftest
             python mf_infer.py --selftest
@@ -111,10 +114,11 @@ jobs:
       # 14 minutes, re-scored one historical anchor, deduped against rows that
       # already existed, appended NOTHING, and reported success — every single
       # night. TODAY now tracks the real date, and this gate makes a relapse fail
-      # loudly. 7 days tolerates a weekend plus a couple of missed runs; it does NOT
-      # fire on an ordinary same-day re-run, which legitimately appends zero rows.
+      # loudly. 45 days: since 2026-11-14 every horizon, 3y included, logs month-end
+      # anchors only (day 3..10 after M), so a healthy newest anchor is up to ~41 days
+      # old; it does NOT fire on an ordinary night, which legitimately appends zero rows.
       - name: Emit batch artifact (+ append prediction ledger)
-        run: python mf_artifact.py --max-error-rate 0.25 --max-anchor-age-days 7
+        run: python mf_artifact.py --max-error-rate 0.25 --max-anchor-age-days 45
 
       - name: Commit the prediction ledger (git-tracked, unbackfillable)
         run: |
@@ -183,7 +187,9 @@ jobs:
           TAG: latest-artifact
         run: |
           set -euo pipefail
-          SRC="$(ls -t mf_cache/artifacts/*.json.gz 2>/dev/null | head -1 || true)"
+          # v1 by name: the emit writes v2 beside it, and the app's URL must stay v1.
+          SRC="$(ls -t mf_cache/artifacts/mf_artifact_v1_*.json.gz 2>/dev/null | head -1 || true)"
+          SRC2="$(ls -t mf_cache/artifacts/mf_artifact_v2_*.json.gz 2>/dev/null | head -1 || true)"
           if [ -z "${SRC:-}" ]; then
             echo "::error::no artifact to publish — the emit step wrote nothing"
             exit 1
@@ -191,6 +197,14 @@ jobs:
           echo "publishing $SRC"
           mkdir -p dist
           cp "$SRC" dist/mf_artifact_latest.json.gz
+          # v2 is best-effort (docs/design/mf_artifact_v2.md §4) and never blocks v1. It must be
+          # THIS run's: the restored cache holds earlier nights' files, so one older than v1 is stale.
+          V2=""
+          if [ -n "${SRC2:-}" ] && ! [ "$SRC" -nt "$SRC2" ]; then
+            cp "$SRC2" dist/mf_artifact_v2_latest.json.gz && V2="dist/mf_artifact_v2_latest.json.gz"
+          else
+            echo "::warning::mf_artifact_v2 not written this run"
+          fi
 
           # The sidecar is READ OUT of the artifact, so it can never disagree with it.
           python - <<'PY'
@@ -223,4 +237,5 @@ jobs:
           gh release upload "$TAG" \
             dist/mf_artifact_latest.json.gz \
             dist/latest.json \
+            $V2 \
             --clobber

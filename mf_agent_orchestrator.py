@@ -1321,6 +1321,105 @@ SCREEN_SCORE_GREEN = 65.0
 SCREEN_SCORE_RED = 45.0
 
 
+def _band(x, good, bad, higher_better=True):
+    if not (isinstance(x, (int, float)) and np.isfinite(x)):
+        return "grey"
+    if higher_better:
+        return "green" if x >= good else ("red" if x <= bad else "amber")
+    return "green" if x <= good else ("red" if x >= bad else "amber")
+
+
+VERDICT_CORE = ("cagr", "excess_cagr_3y", "sortino_3y", "max_dd_3y", "consistency")
+BUY_CAVEAT = (
+    "screen-favourable on NAV facts only — manager skill & holdings NOT verified; not a prediction of outperformance"
+)
+
+
+def verdict_rule(greens: int, reds: int, critical_breach: bool, score_is_red: bool, unverified: bool):
+    """THE verdict rule (docs/d4_profile_verdicts.md), shared by today's verdict and
+    every per-horizon one (docs/horizons.md §6) so the two cannot drift apart."""
+    if critical_breach or reds >= 3 or (reds > greens and score_is_red):
+        v, c = "SELL / AVOID", "red"
+    elif greens >= 3 and reds == 0 and not score_is_red:
+        v, c = "BUY", "green"
+    else:
+        v, c = "HOLD / WATCH", "blue"
+    # BUY on the quant screen alone (holdings never on free data) carries its
+    # caveat visibly — the user chose "BUY allowed, caveat shown".
+    return v, c, (BUY_CAVEAT if v == "BUY" and unverified else "")
+
+
+TOP_DECILE_PERCENTILE = 0.90  # §6: the set the bar certified with lift > 1
+
+
+def top_decile(cs: Optional[Dict[str, Any]]) -> bool:
+    """OK and cohort percentile >= TOP_DECILE_PERCENTILE; a missing percentile is not top decile."""
+    pct = (cs or {}).get("cohort_percentile")
+    return bool(cs and cs.get("status") == "OK" and pct is not None and pct >= TOP_DECILE_PERCENTILE)
+
+
+HISTORY_FOR_ROLLING_MONTHS = 36  # §6: a sub-3y rolling share needs 3y of NAV to mean anything
+
+
+def horizon_facts(quant: QuantEngine, nav: pd.Series) -> Dict[str, Dict[str, Any]]:
+    """Per-horizon facts from the fund's own NAV (docs/horizons.md §6, mf_artifact_v2 §3).
+    `consistency` is today's rolling-3y consistency with the window as a parameter
+    (same quant.rolling_returns, same 1 - share-negative, same 3dp), so 3y's equals
+    today's sub-score wherever a window exists. No window -> null + a coverage flag
+    (today's sub-score falls back to a 0.5 placeholder; a fact never does)."""
+    from mf_benchmarks import _asof
+    from mf_horizon import HORIZONS
+
+    nav = nav.dropna()
+    f, l = (nav.index[0], nav.index[-1]) if len(nav) else (None, None)
+    hist = (l.year - f.year) * 12 + l.month - f.month - (l.day < f.day) if len(nav) else 0
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, h in HORIZONS.items():
+        ann, flags = h.months >= 12, []
+        start = _asof(nav, l - pd.DateOffset(months=h.months), h.tol_days)[1] if len(nav) else None
+        tr = (float(nav.iloc[-1]) / start) ** (12 / h.months if ann else 1.0) - 1.0 if start else None
+        if tr is None:
+            flags.append(f"NO_START_NAV — no NAV within {h.tol_days}d of t − {key}")
+        if h.months < HISTORY_FOR_ROLLING_MONTHS and hist < HISTORY_FOR_ROLLING_MONTHS:
+            rr = pd.Series(dtype=float)
+            flags.append(f"HISTORY_UNDER_36M — {hist} months of NAV; rolling-{key} facts need 36")
+        else:
+            rr = quant.rolling_returns(nav, h.months / 12, annualize=ann)
+            if not len(rr):
+                flags.append(f"NO_ROLLING_WINDOW — NAV shorter than one {key} window")
+        worst = rr.quantile(0.05) if len(rr) else float("nan")
+        out[key] = dict(
+            facts=dict(
+                trailing_return=float(tr) if tr is not None and np.isfinite(tr) else None,
+                return_basis="annualized" if ann else "period",
+                consistency=round(float(1.0 - rr.lt(0).mean()), 3) if len(rr) else None,
+                worst_5pct_return=float(worst) if np.isfinite(worst) else None,
+                n_windows=int(len(rr)),
+                history_months=int(hist),
+            ),
+            coverage_flags=flags,
+        )
+    return out
+
+
+def horizon_verdict(rec: Dict[str, Any], consistency: Optional[float], top_decile: Optional[bool], signal_used: bool):
+    """Today's rule over today's colours, with `consistency` swapped for the horizon's
+    own (null -> grey, neither green nor red) and — only when the horizon's signal is
+    admitted (`signal_used`) — a sixth colour: green for an OK top-decile fund, grey
+    otherwise, NEVER red (the bar tests nothing about the bottom). BUY/SELL thresholds
+    unchanged, so the signal can add one green and nothing else."""
+    mc, vi = rec["metric_colors"], rec["verdict_inputs"]
+    colors = {k: mc[k] for k in VERDICT_CORE}
+    colors["consistency"] = _band(consistency, 0.60, 0.40)
+    if signal_used:
+        colors["signal"] = "green" if top_decile else "grey"
+    greens = sum(c == "green" for c in colors.values())
+    reds = sum(c == "red" for c in colors.values())
+    v, c, cav = verdict_rule(greens, reds, vi["critical_breach"], mc["screen_score"] == "red", vi["unverified"])
+    colors.update(compliance=mc["compliance"], screen_score=mc["screen_score"])  # the gates: shown, not counted
+    return dict(verdict=v, color=c, caveat=cav, metric_colors=colors, signal_used=signal_used)
+
+
 class RecommendationEngine:
     """Fuses A/B/C/D outputs into an institutional Buy/Sell/Hold with rationale."""
 
@@ -1415,13 +1514,6 @@ class RecommendationEngine:
         # weighted screen score rides along as a SUPPORTING datapoint (one banded
         # input), never the sole determinant. HOLD is the honest default under thin
         # evidence, so missing data lands on blue, not a fabricated green.
-        def _band(x, good, bad, higher_better=True):
-            if not (isinstance(x, (int, float)) and np.isfinite(x)):
-                return "grey"
-            if higher_better:
-                return "green" if x >= good else ("red" if x <= bad else "amber")
-            return "green" if x <= good else ("red" if x >= bad else "amber")
-
         metric_colors = {
             "cagr": _band(facts["cagr"], 0.10, 0.06),
             "excess_cagr_3y": _band(facts["excess_cagr_3y"], 0.01, -0.01),
@@ -1453,7 +1545,7 @@ class RecommendationEngine:
         score_band = "green" if utility >= SCREEN_SCORE_GREEN else ("red" if utility < SCREEN_SCORE_RED else "blue")
         metric_colors["screen_score"] = score_band
 
-        core = ["cagr", "excess_cagr_3y", "sortino_3y", "max_dd_3y", "consistency"]
+        core = list(VERDICT_CORE)
         greens = sum(metric_colors[k] == "green" for k in core)
         reds = sum(metric_colors[k] == "red" for k in core)
         critical_breach = bool(critical) or bool(sentiment["red_flags"])
@@ -1472,22 +1564,10 @@ class RecommendationEngine:
         # WITHOUT reimplementing this rule. Because the shipped verdict comes from
         # the same helper, it is one of the two branches by construction — they
         # cannot drift apart. Full rationale: docs/d4_profile_verdicts.md.
+        unverified = not is_passive and macs is None
+
         def _verdict(score_is_red: bool) -> tuple[str, str, str]:
-            if critical_breach or reds >= 3 or (reds > greens and score_is_red):
-                v, c = "SELL / AVOID", "red"
-            elif greens >= 3 and reds == 0 and not score_is_red:
-                v, c = "BUY", "green"
-            else:
-                v, c = "HOLD / WATCH", "blue"
-            # BUY on the quant screen alone (holdings never on free data) carries its
-            # caveat visibly — the user chose "BUY allowed, caveat shown".
-            cav = (
-                "screen-favourable on NAV facts only — manager skill & "
-                "holdings NOT verified; not a prediction of outperformance"
-                if v == "BUY" and not is_passive and macs is None
-                else ""
-            )
-            return v, c, cav
+            return verdict_rule(greens, reds, critical_breach, score_is_red, unverified)
 
         verdict, verdict_color, verdict_caveat = _verdict(score_band == "red")
         _keys = ("verdict", "verdict_color", "verdict_caveat")
@@ -1526,6 +1606,9 @@ class RecommendationEngine:
             verdict_branches=verdict_branches,
             screen_score_red_below=SCREEN_SCORE_RED,
             metric_colors=metric_colors,
+            # the rule's two non-colour inputs, so a per-horizon verdict (horizon_verdict)
+            # re-runs the SAME rule instead of re-deriving them
+            verdict_inputs=dict(critical_breach=critical_breach, unverified=unverified),
             kind="screen-based recommendation (transparent rule over the metrics below; "
             "NAV-only data, manager skill unverified)",
             profile_fit_score=utility,
@@ -1592,6 +1675,16 @@ class MasterOrchestrator:
         self._cohort_inferencer = None
         self._cohort_engine = None
         self._cohort_unavailable: Optional[str] = None
+        # {anchor: (engine, panel)} memo for score_live: features do not depend on the
+        # horizon or the fund, so each anchor's universe panel is built once per run and
+        # serves the 3y call and every admitted horizon (docs/horizons.md §8).
+        self._cohort_panels: Dict[Any, tuple] = {}
+        # Horizons whose signal enters their verdict (mf_horizon.signal_in_verdict, read
+        # from the git-tracked stamps). Only these are scored for the per-horizon block;
+        # the rest are never scored here at all (mf_artifact ships them WITHHELD).
+        from mf_horizon import HORIZONS, signal_in_verdict
+
+        self.signal_horizons = [k for k in HORIZONS if signal_in_verdict(k)]
         # Whole-market amfi_code -> category map, built at most ONCE per orchestrator
         # (a batch run scores ~136+ funds through the same instance). Sentinel value
         # None = "not attempted yet"; {} = "attempted and unavailable", which the gate
@@ -1751,17 +1844,17 @@ class MasterOrchestrator:
                         from mf_live_score import score_live
 
                         manifest, nav_panel, inferencer, engine = res
-                        cohort_signal = score_live(
-                            dossier.amfi_code,
+                        score_kw = dict(
                             manifest=manifest,
                             nav_panel=nav_panel,
-                            inferencer=inferencer,
                             engine=engine,
                             today=TODAY,
                             universe_index=self._cohort_universe_index(),
                             nav_loader=self._candidate_nav_loader,
                             overrides=self._curated_overrides(manifest),
+                            panels=self._cohort_panels,
                         )
+                        cohort_signal = score_live(dossier.amfi_code, inferencer=inferencer, **score_kw)
                         if cohort_signal["status"] != "OK":
                             rec["coverage_flags"].append(
                                 f"COHORT SIGNAL NOT EVALUATED — {cohort_signal['status']}"
@@ -1770,6 +1863,26 @@ class MasterOrchestrator:
             except Exception as exc:  # noqa: BLE001 — see comment above
                 self.log.warning("Cohort signal errored for %r: %s", dossier.scheme_name, exc)
                 rec["coverage_flags"].append("COHORT SIGNAL NOT EVALUATED — unexpected error")
+
+            # Per-horizon facts / signal / verdict (docs/horizons.md §6). Additive: nothing
+            # above reads it, so the existing outputs cannot move. Only an ADMITTED
+            # horizon's model is scored, on the panel memo the 3y call just filled.
+            # Isolated like the cohort signal: a failure here is None, never a lost fund.
+            horizons = None
+            try:
+                horizons = horizon_facts(self.agent_c.quant, dossier.nav)
+                for key, hz in horizons.items():
+                    used, cs = key in self.signal_horizons, None
+                    if used and key == "3y":
+                        cs = cohort_signal
+                    elif used and cohort_signal is not None:  # cohort resources loaded, fund has a code
+                        from mf_infer import load_default
+
+                        cs = score_live(dossier.amfi_code, inferencer=load_default(key), **score_kw)
+                    hz.update(signal=cs, verdict=horizon_verdict(rec, hz["facts"]["consistency"], top_decile(cs), used))
+            except Exception as exc:  # noqa: BLE001 — see comment above
+                self.log.warning("Horizon block errored for %r: %s", dossier.scheme_name, exc)
+                horizons = None
 
             self.validator.register_iteration(context=f"evaluate:{dossier.scheme_name}")
             return dict(
@@ -1782,6 +1895,7 @@ class MasterOrchestrator:
                 recommendation=rec,
                 sentinel=sentinel_report,
                 cohort_signal=cohort_signal,
+                horizons=horizons,
             )
         except Exception as exc:  # noqa: BLE001 — institutional runs must degrade cleanly
             self.log.error("Evaluation failed for %r: %s\n%s", query, exc, traceback_format(exc))

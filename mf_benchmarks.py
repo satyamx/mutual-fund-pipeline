@@ -175,15 +175,23 @@ def _asof(
 
 
 def forward_return(
-    series: pd.Series, t: pd.Timestamp, years: int = 3, tol_days: int = 10, min_yrs: float = 2.75
+    series: pd.Series,
+    t: pd.Timestamp,
+    years: int = 3,
+    tol_days: int = 10,
+    min_yrs: float = 2.75,
+    end: Optional[pd.Timestamp] = None,
 ) -> Optional[ForwardReturn]:
     """Annualized forward return from `t` to `t + years`, per design §1.2:
     NAV0 = last value <= t (within tol_days); NAV1 = last value <= t+years
-    (within tol_days); require yrs >= min_yrs; else None (no sample)."""
+    (within tol_days); require yrs >= min_yrs; else None (no sample).
+    `end` overrides t+years with a horizon's own window end (mf_horizon:
+    month-end steps for 1m..1y); the defaults ARE the 3y horizon, pinned by
+    mf_horizon's selftest."""
     d0, v0 = _asof(series, t, tol_days)
     if d0 is None or v0 <= 0:
         return None
-    d1, v1 = _asof(series, t + pd.DateOffset(years=years), tol_days)
+    d1, v1 = _asof(series, t + pd.DateOffset(years=years) if end is None else end, tol_days)
     if d1 is None:
         return None
     yrs = (d1 - d0).days / 365.25

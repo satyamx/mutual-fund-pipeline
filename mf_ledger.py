@@ -68,16 +68,27 @@ import numpy as np
 import pandas as pd
 
 from mf_benchmarks import forward_return
-from mf_infer import COHORT_ARTIFACT_PATH, MODEL_DIR
+from mf_horizon import DEFAULT, HORIZONS
+from mf_infer import DEFAULT_TARGET, MODEL_DIR
 from mf_labels import COHORT_MIN_SIZE, load_manifest, load_nav_panel
-from mf_live_score import build_live_panel
+from mf_live_score import build_live_panel, score_on_panel
 
 LOGGER = logging.getLogger("MFLedger")
 
 SCHEMA_VERSION = 1
 LEDGER_DIR = Path(__file__).parent / "ledger"
+# LAYOUT (docs/horizons.md §7). Every append goes to `<root>/<target>/<YYYY-MM of
+# the row's anchor>.jsonl` (realizations: `<root>/<target>/realized/<YYYY-MM>.jsonl`),
+# root = the parent of the path a caller passes. The two paths below are kept as
+# that HANDLE and as the LEGACY single files: predictions.jsonl holds every 3y row
+# logged before rotation (68 MiB, heading for GitHub's 100 MiB push limit) and is
+# never rewritten, moved or appended to again; readers for cohort_q1 take it plus
+# cohort_q1/, readers for any other target only that target's directory, so one
+# horizon's rows can never reach another's monitoring. realizations.jsonl was never
+# written (nothing had matured) and is read the same way, for symmetry.
 PREDICTIONS_PATH = LEDGER_DIR / "predictions.jsonl"
 REALIZATIONS_PATH = LEDGER_DIR / "realizations.jsonl"
+_BY_TARGET = {h.target: h for h in HORIZONS.values()}  # maturity, divisor: looked up by a row's target
 # Hand-maintained DECLARATION, not a derived file: which model_ids are retired.
 # The predictions file is append-only precisely so a prediction can never be
 # rewritten or deleted, which means "this payload was live for twenty minutes and
@@ -133,7 +144,12 @@ PSI_MIN_UNIVERSE = 50  # below this, a decile histogram is noise, not a drift si
 PSI_MIN_FINITE = 30  # per-feature: skip rather than compute on a thin sample
 PSI_MODERATE, PSI_SIGNIFICANT = 0.10, 0.25  # standard PSI rule-of-thumb thresholds
 
-MATURITY = pd.DateOffset(years=3)  # matches forward_return's own `years=3` default
+# 3y's window, pinned == HORIZONS["3y"].window_end by mf_horizon's selftest; realization reads the registry
+MATURITY = pd.DateOffset(years=3)
+MONTH_END_WINDOW_DAYS = 10  # §7: a month-end anchor is logged only within this many days of it
+# ...and not before this many: the done-check never revisits a month, so a day-0-2 run would
+# score late publishers (fund-of-funds, international) on a stale NAV training never saw.
+MONTH_END_SETTLE_DAYS = 3
 MIN_MATURED_FOR_IC = 50
 MIN_COMMON_FOR_STABILITY = 20
 
@@ -188,13 +204,32 @@ def _dedupe_key_of(row: dict, dedupe_key: tuple) -> Optional[tuple]:
         return None
 
 
-def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY) -> int:
-    """Append-only, idempotent on `dedupe_key`, crash-safe (seals a torn tail
-    before writing, fsyncs after). Returns the number of NEW rows written."""
+def _target_files(handle: Path, target: str, sub: str = "") -> List[Path]:
+    """The files holding `target`'s rows: the legacy single file (cohort_q1 only)
+    first, then the target's rotated month files in order."""
+    legacy = [handle] if target == DEFAULT_TARGET else []
+    return legacy + sorted((handle.parent / target / sub).glob("*.jsonl"))
+
+
+def _read_target(handle: Path, target: str, sub: str = "") -> List[dict]:
+    return [r for f in _target_files(handle, target, sub) for r in read_jsonl(f)]
+
+
+def append_predictions(
+    rows: Sequence[dict], path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY, sub: str = ""
+) -> int:
+    """Append-only, idempotent on `dedupe_key` across the legacy file AND the
+    rotated files, crash-safe (seals a torn tail before writing, fsyncs after).
+    Each row goes to `path.parent/<target>/<sub>/<YYYY-MM of anchor>.jsonl`;
+    `path` itself is only ever read. Returns the number of NEW rows written."""
     if not rows:
         return 0
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = {k for k in (_dedupe_key_of(r, dedupe_key) for r in read_jsonl(path)) if k is not None}
+    existing = {
+        k
+        for t in {r["target"] for r in rows}
+        for k in (_dedupe_key_of(r, dedupe_key) for r in _read_target(path, t, sub))
+        if k is not None
+    }
     # Dedupe against the incoming batch too, not just the file. On 2026-08-03 a
     # resolver collision handed this function two rows with an identical
     # (amfi_code, target, anchor) inside ONE run; both were written, because
@@ -212,6 +247,16 @@ def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH, dedu
         to_write.append(r)
     if not to_write:
         return 0
+    by_file: Dict[Path, List[dict]] = {}
+    for r in to_write:
+        by_file.setdefault(path.parent / r["target"] / sub / f"{str(r['anchor'])[:7]}.jsonl", []).append(r)
+    for f, group in by_file.items():
+        _append_lines(f, group)
+    return len(to_write)
+
+
+def _append_lines(path: Path, rows: List[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > 0:
         with open(path, "rb") as fh:
             fh.seek(-1, os.SEEK_END)
@@ -219,15 +264,17 @@ def append_predictions(rows: Sequence[dict], path: Path = PREDICTIONS_PATH, dedu
                 with open(path, "a", encoding="utf-8") as fh2:
                     fh2.write("\n")
     with open(path, "a", encoding="utf-8") as fh:
-        for r in to_write:
+        for r in rows:
             fh.write(json.dumps(r, sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
-    return len(to_write)
 
 
-def load_predictions(path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY) -> List[dict]:
-    """`read_jsonl` plus the ledger's own uniqueness invariant, enforced on READ.
+def load_predictions(
+    path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_KEY, target: str = DEFAULT_TARGET
+) -> List[dict]:
+    """`target`'s rows (legacy file + rotated files, see LAYOUT) plus the ledger's
+    own uniqueness invariant, enforced on READ.
 
     Every consumer of the prediction ledger wants "one row per prediction", which
     is what append_predictions promises. The 2026-08-03 run broke that promise
@@ -239,7 +286,7 @@ def load_predictions(path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_K
     for `logged_at`. Rows with no extractable key are kept — they are already
     unmatchable and dropping them would lose data rather than restore an invariant.
     """
-    rows = read_jsonl(path)
+    rows = _read_target(path, target)
     seen, out, dropped = set(), [], 0
     for r in rows:
         k = _dedupe_key_of(r, dedupe_key)
@@ -260,8 +307,8 @@ def load_predictions(path: Path = PREDICTIONS_PATH, dedupe_key: tuple = DEDUPE_K
     return out
 
 
-def ledger_stats(path: Path = PREDICTIONS_PATH) -> Dict[str, Any]:
-    rows = load_predictions(path)
+def ledger_stats(path: Path = PREDICTIONS_PATH, target: str = DEFAULT_TARGET) -> Dict[str, Any]:
+    rows = load_predictions(path, target=target)
     if not rows:
         return dict(rows_total=0, first_anchor=None, last_anchor=None, n_runs=0)
     anchors = sorted(r["anchor"] for r in rows)
@@ -383,17 +430,20 @@ def _bin_proportions(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts / counts.sum()
 
 
-def build_psi_reference(out: Path = PSI_REFERENCE_PATH) -> dict:
+def build_psi_reference(out: Optional[Path] = None, horizon: str = DEFAULT) -> dict:
     """Training-time only: empirical decile edges + reference bin proportions
     per monitored feature, over the cohort model's ACTUAL training rows (same
     filter mf_model.load_cohort_dataset applies). Rebuild whenever the cohort
     model retrains — stamped with that artifact's version so monitoring-time
     code can detect a stale reference rather than silently comparing against
-    the wrong model's training population."""
+    the wrong model's training population. Per horizon: its own training rows
+    (mf_cache/phase_b/<key>/), artifact and output (model/psi_reference_<key>.json)."""
     import mf_model as M  # sklearn-adjacent imports stay out of the monitoring/scoring path
 
-    df, _ = M.load_cohort_dataset()
-    artifact = json.loads(COHORT_ARTIFACT_PATH.read_text(encoding="utf-8"))
+    h = HORIZONS[horizon]
+    out = out or h.psi_reference_path
+    df, _ = M.load_cohort_dataset(h)
+    artifact = json.loads(h.artifact_path.read_text(encoding="utf-8"))
     ref: Dict[str, Any] = dict(
         model_id=artifact["version"], created=datetime.now(timezone.utc).isoformat(), features={}
     )
@@ -510,14 +560,18 @@ def compute_psi_live(
 # math, over the FROZEN cohort_codes logged at prediction time.
 # ==============================================================================
 def _realize_one(row: dict, nav_panel: Dict[str, pd.Series]) -> dict:
+    """The row's own horizon (registry, by `target`): its window end, minimum
+    window and tolerance — the exact forward_return call mf_labels trained on."""
+    h = _BY_TARGET[row["target"]]
     anchor = pd.Timestamp(row["anchor"])
+    kw = dict(tol_days=h.tol_days, min_yrs=h.min_window_years, end=h.window_end(anchor))
     own_series = nav_panel.get(row["amfi_code"])
-    own_fwd = forward_return(own_series, anchor) if own_series is not None else None
+    own_fwd = forward_return(own_series, anchor, **kw) if own_series is not None else None
 
     peer_fwds: List[float] = []
     for peer in row["cohort_codes"]:
         s = nav_panel.get(peer)
-        fr = forward_return(s, anchor) if s is not None else None
+        fr = forward_return(s, anchor, **kw) if s is not None else None
         if fr is not None:
             peer_fwds.append(fr.value)
 
@@ -557,21 +611,23 @@ def realize_matured_predictions(
     manifest: Optional[pd.DataFrame] = None,
     nav_panel: Optional[Dict[str, pd.Series]] = None,
     superseded_path: Path = SUPERSEDED_PATH,
+    target: str = DEFAULT_TARGET,
 ) -> Dict[str, Any]:
     """Offline job — run periodically (e.g. monthly cron), NOT from the live
     batch path. Idempotent: already-realized rows are skipped, and so are
-    predictions from any model named in `superseded_path`."""
+    predictions from any model named in `superseded_path`. One target per call;
+    outcomes append to `realizations_path.parent/<target>/realized/<YYYY-MM>.jsonl`."""
     today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
     manifest = manifest if manifest is not None else load_manifest()
     nav_panel = nav_panel if nav_panel is not None else load_nav_panel(manifest)
 
-    predictions = load_predictions(predictions_path)
+    predictions = load_predictions(predictions_path, target=target)
     # Realization rows written before model_id joined DEDUPE_KEY have no such
     # field, so keying them strictly would drop them from `already` and realize
     # every one of them a second time. Match those on the legacy 3-tuple as well.
     _legacy = ("amfi_code", "target", "anchor")
     already, already_legacy = set(), set()
-    for r in read_jsonl(realizations_path):
+    for r in load_realizations(realizations_path, target):
         k = _dedupe_key_of(r, DEDUPE_KEY)
         if k is not None:
             already.add(k)
@@ -582,7 +638,7 @@ def realize_matured_predictions(
 
     retired = load_superseded(superseded_path)
     new_rows: List[dict] = []
-    n_pending = n_superseded = 0
+    n_pending = n_superseded = n_unknown = 0
     for row in predictions:
         # A retired payload's predictions stay in the file as a record of what was
         # actually emitted, but they are never graded: realizing a model that was
@@ -591,27 +647,47 @@ def realize_matured_predictions(
         if row.get("model_id") in retired:
             n_superseded += 1
             continue
+        # Maturity is the row's own horizon's. A target the registry does not know
+        # has no window to wait for and no label to compute — counted, never guessed.
+        h = _BY_TARGET.get(row.get("target"))
+        if h is None:
+            n_unknown += 1
+            continue
         key = _dedupe_key_of(row, DEDUPE_KEY)
         if key is not None and key in already:
             continue
         legacy_key = _dedupe_key_of(row, _legacy)
         if legacy_key is not None and legacy_key in already_legacy:
             continue
-        if today < pd.Timestamp(row["anchor"]) + MATURITY:
+        # Only once the fund's NAV reaches the window end, or the end is more than
+        # the horizon's tolerance in the past: a job running on the 1st would
+        # otherwise close a 1m window on a NAV a day or two short of it, for good.
+        end = h.window_end(pd.Timestamp(row["anchor"]))
+        own = nav_panel.get(row["amfi_code"])
+        reached = own is not None and len(own.dropna()) > 0 and own.dropna().index.max() >= end
+        if today < end or (not reached and (today - end).days <= h.tol_days):
             n_pending += 1
             continue
         new_rows.append(_realize_one(row, nav_panel))
     if n_superseded:
         LOGGER.info("Skipped %d prediction(s) from superseded model(s): %s", n_superseded, ", ".join(sorted(retired)))
+    if n_unknown:
+        LOGGER.warning("Skipped %d prediction(s) whose target is not in mf_horizon.HORIZONS.", n_unknown)
 
-    n_appended = append_predictions(new_rows, path=realizations_path, dedupe_key=DEDUPE_KEY)
+    n_appended = append_predictions(new_rows, path=realizations_path, dedupe_key=DEDUPE_KEY, sub="realized")
     return dict(
         n_predictions=len(predictions),
         n_pending=n_pending,
         n_matured_this_run=len(new_rows),
         n_newly_realized=n_appended,
         n_superseded_skipped=n_superseded,
+        n_unknown_target=n_unknown,
     )
+
+
+def load_realizations(path: Path = REALIZATIONS_PATH, target: str = DEFAULT_TARGET) -> List[dict]:
+    """`target`'s realized outcomes: the legacy file (cohort_q1 only) + its rotated files."""
+    return _read_target(path, target, "realized")
 
 
 def load_superseded(path: Path = SUPERSEDED_PATH) -> Dict[str, dict]:
@@ -635,7 +711,7 @@ def load_superseded(path: Path = SUPERSEDED_PATH) -> Dict[str, dict]:
 
 
 def current_model_id(
-    predictions_path: Path = PREDICTIONS_PATH, superseded_path: Path = SUPERSEDED_PATH
+    predictions_path: Path = PREDICTIONS_PATH, superseded_path: Path = SUPERSEDED_PATH, target: str = DEFAULT_TARGET
 ) -> Optional[str]:
     """The model_id of the most recent NON-superseded prediction run.
 
@@ -644,7 +720,7 @@ def current_model_id(
     DEDUPE_KEY), so anything that pools them reports an accuracy figure
     describing no model that exists. A retired model must not be that one.
     """
-    rows = load_predictions(predictions_path)
+    rows = load_predictions(predictions_path, target=target)
     retired = load_superseded(superseded_path)
     live = [r for r in rows if r.get("model_id") not in retired]
     if not live:
@@ -658,16 +734,18 @@ def realized_summary(
     predictions_path: Path = PREDICTIONS_PATH,
     model_id: Optional[str] = None,
     superseded_path: Path = SUPERSEDED_PATH,
+    target: str = DEFAULT_TARGET,
 ) -> Dict[str, Any]:
     """`model_id` scopes every count and the IC to one model; None means "the
     model behind the newest predictions". Pooling models here would average two
     different questions — each row froze its own cohort_codes, so even
     y_realized can differ between models for the same fund and anchor."""
-    preds = load_predictions(predictions_path)
-    model_id = model_id or current_model_id(predictions_path, superseded_path)
+    h = _BY_TARGET[target]
+    preds = load_predictions(predictions_path, target=target)
+    model_id = model_id or current_model_id(predictions_path, superseded_path, target)
     if model_id is not None:
         preds = [r for r in preds if r.get("model_id") == model_id]
-    rows = [r for r in read_jsonl(realizations_path) if model_id is None or r.get("model_id") == model_id]
+    rows = [r for r in load_realizations(realizations_path, target) if model_id in (None, r.get("model_id"))]
     realized = [r for r in rows if r["status"] == "REALIZED"]
     dead = sum(1 for r in rows if r["status"] == "DEAD_OR_GAP")
     thin = sum(1 for r in rows if r["status"] == "THIN_AT_REALIZATION")
@@ -675,7 +753,7 @@ def realized_summary(
     earliest_maturity = None
     if preds:
         first_anchor = min(pd.Timestamp(r["anchor"]) for r in preds)
-        earliest_maturity = str((first_anchor + MATURITY).date())
+        earliest_maturity = str(h.window_end(first_anchor).date())
 
     if not rows:
         status, value = "PENDING_MATURITY", None
@@ -693,10 +771,80 @@ def realized_summary(
         n_realized=len(realized),
         n_dead_or_gap=dead,
         n_thin_at_realization=thin,
-        effective_n=round(len(realized) / 30) if realized else 0,
+        effective_n=round(len(realized) / h.divisor) if realized else 0,
         earliest_maturity=earliest_maturity,
         model_id=model_id,
     )
+
+
+def log_month_end(
+    *,
+    run_id: str,
+    pipeline_sha: str,
+    manifest: pd.DataFrame,
+    nav_panel: Dict[str, pd.Series],
+    today: pd.Timestamp,
+    path: Path = PREDICTIONS_PATH,
+    inferencers: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Month-end rows for every horizon, 3y included (docs/horizons.md §7; 3y by owner
+    decision 2026-11-14) — the forward
+    test samples what the holdout sampled. M = the latest month-end <= the newest
+    NAV in `nav_panel`. A target already holding rows at M for its model id is
+    done; else, if `today` is MONTH_END_SETTLE_DAYS..MONTH_END_WINDOW_DAYS after M (earlier
+    is `pending`: NAVs still settling, nothing written, not a skip), ONE panel is built
+    as of M (NAV <= M only — nothing after M can reach a row) and every horizon
+    scores it: one row per fund that is OK and whose own as-of NAV is within that
+    horizon's tolerance of M, anchor = M. Later than that the month is skipped and
+    counted, never backfilled. `inferencers`: optional
+    {horizon key: CohortInferencer}, else the process singletons.
+    Returns {target: {anchor, appended, skipped_funds, skipped_month, already_logged, pending}}."""
+    from pandas.tseries.offsets import MonthEnd
+
+    from mf_infer import load_default
+
+    today = pd.Timestamp(today).normalize()
+    newest = max(s.dropna().index.max() for s in nav_panel.values() if len(s.dropna()))
+    # capped at today: one future-dated NAV row must never mint a future anchor in an append-only file
+    M = MonthEnd().rollback(min(newest.normalize(), today))
+    anchor = str(M.date())
+    out: Dict[str, Dict[str, Any]] = {}
+    todo = []
+    for h in HORIZONS.values():
+        # per-target reader: 3y's rows at M may also sit in the legacy predictions.jsonl
+        done = any(r.get("anchor") == anchor and r.get("model_id") == h.model_id for r in _read_target(path, h.target))
+        late = (today - M).days > MONTH_END_WINDOW_DAYS
+        pending = not done and (today - M).days < MONTH_END_SETTLE_DAYS  # not a skip: a later run logs it
+        out[h.target] = dict(
+            anchor=anchor,
+            appended=0,
+            skipped_funds=0,
+            skipped_month=int(late and not done),
+            already_logged=done,
+            pending=pending,
+        )
+        if not done and not late and not pending:
+            todo.append(h)
+    if not todo:
+        return out
+
+    as_of = {c: s.loc[:M] for c, s in nav_panel.items()}
+    engine, panel = build_live_panel(manifest, as_of, M)
+    last = {c: s.dropna().index.max() for c, s in as_of.items() if len(s.dropna())}
+    for h in todo:
+        inf = (inferencers or {}).get(h.key) or load_default(h.key)
+        rows, skipped = [], 0
+        for code in manifest["amfi_code"]:
+            stale = (M - last[code]).days if code in last else None
+            ok = stale is not None and stale <= h.tol_days  # the fund's OWN as-of NAV, this horizon's tolerance
+            cs = score_on_panel(code, engine, panel, inf, M, stale) if ok else None
+            row = build_row(code, cs, run_id=run_id, pipeline_sha=pipeline_sha, model_id=h.model_id)
+            if row is None:
+                skipped += 1
+            else:
+                rows.append(row)
+        out[h.target].update(appended=append_predictions(rows, path=path), skipped_funds=skipped)
+    return out
 
 
 # ==============================================================================
@@ -710,14 +858,16 @@ def monitoring_block(
     psi: dict,
     predictions_path: Path = PREDICTIONS_PATH,
     realizations_path: Path = REALIZATIONS_PATH,
+    target: str = DEFAULT_TARGET,
 ) -> Dict[str, Any]:
-    """`current_rows`: the rows THIS run scored (in memory, before dedup) — NOT
+    """Scoped to ONE target, cohort_q1 by default — the frozen mf_artifact_v1 block.
+    `current_rows`: the rows THIS run scored (in memory, before dedup) — NOT
     re-derived by looking up run_id in the ledger file. Rows unchanged from a
     prior run are deliberately NOT re-appended (append-only + dedupe), so they
     never carry the new run_id in the file; looking them up by run_id there
     would find nothing on an ordinary no-op rerun and starve rank_stability."""
-    all_rows = load_predictions(predictions_path)
-    stats = ledger_stats(predictions_path)
+    all_rows = load_predictions(predictions_path, target=target)
+    stats = ledger_stats(predictions_path, target)
     # Scope the comparison to the model this run actually scored with, so the
     # previous run of a DIFFERENT model is never mistaken for a previous run.
     this_model = next((r.get("model_id") for r in current_rows if r.get("model_id")), None)
@@ -733,11 +883,11 @@ def monitoring_block(
             last_anchor=stats["last_anchor"],
             path=str(predictions_path),
         ),
-        realized_ic=realized_summary(realizations_path, predictions_path),
+        realized_ic=realized_summary(realizations_path, predictions_path, target=target),
         psi=psi,
         rank_stability=rank_stability(current_rows, previous),
         note="realized_ic is structurally unmeasurable before the first logged anchor + "
-        "~3y; no interim proxy is published (untested horizon).",
+        f"~{_BY_TARGET[target].key}; no interim proxy is published (untested horizon).",
     )
 
 
@@ -750,6 +900,8 @@ def _selftest() -> None:
 
     tmpdir = Path(tempfile.mkdtemp())
     try:
+        # Every case gets its own root: appends rotate into <root>/<target>/, so two
+        # cases sharing a directory would read each other's rows.
         pred_path = tmpdir / "predictions.jsonl"
         real_path = tmpdir / "realizations.jsonl"
 
@@ -775,24 +927,25 @@ def _selftest() -> None:
         assert n == 1
         n2 = append_predictions([row], path=pred_path)
         assert n2 == 0, "FAIL: re-appending the same row should be a no-op (dedupe)"
-        assert len(read_jsonl(pred_path)) == 1
+        assert len(_read_target(pred_path, "cohort_q1")) == 1
         print("[selftest] append/read round-trip + idempotency — PASS")
 
         # ---- idempotency WITHIN one batch, not just across calls -------------
         # The 2026-08-03 run passed two rows with the same (amfi_code, target,
         # anchor) in a single call and wrote both, because `existing` was a
         # snapshot of the file taken before the loop.
-        dup_path = tmpdir / "intra_batch.jsonl"
+        dup_path = tmpdir / "intra" / "predictions.jsonl"
         twin = dict(row, logged_at="2026-08-03T19:22:26+00:00")  # same key, later stamp
         n_dup = append_predictions([row, twin], path=dup_path)
         assert n_dup == 1, f"FAIL: one key twice in ONE batch must write once, wrote {n_dup}"
-        assert len(read_jsonl(dup_path)) == 1
+        assert len(_read_target(dup_path, "cohort_q1")) == 1
         print("[selftest] intra-batch dedupe: same key twice in one call writes once — PASS")
 
         # ---- load_predictions collapses duplicates already on disk ----------
         # Restoring the invariant on read, because the historical duplicates are
         # in an append-only git-tracked file and deleting them would hide the bug.
-        legacy_path = tmpdir / "legacy_dupes.jsonl"
+        legacy_path = tmpdir / "dupes" / "predictions.jsonl"
+        legacy_path.parent.mkdir()
         with open(legacy_path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
             fh.write(json.dumps(twin, sort_keys=True) + "\n")
@@ -806,7 +959,7 @@ def _selftest() -> None:
         # The shipping bug this locks: with model_id outside the dedupe key, the
         # first model to write an anchor blocked every later one, and rolling out
         # phase_b_v2 silently dropped 117 of 348 predictions.
-        two_model_path = tmpdir / "two_models.jsonl"
+        two_model_path = tmpdir / "two" / "predictions.jsonl"
         v1 = build_row("A", cs_ok, run_id="r1", pipeline_sha="x", model_id="phase_b_v1_cohort")
         v2 = build_row("A", cs_ok, run_id="r2", pipeline_sha="x", model_id="phase_b_v2_cohort")
         assert append_predictions([v1], path=two_model_path) == 1
@@ -825,11 +978,11 @@ def _selftest() -> None:
         # describing none of them — and would trip MIN_MATURED_FOR_IC early.
         # `none_sup` keeps this hermetic: without it the assertion reads the REAL
         # ledger/superseded_models.json and changes meaning as models retire.
-        none_sup = tmpdir / "no_superseded.json"
+        none_sup = tmpdir / "no_superseded.json"  # never created
         assert current_model_id(two_model_path, none_sup) == "phase_b_v2_cohort", (
             "FAIL: current_model_id must follow the newest run, not the first row"
         )
-        scoped = tmpdir / "scoped_real.jsonl"
+        scoped = tmpdir / "two" / "realizations.jsonl"
         with open(scoped, "w", encoding="utf-8") as fh:
             for mid, yreal in (("phase_b_v1_cohort", True), ("phase_b_v2_cohort", False)):
                 fh.write(
@@ -868,7 +1021,8 @@ def _selftest() -> None:
         print("[selftest] rank_stability never compares across model_id — PASS")
 
         # ---- legacy realization rows are not realized twice ------------------
-        legacy_real = tmpdir / "legacy_real.jsonl"
+        legacy_real = tmpdir / "legreal" / "realizations.jsonl"
+        legacy_real.parent.mkdir()
         with open(legacy_real, "w", encoding="utf-8") as fh:  # pre-model_id schema
             fh.write(
                 json.dumps(
@@ -902,7 +1056,7 @@ def _selftest() -> None:
         assert current_model_id(two_model_path, sup_path) == "phase_b_v1_cohort", (
             "FAIL: a superseded model must never be the model outcomes are scoped to"
         )
-        empty_real = tmpdir / "no_real.jsonl"
+        empty_real = tmpdir / "sup" / "realizations.jsonl"
         res = realize_matured_predictions(
             today=pd.Timestamp("2099-01-01"),
             predictions_path=two_model_path,
@@ -923,19 +1077,22 @@ def _selftest() -> None:
         print("[selftest] superseded models are skipped for grading, rows retained — PASS")
 
         # ---- torn-tail recovery ---------------------------------------------
-        with open(pred_path, "a", encoding="utf-8") as fh:
+        # In the month file appends actually go to — the legacy file is never written.
+        month_file = tmpdir / "cohort_q1" / "2020-01.jsonl"
+        with open(month_file, "a", encoding="utf-8") as fh:
             fh.write('{"amfi_code": "B", "target": "cohort_q1"')  # deliberately truncated
-        recovered = read_jsonl(pred_path)
+        recovered = read_jsonl(month_file)
         assert len(recovered) == 1, "FAIL: torn trailing line should be skipped, not crash"
         row2 = build_row("B", cs_ok, run_id="run1", pipeline_sha="deadbeef", model_id="test_v1")
         n3 = append_predictions([row2], path=pred_path)
         assert n3 == 1
-        rows_after = read_jsonl(pred_path)
+        rows_after = read_jsonl(month_file)
         assert len(rows_after) == 2 and {r["amfi_code"] for r in rows_after} == {"A", "B"}
         print("[selftest] torn-tail recovery: seals + appends correctly — PASS")
 
         # ---- malformed-but-valid-JSON row must not crash dedupe -------------
-        malformed_path = tmpdir / "malformed.jsonl"
+        malformed_path = tmpdir / "malformed" / "predictions.jsonl"
+        malformed_path.parent.mkdir()
         with open(malformed_path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"amfi_code": "X", "no_target_or_anchor_here": True}) + "\n")
         n4 = append_predictions([row], path=malformed_path)  # 'row' has a real dedupe key
@@ -1010,6 +1167,24 @@ def _selftest() -> None:
         f"matches stored labels.parquet exactly — PASS"
     )
 
+    # ...and a month-end horizon realizes on ITS window, not 3y's: same replay
+    # against the 1m labels (mf_cache/phase_b/1m/, read only).
+    from mf_horizon import HORIZONS
+
+    h1 = HORIZONS["1m"]
+    if not h1.labels_path.exists():
+        # research output, never on CI's cache (only 3y's parquets ever are): skip this
+        # one case loudly rather than crash the nightly's model-layer gate
+        print(f"[selftest] SKIP Test D 1m replay — {h1.labels_path} absent (cold cache)")
+    else:
+        lab1 = pd.read_parquet(h1.labels_path)
+        st1 = lab1[(lab1["anchor"] == anchor) & lab1["y_cohort_q1"].notna()].iloc[0]
+        peers1 = resolver.groups[resolver._group_key(st1["amfi_code"])]
+        r1 = _realize_one(dict(fake_row, amfi_code=st1["amfi_code"], target=h1.target, cohort_codes=peers1), nav_panel)
+        assert r1["status"] == "REALIZED" and r1["n_peer_r_fwd"] == int(st1["cohort_n"]), (r1, st1["cohort_n"])
+        assert abs(r1["own_r_fwd"] - float(st1["R_fwd"])) < 1e-9 and r1["y_realized"] == bool(st1["y_cohort_q1"]), r1
+        print(f"[selftest] Test D (1m replay @ {anchor.date()}, fund {st1['amfi_code']}): matches 1m labels — PASS")
+
     # ---- PSI: null case (live == reference itself) and shock case ----------
     import mf_model as M
 
@@ -1053,10 +1228,207 @@ def _selftest() -> None:
         f"shuffled={stab_shuf['spearman']} — PASS"
     )
 
+    _selftest_horizons(manifest, nav_panel)
+
     print(
         "[selftest] PASS — ledger append/read is crash-safe and idempotent, realization "
         "replays real stored training labels exactly, PSI/rank_stability degrade honestly"
     )
+
+
+# ==============================================================================
+# SELFTEST — per-horizon ledger (docs/horizons.md §7). Each takes a fresh temp
+# root; none can reach the real ledger/.
+# ==============================================================================
+_CS = dict(
+    status="OK",
+    target="cohort_q1",
+    probability=0.4,
+    cohort_percentile=0.6,
+    cohort_key="('category', 'Flexi Cap')",
+    cohort_n=10,
+    universe_n=130,
+    anchor="2020-01-31",
+    cohort_codes=["A", "B", "C", "D"],
+    signal_context={},
+    imputed_features=[],
+    features={"cagr_1y": 0.1},
+)
+
+
+def _row(code: str, run_id: str, model_id: str, **cs) -> dict:
+    return build_row(code, dict(_CS, **cs), run_id=run_id, pipeline_sha="x", model_id=model_id)
+
+
+def _t_isolation(tmp: Path) -> None:
+    """Another target's rows never move cohort_q1's model id or monitoring block."""
+    p, real, sup = tmp / "predictions.jsonl", tmp / "realizations.jsonl", tmp / "none.json"
+    q1 = [_row(c, "r1", "phase_b_v5_cohort", anchor="2026-10-30") for c in "ABC"]
+    append_predictions(q1, path=p)
+
+    def snap():
+        mb = monitoring_block(
+            run_id="r1", rows_appended=0, current_rows=q1, psi={}, predictions_path=p, realizations_path=real
+        )
+        return current_model_id(p, sup), mb
+
+    before = snap()
+    other = [_row(c, "r2", "phase_b_1m_v1_cohort", target="cohort_q1_1m", anchor="2026-10-31") for c in "ABCD"]
+    append_predictions(other, path=p)
+    assert snap() == before, f"FAIL: another target's rows leaked into cohort_q1: {before} -> {snap()}"
+    print("[selftest] isolation: a 1m target's rows leave cohort_q1's model id + monitoring block identical — PASS")
+
+
+def _t_rotation(tmp: Path) -> None:
+    """New 3y rows land in <root>/cohort_q1/<YYYY-MM>.jsonl; the legacy file is
+    never written again, and a row already in it is never appended twice."""
+    p = tmp / "predictions.jsonl"
+    old = _row("A", "r0", "phase_b_v5_cohort", anchor="2026-10-30")
+    p.write_text(json.dumps(old, sort_keys=True) + "\n", encoding="utf-8")
+    legacy = p.read_bytes()
+    new = _row("B", "r1", "phase_b_v5_cohort", anchor="2026-11-13")
+    n = append_predictions([old, new], path=p)
+    assert n == 1, f"FAIL: expected only the new row appended, got {n}"
+    assert p.read_bytes() == legacy, "FAIL: the legacy predictions file was written to"
+    f = tmp / "cohort_q1" / "2026-11.jsonl"
+    assert f.exists() and [r["amfi_code"] for r in read_jsonl(f)] == ["B"], "FAIL: new row not rotated"
+    assert append_predictions([old, new], path=p) == 0 and p.read_bytes() == legacy
+    assert sorted(r["amfi_code"] for r in load_predictions(p)) == ["A", "B"], "FAIL: reader must take legacy + dir"
+    print("[selftest] rotation: new 3y row -> cohort_q1/2026-11.jsonl, legacy bytes unchanged, no re-append — PASS")
+
+
+def _t_unknown_target(tmp: Path) -> None:
+    """A row whose target is not in the registry is skipped and counted, never guessed."""
+    p = tmp / "predictions.jsonl"
+    bad = _row("A", "r1", "m_2w", target="cohort_q1_2w", anchor="2020-01-31")
+    p.write_text(json.dumps(bad, sort_keys=True) + "\n", encoding="utf-8")
+    res = realize_matured_predictions(
+        today=pd.Timestamp("2099-01-01"),
+        predictions_path=p,
+        realizations_path=tmp / "realizations.jsonl",
+        manifest=pd.DataFrame(),
+        nav_panel={},
+        superseded_path=tmp / "none.json",
+    )
+    assert res.get("n_unknown_target") == 1 and res["n_matured_this_run"] == 0, f"FAIL: {res}"
+    print("[selftest] unregistered target: skipped and counted (n_unknown_target=1), not realized — PASS")
+
+
+def _t_maturity(tmp: Path) -> None:
+    """Window end per target (3y anchor + 3y, 1m anchor + MonthEnd(1)), realized only
+    once the fund's NAV reaches it or it is more than the tolerance in the past."""
+    cases = [  # (target, anchor, today, last NAV date, matured?)
+        ("cohort_q1", "2020-03-31", "2023-03-30", "2023-03-30", False),  # before window end
+        ("cohort_q1", "2020-03-31", "2023-03-31", "2023-03-31", True),  # NAV reaches it
+        ("cohort_q1", "2020-03-31", "2023-04-05", "2023-03-30", False),  # NAV short, 5d <= tol 10
+        ("cohort_q1", "2020-03-31", "2023-04-11", "2023-03-30", True),  # 11d > tol: realize (gap)
+        ("cohort_q1_1m", "2026-03-31", "2026-04-29", "2026-04-29", False),
+        ("cohort_q1_1m", "2026-03-31", "2026-04-30", "2026-04-30", True),
+        ("cohort_q1_1m", "2026-03-31", "2026-05-04", "2026-04-29", False),  # 4d <= tol 7
+        ("cohort_q1_1m", "2026-03-31", "2026-05-08", "2026-04-29", True),  # 8d > tol 7
+    ]
+    for i, (target, anchor, today, last, want) in enumerate(cases):
+        root = tmp / str(i)
+        p = root / "predictions.jsonl"
+        append_predictions([_row("A", "r1", "m", target=target, anchor=anchor)], path=p)
+        nav = {"A": pd.Series(1.0, index=pd.bdate_range("2019-01-01", last))}
+        kw = {} if target == DEFAULT_TARGET else dict(target=target)
+        res = realize_matured_predictions(
+            today=pd.Timestamp(today),
+            predictions_path=p,
+            realizations_path=root / "realizations.jsonl",
+            manifest=pd.DataFrame(),
+            nav_panel=nav,
+            superseded_path=root / "none.json",
+            **kw,
+        )
+        assert res["n_matured_this_run"] == int(want), f"FAIL: case {i} {target} {anchor} today={today} {res}"
+    print("[selftest] maturity per target: 3y at anchor+3y, 1m at anchor+MonthEnd(1), once NAV reaches it — PASS")
+
+
+def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series]) -> None:
+    """Month-end logging: anchor = M, as-of M only, once per month, skipped after 10 days."""
+    from pandas.tseries.offsets import MonthEnd
+
+    from mf_horizon import HORIZONS
+
+    newest = max(s.dropna().index.max() for s in nav_panel.values() if len(s.dropna()))
+    M = MonthEnd().rollback(newest.normalize())
+    month = list(HORIZONS.values())  # all five, 3y included (owner decision 2026-11-14)
+
+    def run(root, nav, days, run_id="r1"):
+        return log_month_end(
+            run_id=run_id,
+            pipeline_sha="x",
+            manifest=manifest,
+            nav_panel=nav,
+            today=M + pd.Timedelta(days=days),
+            path=root / "predictions.jsonl",
+        )
+
+    # day 0-2: month-end NAVs still settling (late publishers) — pending, nothing written, not a skip
+    early = run(tmp / "p", nav_panel, 1)
+    assert all(early.get(h.target, {}).get("pending") is True and early[h.target]["appended"] == 0
+               and early[h.target]["skipped_month"] == 0 for h in month), f"FAIL: day 1 not pending: {early}"
+    assert not (tmp / "p").exists() or not any((tmp / "p").rglob("*.jsonl")), "FAIL: day 1 wrote rows"
+    # a NAV dated after today must not create a future anchor in an append-only ledger
+    code0 = next(c for c, s in nav_panel.items() if len(s.dropna()))
+    future = dict(nav_panel)
+    future[code0] = pd.concat([nav_panel[code0], pd.Series([1.0], index=[M + pd.Timedelta(days=40)])])
+    fut = run(tmp / "f", future, 1)
+    assert all(fut[h.target]["anchor"] == str(M.date()) for h in month), f"FAIL: future NAV moved the anchor: {fut}"
+
+    res = run(tmp / "a", nav_panel, 4)
+    for h in month:
+        r = res.get(h.target, {})
+        assert r.get("appended", 0) > 0 and r["skipped_month"] == 0, f"FAIL: {h.key} {r}"
+        rows = load_predictions(tmp / "a" / "predictions.jsonl", target=h.target)
+        assert len(rows) == r["appended"], f"FAIL: {h.key} {len(rows)} rows on disk vs {r}"
+        assert all(x["anchor"] == str(M.date()) and x["model_id"] == h.model_id for x in rows), f"FAIL: {h.key} rows"
+    assert (tmp / "a" / "cohort_q1" / f"{str(M.date())[:7]}.jsonl").exists(), "FAIL: 3y rows not in cohort_q1/"
+    # 3y's done-check must see a row at M in the legacy predictions.jsonl, not only the month file
+    h3 = HORIZONS["3y"]
+    (tmp / "l").mkdir()
+    seed = _row("A", "r0", h3.model_id, anchor=str(M.date()))
+    (tmp / "l" / "predictions.jsonl").write_text(json.dumps(seed, sort_keys=True) + "\n", encoding="utf-8")
+    leg = run(tmp / "l", nav_panel, 4)
+    assert leg["cohort_q1"]["appended"] == 0 and leg["cohort_q1"]["already_logged"], f"FAIL: legacy row at M missed: {leg}"
+
+    bumped = {c: s.where(s.index <= M, s * 1.37) for c, s in nav_panel.items()}
+    run(tmp / "b", bumped, 4)
+
+    def strip(root, h):
+        return sorted(
+            json.dumps({k: v for k, v in r.items() if k != "logged_at"}, sort_keys=True)
+            for r in load_predictions(root / "predictions.jsonl", target=h.target)
+        )
+
+    for h in month:
+        assert strip(tmp / "a", h) == strip(tmp / "b", h), f"FAIL: {h.key} rows depend on NAV after {M.date()}"
+    again = run(tmp / "a", nav_panel, 9, run_id="r2")
+    assert all(again[h.target]["appended"] == 0 for h in month), f"FAIL: second call same month: {again}"
+    late = run(tmp / "c", nav_panel, 11)
+    assert all(late[h.target]["skipped_month"] == 1 and late[h.target]["appended"] == 0 for h in month), late
+    assert not (tmp / "c").exists() or not any((tmp / "c").rglob("*.jsonl")), "FAIL: day 11 wrote rows"
+    print(
+        f"[selftest] month-end {M.date()}: rows at anchor=M for {[h.key for h in month]} "
+        f"({', '.join(str(res[h.target]['appended']) for h in month)}), post-M NAV ignored, "
+        "second call appends 0, day 1 pending, future NAV capped at today, day 11 skipped + counted — PASS"
+    )
+
+
+def _selftest_horizons(manifest: pd.DataFrame, nav_panel: Dict[str, pd.Series]) -> None:
+    import shutil
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for name, t in (("iso", _t_isolation), ("rot", _t_rotation), ("unk", _t_unknown_target), ("mat", _t_maturity)):
+            (tmp / name).mkdir()
+            t(tmp / name)
+        _t_month_end(tmp / "me", manifest, nav_panel)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -1065,8 +1437,9 @@ if __name__ == "__main__":
     ap.add_argument(
         "--build-reference",
         action="store_true",
-        help="(re)build psi_reference.json from the cohort model's training rows",
+        help="(re)build the PSI reference from the cohort model's training rows",
     )
+    ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT, help="with --build-reference (mf_horizon)")
     ap.add_argument(
         "--realize", action="store_true", help="join matured ledger predictions against fresh NAV data (offline job)"
     )
@@ -1075,9 +1448,15 @@ if __name__ == "__main__":
     if args.selftest:
         _selftest()
     elif args.build_reference:
-        ref = build_psi_reference()
-        LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), PSI_REFERENCE_PATH)
+        ref = build_psi_reference(horizon=args.horizon)
+        out = HORIZONS[args.horizon].psi_reference_path
+        LOGGER.info("psi reference built: %d features -> %s", len(ref["features"]), out)
     elif args.realize:
-        LOGGER.info("realize: %s", realize_matured_predictions())
+        # every registered target: one monthly job realizes every horizon's matured rows
+        manifest = load_manifest()
+        nav_panel = load_nav_panel(manifest)
+        for h in HORIZONS.values():
+            res = realize_matured_predictions(manifest=manifest, nav_panel=nav_panel, target=h.target)
+            LOGGER.info("realize %s: %s", h.target, res)
     else:
         ap.print_help()

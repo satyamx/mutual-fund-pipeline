@@ -29,7 +29,10 @@ rule the label uses (design §2: "NaN + a paired missingness indicator").
 
 Exclusions per §2.5: no current holdings, no TER/AUM, no fund-identity one-hots.
 
-Output: mf_cache/phase_b/features.parquet, keyed (amfi_code, anchor).
+Output: <horizon out_dir>/features.parquet, keyed (amfi_code, anchor) —
+mf_cache/phase_b/ for 3y, mf_cache/phase_b/<key>/ for 1m..1y. Features never
+depend on the horizon; only the (fund, anchor) rows do, because they are read
+from that horizon's labels.
 """
 
 from __future__ import annotations
@@ -42,11 +45,8 @@ import numpy as np
 import pandas as pd
 
 from mf_benchmarks import PeerProxyResolver, _asof
-from mf_datasources import CACHE
-from mf_labels import LABELS_PATH, load_manifest, load_nav_panel
-
-OUT_DIR = CACHE / "phase_b"
-FEATURES_PATH = OUT_DIR / "features.parquet"
+from mf_horizon import DEFAULT, HORIZONS, Horizon
+from mf_labels import load_manifest, load_nav_panel
 
 TRADING_DAYS = 252
 # Mirrors mf_pipeline.RISK_FREE_RATE_ANNUAL (not imported — heavy module).
@@ -368,15 +368,16 @@ def assemble_panel(engine: FeatureEngine, pairs: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
-def build_features(labels_path=LABELS_PATH) -> pd.DataFrame:
-    labels = pd.read_parquet(labels_path)
+def build_features(h: Horizon = HORIZONS[DEFAULT]) -> pd.DataFrame:
+    labels = pd.read_parquet(h.labels_path)
     pairs = labels[["amfi_code", "anchor"]].drop_duplicates()
     manifest = load_manifest()
-    nav_panel = load_nav_panel(manifest)
+    # 1m..1y: same offline, cut-at-D NAV the labels were built from
+    nav_panel = load_nav_panel(manifest) if h.legacy else load_nav_panel(manifest, offline=True, cutoff=h.data_cutoff)
     engine = FeatureEngine(manifest, nav_panel)
     panel = assemble_panel(engine, pairs)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    panel.to_parquet(FEATURES_PATH, index=False)
+    h.out_dir.mkdir(parents=True, exist_ok=True)
+    panel.to_parquet(h.features_path, index=False)
     return panel
 
 
@@ -422,10 +423,12 @@ if __name__ == "__main__":
     ap.add_argument(
         "--selftest", action="store_true", help="anti-lookahead test: perturb post-t NAVs, assert identical features"
     )
+    ap.add_argument("--horizon", choices=list(HORIZONS), default=DEFAULT)
     args = ap.parse_args()
     if args.selftest:
         sys.exit(0 if run_asof_selftest() else 1)
-    panel = build_features()
+    h = HORIZONS[args.horizon]
+    panel = build_features(h)
     n_num = panel.drop(columns=["amfi_code", "anchor"]).shape[1]
-    print(f"features: {panel.shape[0]} rows x {n_num} feature columns -> {FEATURES_PATH}")
+    print(f"features: {panel.shape[0]} rows x {n_num} feature columns -> {h.features_path}")
     print(panel.drop(columns=["amfi_code", "anchor"]).notna().mean().round(3).to_string())
