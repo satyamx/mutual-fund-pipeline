@@ -1350,6 +1350,14 @@ def verdict_rule(greens: int, reds: int, critical_breach: bool, score_is_red: bo
 
 
 TOP_DECILE_PERCENTILE = 0.90  # §6: the set the bar certified with lift > 1
+
+
+def top_decile(cs: Optional[Dict[str, Any]]) -> bool:
+    """OK and cohort percentile >= TOP_DECILE_PERCENTILE; a missing percentile is not top decile."""
+    pct = (cs or {}).get("cohort_percentile")
+    return bool(cs and cs.get("status") == "OK" and pct is not None and pct >= TOP_DECILE_PERCENTILE)
+
+
 HISTORY_FOR_ROLLING_MONTHS = 36  # §6: a sub-3y rolling share needs 3y of NAV to mean anything
 
 
@@ -1871,8 +1879,7 @@ class MasterOrchestrator:
                         from mf_infer import load_default
 
                         cs = score_live(dossier.amfi_code, inferencer=load_default(key), **score_kw)
-                    top = bool(cs and cs["status"] == "OK" and cs["cohort_percentile"] >= TOP_DECILE_PERCENTILE)
-                    hz.update(signal=cs, verdict=horizon_verdict(rec, hz["facts"]["consistency"], top, used))
+                    hz.update(signal=cs, verdict=horizon_verdict(rec, hz["facts"]["consistency"], top_decile(cs), used))
             except Exception as exc:  # noqa: BLE001 — see comment above
                 self.log.warning("Horizon block errored for %r: %s", dossier.scheme_name, exc)
                 horizons = None

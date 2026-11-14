@@ -42,7 +42,7 @@ Everything in v1 (`generated_at`, `pipeline_sha`, `model_id`, `default_profile`,
         "rows_total": 0, "last_anchor": null, "first_maturity": null, "n_realized": 0,
         "month_end": {
           "anchor": "2026-10-31", "appended": 0, "skipped_funds": 0,
-          "skipped_month": 0, "already_logged": false
+          "skipped_month": 0, "already_logged": false, "pending": false
         }
       }
     }
@@ -60,7 +60,8 @@ Everything in v1 (`generated_at`, `pipeline_sha`, `model_id`, `default_profile`,
   design; a real artifact never carries a made-up number.
 - `ledger` comes from the per-target ledger readers (`rows_total`, `last_anchor`; `first_maturity` and
   `n_realized` for this model id), plus `month_end` = this run's `mf_ledger.log_month_end` result for the
-  target (`null` for 3y, which logs daily, and when the run could not log).
+  target (`null` for 3y, which logs daily, and when the run could not log). `pending: true` means the
+  run fell in the first 3 days after the month-end, while NAVs settle: nothing written, not a skip.
 
 ## 3. Per fund
 
@@ -111,7 +112,8 @@ earned.
   null. The predictions still go to the ledger; they do not go to the artifact. "Never displayed" is then
   a property of the file, not a promise the app has to keep.
 - When it is `true`, `status` is the usual vocabulary (`OK`, `INSUFFICIENT_HISTORY`, `THIN_COHORT`,
-  `STALE_NAV`, …) and the numbers are present only for `OK`. `top_decile` is the one field the verdict
+  `STALE_NAV`, …), or `NOT_SCORED` when the fund was not scored at all (never null); the numbers are
+  present only for `OK`. `top_decile` is the one field the verdict
   reads.
 
 **Verdict** — the horizon's rule from `docs/horizons.md` §6. `signal_used` says whether a sixth colour took
@@ -128,7 +130,8 @@ history; TER, AUM, holdings and manager fields (unchanged from v1 — no free so
 
 ## 4. Transition
 
-1. The nightly emits both files from one run. Release assets: `mf_artifact_latest.json.gz` and
+1. The nightly emits both files from one run. v2 is best-effort: a v2 failure is logged and never blocks
+   v1, its ledger commit or its Release assets (the v2 asset is then not replaced that night). Release assets: `mf_artifact_latest.json.gz` and
    `latest.json` stay v1; `mf_artifact_v2_latest.json.gz` is added.
 2. Hisaab Kitaab ships a parser that accepts v2 (section 6).
 3. Retiring v1 is the owner's call, and not before a build that reads v2 is the one installed.

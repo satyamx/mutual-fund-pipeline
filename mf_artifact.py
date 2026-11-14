@@ -87,7 +87,7 @@ import pandas as pd
 import mf_eval
 import mf_ledger
 import mf_live_score  # STATUSES_WITH_IMPUTATION — imported, never restated
-from mf_agent_orchestrator import TODAY, TOP_DECILE_PERCENTILE, InvestorProfile, MasterOrchestrator
+from mf_agent_orchestrator import TODAY, InvestorProfile, MasterOrchestrator, top_decile
 from mf_datasources import CACHE
 from mf_horizon import DEFAULT as DEFAULT_HORIZON
 from mf_horizon import HORIZONS, load_stamp
@@ -316,15 +316,16 @@ _SIGNAL_NUMBERS = ("top_decile", "percentile", "probability", "cohort_n", "n_imp
 
 def _v2_signal(cs: Optional[Dict[str, Any]], admitted: bool) -> Dict[str, Any]:
     """A non-admitted horizon is WITHHELD with every number null — "never displayed" is a
-    property of the file. An admitted one carries the usual status, numbers on OK only."""
+    property of the file. An admitted one carries the usual status, numbers on OK only, and
+    NOT_SCORED when it was not scored at all — a status is always named, never null."""
     if not admitted:
         return dict(status="WITHHELD", **dict.fromkeys(_SIGNAL_NUMBERS))
-    if not cs or cs["status"] != "OK":
-        return dict(status=cs["status"] if cs else None, **dict.fromkeys(_SIGNAL_NUMBERS))
+    if not cs or cs.get("status") != "OK":
+        return dict(status=(cs or {}).get("status") or "NOT_SCORED", **dict.fromkeys(_SIGNAL_NUMBERS))
     n_imp, n_feat = len(cs["imputed_features"]), cs.get("n_features")
     return dict(
         status="OK",
-        top_decile=bool(cs["cohort_percentile"] >= TOP_DECILE_PERCENTILE),
+        top_decile=top_decile(cs),
         percentile=_finite_or_none(cs["cohort_percentile"]),
         probability=_finite_or_none(cs["probability"]),
         cohort_n=cs["cohort_n"],
@@ -527,16 +528,22 @@ def build_artifacts(
         evaluation=evaluation,
         funds=records,
     )
-    admitted = set(orch.signal_horizons)
-    menu = horizon_menu(admitted, ledger_path, realizations_path, month_end)
-    keys = [m["key"] for m in menu]
-    v2 = {
-        **v1,
-        "artifact_version": ARTIFACT_V2_VERSION,
-        "default_horizon": DEFAULT_HORIZON,
-        "horizons": menu,
-        "funds": [{**r, "horizons": _v2_horizons(hz, keys, admitted)} for r, hz in zip(records, horizon_blocks)],
-    }
+    # v2 is best-effort: whatever goes wrong deriving it, v1 (and the ledger append above,
+    # which the nightly commits) is returned untouched and v2 is None.
+    try:
+        admitted = set(orch.signal_horizons)
+        menu = horizon_menu(admitted, ledger_path, realizations_path, month_end)
+        keys = [m["key"] for m in menu]
+        v2 = {
+            **v1,
+            "artifact_version": ARTIFACT_V2_VERSION,
+            "default_horizon": DEFAULT_HORIZON,
+            "horizons": menu,
+            "funds": [{**r, "horizons": _v2_horizons(hz, keys, admitted)} for r, hz in zip(records, horizon_blocks)],
+        }
+    except Exception as exc:  # noqa: BLE001 — see comment above
+        LOGGER.error("mf_artifact_v2 derivation failed, v1 unaffected: %s", exc)
+        v2 = None
     return v1, v2
 
 
@@ -663,11 +670,22 @@ def _selftest_v2(v1: Dict[str, Any], v2: Dict[str, Any], v2_forced: Dict[str, An
                 else:
                     n_admitted += 1
                     ok = sig.get("status") == "OK"
+                    check("3 admitted status is named, never null", sig.get("status") is not None, f"{k}: {sig}")
                     check("3 admitted numbers iff OK", all((v is not None) == ok for v in nums.values()), f"{k}: {sig}")
                     check("3 admitted signal_used", vd.get("signal_used") is True, k)
                     want_c = "green" if ok and sig["top_decile"] else "grey"
                     check("3 sixth colour", (vd.get("metric_colors") or {}).get("signal") == want_c, f"{k}: {vd}")
     check("3 both cases exercised", n_withheld > 0 and n_admitted > 0, f"withheld={n_withheld} admitted={n_admitted}")
+    # an admitted horizon with no score at all (resources down, unscoreable fund) is NOT_SCORED
+    unscored = _v2_signal(None, True)
+    check("3 unscored admitted -> NOT_SCORED", unscored["status"] == "NOT_SCORED", repr(unscored))
+    check("3 unscored admitted -> numbers null", all(v is None for k, v in unscored.items() if k != "status"))
+    try:  # a missing percentile is not top decile, never a crash (it used to drop the facts too)
+        nop = _v2_signal(dict(status="OK", cohort_percentile=None, probability=0.3, cohort_n=20,
+                              imputed_features=[], n_features=10), True)
+        check("3 OK with null percentile -> not top decile", nop["top_decile"] is False, repr(nop))
+    except Exception as exc:  # noqa: BLE001 — a crash here is the RED
+        check("3 OK with null percentile -> not top decile", False, repr(exc))
     # The sixth colour on a fixture: it can add one green, never a red.
     rec = dict(
         metric_colors=dict(cagr="green", excess_cagr_3y="green", sortino_3y="amber", max_dd_3y="red",
@@ -786,7 +804,38 @@ def _selftest() -> None:
             )
         finally:
             orch.signal_horizons = _real
-        red = _selftest_v2(artifact, v2, v2_forced)
+        # v2 is best-effort: forced to raise, build_artifacts still returns the same v1 and None
+        # own directory: rotated rows live beside the ledger path, so a shared tmpdir would
+        # hand this run the first run's rows and a different monitoring block
+        global horizon_menu
+        _hm = horizon_menu
+
+        def _boom(*a, **k):
+            raise RuntimeError("forced v2 failure (selftest)")
+
+        horizon_menu = _boom
+        try:
+            got = build_artifacts(names, orch=orch, profile=profile, ledger_path=tmpdir / "boom" / "predictions.jsonl",
+                                  realizations_path=tmpdir / "boom" / "realizations.jsonl")
+        except Exception as exc:  # noqa: BLE001 — a crash here is the RED
+            got = ("raised", repr(exc))
+        finally:
+            horizon_menu = _hm
+
+        def _vol(d):
+            d = json.loads(json.dumps(d))
+            d.pop("generated_at", None)
+            d["monitoring"]["ledger"].pop("path", None)
+            return d
+
+        red = []
+        if not (got[1] is None and isinstance(got[0], dict) and _vol(got[0]) == _vol(artifact)):
+            _d = [k for k in artifact if isinstance(got[0], dict) and _vol(got[0]).get(k) != _vol(artifact).get(k)]
+            print(f"RED  [v2 best-effort] a v2 failure must return (same v1, None): v2={str(got[1])[:60]} differing={_d}")
+            red.append("best-effort")
+        else:
+            print("[selftest] v2 best-effort: a forced v2 failure returns the same v1 and None — PASS")
+        red += _selftest_v2(artifact, v2, v2_forced)
         assert not red, "FAIL: mf_artifact_v2 pins RED: " + "; ".join(red)
 
         # Re-running the same batch against the same ledger must be idempotent (dedupe).
@@ -1134,7 +1183,12 @@ if __name__ == "__main__":
         LOGGER.info("Scoring %d funds against the default investor profile...", len(names))
         artifact, v2 = build_artifacts(names)
         path = write_artifact(artifact, Path(args.out) if args.out else OUT_DIR)
-        LOGGER.info("Wrote %s -> %s", v2["artifact_version"], write_artifact(v2, Path(args.out) if args.out else OUT_DIR))
+        # v2 after v1, best-effort: a v2 failure is logged, never a non-zero exit
+        try:
+            if v2 is not None:
+                LOGGER.info("Wrote %s -> %s", v2["artifact_version"], write_artifact(v2, Path(args.out) if args.out else OUT_DIR))
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            LOGGER.error("mf_artifact_v2 not written: %s", exc)
         LOGGER.info(
             "Wrote %s (%d funds, %d errors) -> %s",
             artifact["artifact_version"],

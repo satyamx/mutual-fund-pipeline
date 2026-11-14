@@ -189,14 +189,21 @@ jobs:
           # v1 by name: the emit writes v2 beside it, and the app's URL must stay v1.
           SRC="$(ls -t mf_cache/artifacts/mf_artifact_v1_*.json.gz 2>/dev/null | head -1 || true)"
           SRC2="$(ls -t mf_cache/artifacts/mf_artifact_v2_*.json.gz 2>/dev/null | head -1 || true)"
-          if [ -z "${SRC:-}" ] || [ -z "${SRC2:-}" ]; then
+          if [ -z "${SRC:-}" ]; then
             echo "::error::no artifact to publish — the emit step wrote nothing"
             exit 1
           fi
-          echo "publishing $SRC and $SRC2"
+          echo "publishing $SRC"
           mkdir -p dist
           cp "$SRC" dist/mf_artifact_latest.json.gz
-          cp "$SRC2" dist/mf_artifact_v2_latest.json.gz  # docs/design/mf_artifact_v2.md §4
+          # v2 is best-effort (docs/design/mf_artifact_v2.md §4) and never blocks v1. It must be
+          # THIS run's: the restored cache holds earlier nights' files, so one older than v1 is stale.
+          V2=""
+          if [ -n "${SRC2:-}" ] && ! [ "$SRC" -nt "$SRC2" ]; then
+            cp "$SRC2" dist/mf_artifact_v2_latest.json.gz && V2="dist/mf_artifact_v2_latest.json.gz"
+          else
+            echo "::warning::mf_artifact_v2 not written this run"
+          fi
 
           # The sidecar is READ OUT of the artifact, so it can never disagree with it.
           python - <<'PY'
@@ -229,5 +236,5 @@ jobs:
           gh release upload "$TAG" \
             dist/mf_artifact_latest.json.gz \
             dist/latest.json \
-            dist/mf_artifact_v2_latest.json.gz \
+            $V2 \
             --clobber
