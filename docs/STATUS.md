@@ -21,9 +21,17 @@ Five horizons, each fitted and scored once on its causal holdout (`docs/horizons
   red); 6m, 1y and 3y run the five-colour rule and ship their signal `WITHHELD`. Nothing enters the v1
   verdict, which is unchanged; the 3y per-horizon verdict equals it for every fund (selftest pin).
 - **Ledger:** rotated per target/month (`ledger/<target>/<YYYY-MM>.jsonl`; `predictions.jsonl` is never
-  rewritten). 1m/3m/6m/1y log month-end anchors only, within 10 days of the month-end; 3y still logs daily.
+  rewritten). 1m/3m/6m/1y log month-end anchors only, from day 3 to day 10 after the month-end; 3y still logs daily.
+  Takes effect on merge: the first month-end rows would be anchored 2026-11-30.
 - **Artifact:** the nightly publishes `mf_artifact_latest.json.gz` + `latest.json` as v1, unchanged, and
   `mf_artifact_v2_latest.json.gz` beside them (`docs/design/mf_artifact_v2.md`).
+- **Checked before hand-off:** the v1 document is identical to master's (`373ce20`) over all 565 funds on
+  the same cache; all nine selftests pass, including on a cache with no 1m–1y research files; the real
+  ledger did not change by a byte. Offline, the emit took 67 s on this branch against 1,392 s on master
+  (one universe panel per run instead of one per fund) — measured locally, not yet seen in CI.
+- **Known and left:** the evaluate-once guard is keyed by horizon, not model id (a refit must archive the
+  old stamp first); `mf_cv` creates `./mf_cache` on import; `mf_live_score.py:584` and `mf_ledger.py:1129`
+  hardcode `mf_cache/phase_b` and ignore `MF_CACHE_DIR`.
 - **Open owner decisions:** (1) whether 3y logging should move from daily to month-end; (2) the Hisaab
   Kitaab v2 parser and tables are a separate session (`docs/design/mf_artifact_v2.md` §6).
 
