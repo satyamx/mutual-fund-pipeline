@@ -114,10 +114,11 @@ jobs:
       # 14 minutes, re-scored one historical anchor, deduped against rows that
       # already existed, appended NOTHING, and reported success — every single
       # night. TODAY now tracks the real date, and this gate makes a relapse fail
-      # loudly. 7 days tolerates a weekend plus a couple of missed runs; it does NOT
-      # fire on an ordinary same-day re-run, which legitimately appends zero rows.
+      # loudly. 45 days: since 2026-11-14 every horizon, 3y included, logs month-end
+      # anchors only (day 3..10 after M), so a healthy newest anchor is up to ~41 days
+      # old; it does NOT fire on an ordinary night, which legitimately appends zero rows.
       - name: Emit batch artifact (+ append prediction ledger)
-        run: python mf_artifact.py --max-error-rate 0.25 --max-anchor-age-days 7
+        run: python mf_artifact.py --max-error-rate 0.25 --max-anchor-age-days 45
 
       - name: Commit the prediction ledger (git-tracked, unbackfillable)
         run: |

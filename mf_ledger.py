@@ -787,7 +787,8 @@ def log_month_end(
     path: Path = PREDICTIONS_PATH,
     inferencers: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Month-end rows for every non-3y horizon (docs/horizons.md §7) — the forward
+    """Month-end rows for every horizon, 3y included (docs/horizons.md §7; 3y by owner
+    decision 2026-11-14) — the forward
     test samples what the holdout sampled. M = the latest month-end <= the newest
     NAV in `nav_panel`. A target already holding rows at M for its model id is
     done; else, if `today` is MONTH_END_SETTLE_DAYS..MONTH_END_WINDOW_DAYS after M (earlier
@@ -795,7 +796,7 @@ def log_month_end(
     as of M (NAV <= M only — nothing after M can reach a row) and every horizon
     scores it: one row per fund that is OK and whose own as-of NAV is within that
     horizon's tolerance of M, anchor = M. Later than that the month is skipped and
-    counted, never backfilled. 3y keeps its daily path. `inferencers`: optional
+    counted, never backfilled. `inferencers`: optional
     {horizon key: CohortInferencer}, else the process singletons.
     Returns {target: {anchor, appended, skipped_funds, skipped_month, already_logged, pending}}."""
     from pandas.tseries.offsets import MonthEnd
@@ -810,11 +811,8 @@ def log_month_end(
     out: Dict[str, Dict[str, Any]] = {}
     todo = []
     for h in HORIZONS.values():
-        if h.legacy:
-            continue
-        # rows at anchor M can only live in M's month file (rotation is by anchor month)
-        month_file = path.parent / h.target / f"{anchor[:7]}.jsonl"
-        done = any(r.get("anchor") == anchor and r.get("model_id") == h.model_id for r in read_jsonl(month_file))
+        # per-target reader: 3y's rows at M may also sit in the legacy predictions.jsonl
+        done = any(r.get("anchor") == anchor and r.get("model_id") == h.model_id for r in _read_target(path, h.target))
         late = (today - M).days > MONTH_END_WINDOW_DAYS
         pending = not done and (today - M).days < MONTH_END_SETTLE_DAYS  # not a skip: a later run logs it
         out[h.target] = dict(
@@ -1356,7 +1354,7 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
 
     newest = max(s.dropna().index.max() for s in nav_panel.values() if len(s.dropna()))
     M = MonthEnd().rollback(newest.normalize())
-    month = [h for h in HORIZONS.values() if not h.legacy]
+    month = list(HORIZONS.values())  # all five, 3y included (owner decision 2026-11-14)
 
     def run(root, nav, days, run_id="r1"):
         return log_month_end(
@@ -1370,7 +1368,7 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
 
     # day 0-2: month-end NAVs still settling (late publishers) — pending, nothing written, not a skip
     early = run(tmp / "p", nav_panel, 1)
-    assert all(early[h.target].get("pending") is True and early[h.target]["appended"] == 0
+    assert all(early.get(h.target, {}).get("pending") is True and early[h.target]["appended"] == 0
                and early[h.target]["skipped_month"] == 0 for h in month), f"FAIL: day 1 not pending: {early}"
     assert not (tmp / "p").exists() or not any((tmp / "p").rglob("*.jsonl")), "FAIL: day 1 wrote rows"
     # a NAV dated after today must not create a future anchor in an append-only ledger
@@ -1387,7 +1385,14 @@ def _t_month_end(tmp: Path, manifest: pd.DataFrame, nav_panel: Dict[str, pd.Seri
         rows = load_predictions(tmp / "a" / "predictions.jsonl", target=h.target)
         assert len(rows) == r["appended"], f"FAIL: {h.key} {len(rows)} rows on disk vs {r}"
         assert all(x["anchor"] == str(M.date()) and x["model_id"] == h.model_id for x in rows), f"FAIL: {h.key} rows"
-    assert not load_predictions(tmp / "a" / "predictions.jsonl"), "FAIL: month-end logging wrote 3y rows"
+    assert (tmp / "a" / "cohort_q1" / f"{str(M.date())[:7]}.jsonl").exists(), "FAIL: 3y rows not in cohort_q1/"
+    # 3y's done-check must see a row at M in the legacy predictions.jsonl, not only the month file
+    h3 = HORIZONS["3y"]
+    (tmp / "l").mkdir()
+    seed = _row("A", "r0", h3.model_id, anchor=str(M.date()))
+    (tmp / "l" / "predictions.jsonl").write_text(json.dumps(seed, sort_keys=True) + "\n", encoding="utf-8")
+    leg = run(tmp / "l", nav_panel, 4)
+    assert leg["cohort_q1"]["appended"] == 0 and leg["cohort_q1"]["already_logged"], f"FAIL: legacy row at M missed: {leg}"
 
     bumped = {c: s.where(s.index <= M, s * 1.37) for c, s in nav_panel.items()}
     run(tmp / "b", bumped, 4)

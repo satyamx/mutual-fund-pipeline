@@ -60,7 +60,7 @@ Everything in v1 (`generated_at`, `pipeline_sha`, `model_id`, `default_profile`,
   design; a real artifact never carries a made-up number.
 - `ledger` comes from the per-target ledger readers (`rows_total`, `last_anchor`; `first_maturity` and
   `n_realized` for this model id), plus `month_end` = this run's `mf_ledger.log_month_end` result for the
-  target (`null` for 3y, which logs daily, and when the run could not log). `pending: true` means the
+  target, 3y included (`null` when the run could not log). `pending: true` means the
   run fell in the first 3 days after the month-end, while NAVs settle: nothing written, not a skip.
 
 ## 3. Per fund

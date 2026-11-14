@@ -391,8 +391,8 @@ def horizon_menu(
                     last_anchor=stats["last_anchor"],
                     first_maturity=rs["earliest_maturity"],
                     n_realized=rs["n_realized"],
-                    # this run's month-end logging; 3y logs daily, so null by design
-                    month_end=None if h.legacy else (month_end or {}).get(h.target),
+                    # this run's month-end logging (all five horizons, 3y included)
+                    month_end=(month_end or {}).get(h.target),
                 ),
             )
         )
@@ -415,9 +415,9 @@ def build_artifacts(
     by adding keys only (docs/design/mf_artifact_v2.md §1). Runs ONE MasterOrchestrator(live=True) (reused across every fund so its
     RealNAVStore fund cache and cohort-scoring resources build once) against
     `profile` (defaults to InvestorProfile()'s own baseline), and assembles the
-    full versioned artifact. Every OK cohort_signal is appended to the
-    (git-tracked) prediction ledger — see mf_ledger.py for why this must happen
-    now even though nothing can be realized for ~3 years."""
+    full versioned artifact. The 3y cohort_signal is scored daily for the document;
+    the (git-tracked) prediction ledger takes month-end rows only, every horizon
+    (mf_ledger.log_month_end; 3y by owner decision 2026-11-14)."""
     orch = orch if orch is not None else MasterOrchestrator(live=True)
     profile = profile if profile is not None else InvestorProfile()
     is_default_profile = profile.model_dump(mode="json") == InvestorProfile().model_dump(mode="json")
@@ -446,13 +446,11 @@ def build_artifacts(
             model_id=orch.cohort_model_id,
         )
         if row is not None:
-            ledger_rows.append(row)
-    n_appended = mf_ledger.append_predictions(ledger_rows, path=ledger_path)
+            ledger_rows.append(row)  # in memory only: rank_stability's current_rows, never appended
 
     live_res = orch.cohort_live_resources()
-    # Month-end rows for 1m/3m/6m/1y (docs/horizons.md §7), once per run, after the 3y
-    # append. A failure costs this month's rows (reported as month_end null in v2),
-    # never the v1 document.
+    # Month-end rows for all five horizons (docs/horizons.md §7), once per run. A failure
+    # costs this month's rows (reported as month_end null in v2), never the v1 document.
     month_end = None
     if live_res is not None:
         try:
@@ -466,6 +464,7 @@ def build_artifacts(
             )
         except Exception as exc:  # noqa: BLE001 — see comment above
             LOGGER.error("Month-end ledger logging failed: %s", exc)
+    n_appended = ((month_end or {}).get(mf_ledger.DEFAULT_TARGET) or {}).get("appended", 0)  # 0 most nights
     psi = (
         mf_ledger.compute_psi_live(live_res[0], live_res[1], live_res[3], TODAY, orch.cohort_model_id)
         if live_res is not None
@@ -733,13 +732,22 @@ def _selftest() -> None:
     import shutil
     import tempfile
 
+    global TODAY
     tmpdir = Path(tempfile.mkdtemp())
+    _today = TODAY
     try:
         ledger_path = tmpdir / "predictions.jsonl"  # never touch the real ledger/ from a selftest
         realizations_path = tmpdir / "realizations.jsonl"
 
         names = _load_scheme_names(limit=3)
         orch = MasterOrchestrator(live=True)
+        # Pin a NON-window day (M + 1: month-end NAVs still settling) so no build here
+        # appends month-end rows whatever the calendar says; M as log_month_end derives it.
+        from pandas.tseries.offsets import MonthEnd
+
+        _nav = orch.cohort_live_resources()[1]
+        _newest = max(s.dropna().index.max() for s in _nav.values() if len(s.dropna()))
+        TODAY = MonthEnd().rollback(min(_newest.normalize(), _today)) + pd.Timedelta(days=1)
         profile = InvestorProfile()
         artifact, v2 = build_artifacts(
             names, orch=orch, profile=profile, ledger_path=ledger_path, realizations_path=realizations_path
@@ -768,7 +776,11 @@ def _selftest() -> None:
             "REFERENCE_STALE",
         )
         assert m["rank_stability"]["status"] == "FIRST_RUN"  # fresh tmp ledger, no prior run
-        assert m["ledger"]["rows_appended_this_run"] == artifact["coverage"]["n_ok"]
+        # 3y logs month-end anchors only (owner decision 2026-11-14): a non-window day appends
+        # nothing, yet every fund still carries its daily-scored 3y signal in v1.
+        assert m["ledger"]["rows_appended_this_run"] == 0, f"FAIL: non-window day appended {m['ledger']}"
+        assert all(f["signal_a"]["cohort_status"] for f in artifact["funds"]), "FAIL: a fund lost its 3y signal"
+        assert any(f["signal_a"]["cohort_q1_prob"] is not None for f in artifact["funds"]), "FAIL: no 3y score at all"
         print(
             f"[selftest] monitoring{{}}: realized_ic honestly null "
             f"(status={m['realized_ic']['status']}), psi status={m['psi']['status']}, "
@@ -845,13 +857,10 @@ def _selftest() -> None:
         assert artifact2["monitoring"]["ledger"]["rows_appended_this_run"] == 0, (
             "FAIL: re-running the same anchors should append zero new ledger rows"
         )
-        # Only 3 funds in this test batch (< mf_ledger.MIN_COMMON_FOR_STABILITY=20), so
-        # the honest outcome is INSUFFICIENT_OVERLAP, not a fabricated correlation —
-        # it must still find last run's rows (prev_run_id set), just not enough of them.
+        # Nothing was logged on a non-window day, so there is no previous 3y run to compare
+        # against: FIRST_RUN, not a correlation against rows that were never written.
         rs = artifact2["monitoring"]["rank_stability"]
-        assert rs["status"] == "INSUFFICIENT_OVERLAP" and rs["n_common"] == 3 and rs["prev_run_id"], (
-            f"FAIL: expected INSUFFICIENT_OVERLAP with n_common=3, got {rs}"
-        )
+        assert rs["status"] == "FIRST_RUN", f"FAIL: expected FIRST_RUN with nothing logged, got {rs}"
         print("[selftest] ledger idempotency across repeated batch runs — PASS")
 
         required_top = {
@@ -1138,6 +1147,7 @@ def _selftest() -> None:
         assert reloaded == artifact, "FAIL: gzip round-trip changed the artifact"
         print(f"[selftest] gzip round-trip ({path.stat().st_size} bytes) — PASS")
     finally:
+        TODAY = _today
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     print(
@@ -1169,7 +1179,8 @@ if __name__ == "__main__":
         default=None,
         help="exit non-zero if the NEWEST prediction anchor is more than this "
         "many days behind the run date. Off by default; the scheduled job "
-        "sets it. Catches a pipeline that has stopped tracking time — a "
+        "sets it (45: 3y anchors are month-ends, up to ~41 days old on a "
+        "healthy run). Catches a pipeline that has stopped tracking time — a "
         "frozen TODAY pinned every anchor for weeks while the nightly "
         "reported success and appended nothing.",
     )
@@ -1201,8 +1212,8 @@ if __name__ == "__main__":
         # The first real CI run emitted 18 of 136 funds and still reported success,
         # because nothing here ever returned non-zero — the artifact is written
         # before this check precisely so a failing run is still inspectable.
-        # Zero appended rows is normal (a same-day re-run has nothing new to say),
-        # so it is logged, not failed on. What IS reported loudly, every run.
+        # Zero appended rows is normal: 3y logs month-end anchors only, so most nights
+        # (and every re-run) append nothing. Logged, not failed on, every run.
         led = (artifact.get("monitoring") or {}).get("ledger") or {}
         LOGGER.info(
             "Ledger: %s rows total, %s appended this run, newest anchor %s",
@@ -1210,11 +1221,11 @@ if __name__ == "__main__":
             led.get("rows_appended_this_run"),
             led.get("last_anchor"),
         )
-        if not led.get("rows_appended_this_run"):
-            LOGGER.warning(
-                "No new prediction rows were appended — expected on a re-run, "
-                "but if it repeats across days the anchor has stopped advancing."
-            )
+        # Warn only inside the day-3..10 month-end window when nothing was appended or
+        # already logged — read from v2's 3y entry, since v1's shape is frozen.
+        me3 = next((h["ledger"]["month_end"] for h in (v2 or {}).get("horizons", []) if h["key"] == "3y"), None)
+        if me3 and not (me3["appended"] or me3["already_logged"] or me3["pending"] or me3["skipped_month"]):
+            LOGGER.warning("Month-end window for %s: no 3y prediction rows appended or already logged.", me3["anchor"])
 
         failures = []
         # A batch that drops most of the universe is a FAILED run, not a thin one.
