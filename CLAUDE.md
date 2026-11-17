@@ -2,6 +2,8 @@
 
 Guidance for Claude Code working in this repo. (User-global rules in `~/.claude/CLAUDE.md` also apply.)
 
+**Cross-repo tracker:** open Fable/Opus/Sonnet work and owner blockers for this repo live in `docs/ROADMAP_2026-11.md` §0 of `satyamx/money-manager-app` (read it from `master`; locally `C:/Users/Satyam/Projects/MoneyManagerApp/Hisaab Kitaab`). Read it before picking up work. When your work changes an item's state, update §0 there by PR, writing the row in its post-merge wording, or name the stale §0 line in your final report. Cloud sessions do not load `~/.claude/CLAUDE.md`, so this line is their only pointer.
+
 ## What this is
 A **NAV-only Indian mutual-fund analysis pipeline** — a Python batch that fetches free public data, computes honest quant/compliance facts per fund, and emits a screen + recommendation. The intended consumer is the **Hisaab Kitaab** Flutter app (separate repo) via a batch-artifact handoff (versioned JSON → Drift/SQLite). Python does not run in the app.
 
